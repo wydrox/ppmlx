@@ -1,5 +1,5 @@
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
 # Mock all ppmlx modules before importing cli

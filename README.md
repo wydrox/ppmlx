@@ -11,7 +11,7 @@
 ## Install
 
 ```bash
-pip install ppmlx
+uv tool install ppmlx
 ```
 
 > Requires macOS on Apple Silicon (M1+) and Python 3.11+
@@ -29,13 +29,13 @@ ppmlx serve                 # start API server on :6767
 ### curl | sh (one-liner)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PingCompany/ppmlx/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/the-focus-company/ppmlx/main/scripts/install.sh | sh
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/PingCompany/ppmlx
+git clone https://github.com/the-focus-company/ppmlx
 cd ppmlx
 uv tool install .
 ```
@@ -90,14 +90,6 @@ Measured on a MacBook Pro M4 Pro (48 GB unified memory, macOS 15.x). Each scenar
 > **tok/s** = tokens per second (higher is better). **TTFT** = time to first token (lower is better). Delta is relative to Ollama.
 
 **Methodology.** Streaming chat completions over the OpenAI-compatible API; TTFT measured from request start to first SSE content chunk. See [`scripts/bench_common.sh`](scripts/bench_common.sh) and the per-model scripts in `scripts/` for the full, reproducible setup.
-
-### TurboQuant — KV Cache Compression
-
-Native implementation of [Google's TurboQuant (ICLR 2026)](https://arxiv.org/abs/2504.19874) for Apple Silicon. Compresses KV cache 4–5x with near-zero quality loss — a 9B model at 64k context goes from 1 GB to 256 MB.
-
-**[Read more on ppmlx.dev/turboquant](https://ppmlx.dev/turboquant/)**
-
----
 
 That's it. Any OpenAI-compatible tool works out of the box:
 

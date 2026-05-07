@@ -1529,7 +1529,7 @@ def config_cmd(
             raise typer.Exit(1)
         msgs = []
         if hf_token is not None:
-            msgs.append(f"HuggingFace token saved")
+            msgs.append("HuggingFace token saved")
         if thinking is not None:
             msgs.append(f"Thinking {'enabled' if thinking else 'disabled'}")
         if reasoning_budget is not None:

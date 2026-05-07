@@ -48,7 +48,13 @@ sys.modules["ppmlx.memory"].get_system_ram_gb = MagicMock(return_value=16.0)
 # Set up mock config
 mock_config = MagicMock()
 mock_config.logging = SimpleNamespace(snapshot_interval_seconds=60)
+mock_config.server = SimpleNamespace(max_tools_tokens=12000)
 mock_config.tool_awareness = SimpleNamespace(mode="no_tools_only")
+mock_config.thinking = SimpleNamespace(
+    enabled=True,
+    default_reasoning_budget=2048,
+    effort_to_budget=lambda effort: {"low": 256, "medium": 1024, "high": 8192}.get(effort.lower()),
+)
 sys.modules["ppmlx.config"].load_config = MagicMock(return_value=mock_config)
 
 import pytest
@@ -58,6 +64,10 @@ from ppmlx.server import app
 
 @pytest.fixture
 def client():
+    from ppmlx import config as config_module
+
+    mock_config.tool_awareness.mode = "no_tools_only"
+    config_module.load_config = MagicMock(return_value=mock_config)
     with TestClient(app) as c:
         yield c
 

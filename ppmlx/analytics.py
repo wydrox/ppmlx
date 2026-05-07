@@ -5,9 +5,14 @@ import platform
 import threading
 from typing import Any
 
-from posthog import Posthog
-
 from ppmlx import __version__
+
+try:
+    from posthog import Posthog as _Posthog
+except ImportError:
+    _Posthog = None  # type: ignore[assignment]
+
+Posthog = _Posthog
 
 
 def _truthy(value: Any, default: bool = False) -> bool:
@@ -42,7 +47,7 @@ def _sanitize_data(data: dict[str, Any] | None) -> dict[str, int | float | bool]
 
 
 _CLIENT_LOCK = threading.Lock()
-_CLIENT_CACHE: tuple[str, str, Posthog] | None = None
+_CLIENT_CACHE: tuple[str, str, Any] | None = None
 
 
 def _get_settings() -> tuple[bool, str, str]:
@@ -80,7 +85,10 @@ def _payload(data: dict[str, Any] | None) -> dict[str, Any]:
     return clean
 
 
-def _get_client(host: str, project_api_key: str) -> Posthog:
+def _get_client(host: str, project_api_key: str) -> Any:
+    if Posthog is None:
+        return None
+
     global _CLIENT_CACHE
     cached = _CLIENT_CACHE
     if cached and cached[0] == host and cached[1] == project_api_key:
