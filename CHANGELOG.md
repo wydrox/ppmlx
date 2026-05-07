@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-05-07
+
+### Added
+- Model-aware process titles for `ppmlx run <model>` and `ppmlx serve <model>`.
+- Safe CLI/API error tracking for analytics.
+
+### Changed
+- Updated analytics configuration to the current PostHog project.
+- Require `mlx-lm>=0.31.3` for Gemma 4 model support.
+
+### Fixed
+- Gemma 4 loading via the dynamic registry no longer fails with unsupported `gemma4` model type.
+- Anthropic `/v1/messages` streaming no longer consumes MLX generation from a background thread, avoiding MLX thread-local stream crashes.
+- Anthropic tool/agent requests disable thinking so responses surface as visible text/tool output instead of hidden reasoning only.
+- Plain model output is no longer incorrectly treated as hidden thinking when the model does not start inside a `<think>` block.
+
 ## [0.4.2] - 2026-04-01
 
 ### Added
