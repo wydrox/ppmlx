@@ -41,6 +41,13 @@ class LoggingConfig:
 @dataclass
 class MemoryConfig:
     wired_limit_mb: int = 0
+    mode: str = "off"  # off | shadow | compact | inject
+    max_candidates_per_event: int = 12
+    rolling_tokens: int = 10000
+    hot_tail_tokens: int = 6500
+    session_context_tokens: int = 2000
+    compact_threshold_tokens: int = 12000
+    max_context_items: int = 40
 
 
 @dataclass
@@ -96,6 +103,24 @@ def get_ppmlx_dir() -> Path:
 
 def _parse_bool(v: str) -> bool:
     return v.lower() not in ("0", "false", "no")
+
+
+def _normalize_memory_mode(value: Any) -> str:
+    raw = str(value).strip().lower()
+    aliases = {
+        "0": "off",
+        "false": "off",
+        "no": "off",
+        "off": "off",
+        "1": "shadow",
+        "true": "shadow",
+        "yes": "shadow",
+        "on": "shadow",
+        "shadow": "shadow",
+        "compact": "compact",
+        "inject": "inject",
+    }
+    return aliases.get(raw, "off")
 
 
 def _normalize_tool_awareness_mode(value: Any) -> str:
@@ -173,6 +198,13 @@ def _apply_toml(cfg: Config, data: dict) -> None:
     if "memory" in data:
         m = data["memory"]
         if "wired_limit_mb" in m: cfg.memory.wired_limit_mb = int(m["wired_limit_mb"])
+        if "mode" in m: cfg.memory.mode = _normalize_memory_mode(m["mode"])
+        if "max_candidates_per_event" in m: cfg.memory.max_candidates_per_event = int(m["max_candidates_per_event"])
+        if "rolling_tokens" in m: cfg.memory.rolling_tokens = int(m["rolling_tokens"])
+        if "hot_tail_tokens" in m: cfg.memory.hot_tail_tokens = int(m["hot_tail_tokens"])
+        if "session_context_tokens" in m: cfg.memory.session_context_tokens = int(m["session_context_tokens"])
+        if "compact_threshold_tokens" in m: cfg.memory.compact_threshold_tokens = int(m["compact_threshold_tokens"])
+        if "max_context_items" in m: cfg.memory.max_context_items = int(m["max_context_items"])
     if "registry" in data:
         r = data["registry"]
         if "enabled" in r: cfg.registry.enabled = bool(r["enabled"])
@@ -213,6 +245,13 @@ def _apply_env(cfg: Config) -> None:
         "PPMLX_LOG_ENABLED": ("logging", "enabled", _parse_bool),
         "PPMLX_LOG_SNAPSHOT_INTERVAL": ("logging", "snapshot_interval_seconds", int),
         "PPMLX_MEMORY_WIRED_LIMIT": ("memory", "wired_limit_mb", int),
+        "PPMLX_MEMORY_MODE": ("memory", "mode", _normalize_memory_mode),
+        "PPMLX_MEMORY_MAX_CANDIDATES": ("memory", "max_candidates_per_event", int),
+        "PPMLX_MEMORY_ROLLING_TOKENS": ("memory", "rolling_tokens", int),
+        "PPMLX_MEMORY_HOT_TAIL_TOKENS": ("memory", "hot_tail_tokens", int),
+        "PPMLX_MEMORY_SESSION_CONTEXT_TOKENS": ("memory", "session_context_tokens", int),
+        "PPMLX_MEMORY_COMPACT_THRESHOLD_TOKENS": ("memory", "compact_threshold_tokens", int),
+        "PPMLX_MEMORY_MAX_CONTEXT_ITEMS": ("memory", "max_context_items", int),
         "PPMLX_REGISTRY_ENABLED": ("registry", "enabled", _parse_bool),
         "PPMLX_INJECT_TOOL_AWARENESS": ("tool_awareness", "mode", _normalize_tool_awareness_mode),
         "PPMLX_THINKING_ENABLED": ("thinking", "enabled", _parse_bool),

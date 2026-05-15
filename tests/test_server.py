@@ -50,6 +50,14 @@ mock_config = MagicMock()
 mock_config.logging = SimpleNamespace(snapshot_interval_seconds=60)
 mock_config.server = SimpleNamespace(max_tools_tokens=12000)
 mock_config.tool_awareness = SimpleNamespace(mode="no_tools_only")
+mock_config.memory = SimpleNamespace(
+    mode="off",
+    rolling_tokens=10000,
+    hot_tail_tokens=6500,
+    session_context_tokens=2000,
+    compact_threshold_tokens=12000,
+    max_context_items=40,
+)
 mock_config.thinking = SimpleNamespace(
     enabled=True,
     default_reasoning_budget=2048,
@@ -67,6 +75,7 @@ def client():
     from ppmlx import config as config_module
 
     mock_config.tool_awareness.mode = "no_tools_only"
+    mock_config.memory.mode = "off"
     config_module.load_config = MagicMock(return_value=mock_config)
     with TestClient(app) as c:
         yield c
@@ -207,6 +216,118 @@ def test_cors_headers_present(client):
     # CORS middleware sets Access-Control-Allow-Origin on actual requests too
     response2 = client.get("/health", headers={"Origin": "http://localhost:3000"})
     assert "access-control-allow-origin" in response2.headers
+
+
+def test_reduce_messages_records_local_and_posthog_observability(monkeypatch, tmp_path):
+    import ppmlx.server as server
+    import ppmlx.context_reducer as context_reducer
+    from ppmlx.memory_store import MemoryStore
+
+    class FakeReduction:
+        changed = True
+        messages = [{"role": "user", "content": "reduced prompt"}]
+
+        def to_metadata(self):
+            return {
+                "mode": "compact",
+                "original_tokens": 20000,
+                "reduced_tokens": 1000,
+                "hot_tail_tokens": 700,
+                "session_context_tokens": 200,
+                "cold_messages": 10,
+                "context_items": 3,
+                "compacted": True,
+                "injected": True,
+            }
+
+    store = MemoryStore(tmp_path / "memory.db")
+    events = []
+    mock_config.memory.mode = "compact"
+    monkeypatch.setattr(server, "_memory_compact_enabled", lambda: True)
+    monkeypatch.setattr(context_reducer, "reduce_chat_context", lambda **kwargs: FakeReduction())
+    monkeypatch.setattr("ppmlx.memory_store.get_memory_store", lambda: store)
+    monkeypatch.setattr(server, "_track_usage", lambda event, data=None, *, context="server": events.append((event, data, context)))
+
+    reduced, metadata = server._reduce_messages_for_memory(
+        request_id="req-obs",
+        model_alias="test-model",
+        model_repo="repo/private-should-not-leak",
+        messages=[{"role": "user", "content": "long prompt"}],
+        memory_context={"project_id": "private-project", "session_id": "private-session", "metadata": {}},
+    )
+
+    assert reduced == [{"role": "user", "content": "reduced prompt"}]
+    assert metadata["latency_ms"] >= 0
+    stats = store.compact_stats(project_id="private-project", session_id="private-session")
+    assert stats["total"] == 1
+    assert stats["avg_compression_ratio"] == 20.0
+    assert len(events) == 1
+    event, data, context = events[0]
+    assert event == "memory_context_reduction"
+    assert context == "server"
+    assert data["original_tokens"] == 20000
+    assert data["reduced_tokens"] == 1000
+    assert data["has_project_id"] is True
+    assert "project_id" not in data
+    assert "session_id" not in data
+    assert "model_repo" not in data
+
+
+def test_chat_completion_reduces_messages_before_engine(client, monkeypatch):
+    import ppmlx.server as server
+    import ppmlx.context_reducer as context_reducer
+
+    class FakeReduction:
+        changed = True
+        messages = [{"role": "user", "content": "reduced prompt"}]
+
+        def to_metadata(self):
+            return {
+                "original_tokens": 20000,
+                "reduced_tokens": 1000,
+                "cold_messages": 10,
+                "context_items": 3,
+            }
+
+    mock_config.memory.mode = "compact"
+    monkeypatch.setattr(context_reducer, "reduce_chat_context", lambda **kwargs: FakeReduction())
+    monkeypatch.setattr(server, "_schedule_memory_shadow_capture", lambda **kwargs: None)
+    mock_engine.generate.return_value = ("Hello!", None, 10, 5)
+    mock_engine.generate.reset_mock()
+    sys.modules["ppmlx.engine"].get_engine = MagicMock(return_value=mock_engine)
+
+    response = client.post("/v1/chat/completions", json={
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "very long prompt"}],
+        "stream": False,
+    })
+
+    assert response.status_code == 200
+    sent_messages = mock_engine.generate.call_args.args[1]
+    assert sent_messages == [{"role": "user", "content": "reduced prompt"}]
+
+
+def test_chat_completion_schedules_memory_shadow_capture_with_raw_messages(client, monkeypatch):
+    import ppmlx.server as server
+
+    calls = []
+    monkeypatch.setattr(server, "_schedule_memory_shadow_capture", lambda **kwargs: calls.append(kwargs))
+    mock_engine.generate.return_value = ("Hello!", None, 10, 5)
+    sys.modules["ppmlx.engine"].get_engine = MagicMock(return_value=mock_engine)
+    mock_config.tool_awareness.mode = "no_tools_only"
+
+    response = client.post("/v1/chat/completions", json={
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "I prefer concise answers."}],
+        "metadata": {"app_id": "test-app", "project_id": "ppmlx"},
+        "stream": False,
+    })
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["messages"] == [{"role": "user", "content": "I prefer concise answers."}]
+    assert calls[0]["memory_context"]["app_id"] == "test-app"
+    assert calls[0]["memory_context"]["project_id"] == "ppmlx"
 
 
 def test_chat_completion_injects_tool_awareness_without_tools(client):

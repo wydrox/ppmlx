@@ -22,9 +22,23 @@ app = typer.Typer(
     help="Run LLMs locally on Apple Silicon via MLX",
     no_args_is_help=True,
 )
+memory_app = typer.Typer(help="Inspect and manage the local temporal memory graph")
+trace_app = typer.Typer(help="Export local traces for compact replay/evaluation")
+app.add_typer(memory_app, name="memory")
+app.add_typer(trace_app, name="trace")
 console = Console()
 
 _VALID_QUANTIZE_BITS = frozenset({2, 3, 4, 6, 8})
+
+
+def _fmt_stat(value, suffix: str = "") -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        text = f"{value:.2f}".rstrip("0").rstrip(".")
+    else:
+        text = str(value)
+    return f"{text}{suffix}"
 
 
 def _set_process_title(title: str) -> None:
@@ -34,6 +48,14 @@ def _set_process_title(title: str) -> None:
             _setproctitle_mod.setproctitle(title)
         except Exception:
             pass
+
+
+def _is_interactive_terminal() -> bool:
+    """Return True when it is safe to launch prompt_toolkit TUI views."""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
 
 
 @dataclass
@@ -337,6 +359,51 @@ def _build_picker_rows(*, local_only: bool = False) -> list[_PickerRow]:
             rows.append(_row(r))
 
     return rows
+
+
+def _print_model_rows(rows: list[_PickerRow], *, title: str) -> None:
+    """Print model rows in non-interactive environments without launching TUI."""
+    console.print(f"[bold]{title}[/bold]")
+    current_section: str | None = None
+    for row in rows:
+        if row.section_header is not None:
+            current_section = row.section_header
+            console.print(f"\n[cyan]{current_section}[/cyan]")
+            continue
+        size = _fmt_stat(row.size_gb, " GB") if row.size_gb is not None else "-"
+        params = _fmt_stat(row.params_b, "B") if row.params_b is not None else "-"
+        badges = []
+        if row.is_favorite:
+            badges.append("favorite")
+        if row.downloaded:
+            badges.append("downloaded")
+        if row.is_loaded:
+            badges.append("loaded")
+        suffix = f" ({', '.join(badges)})" if badges else ""
+        console.print(f"  {row.alias}\t{size}\t{params}{suffix}")
+
+
+def _redact_config(value):
+    """Return a copy of config data safe for terminal display."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            lower = str(key).lower()
+            is_secret = (
+                lower in {"token", "hf_token", "api_key", "project_api_key", "secret", "password"}
+                or lower.endswith("_token")
+                or lower.endswith("_api_key")
+                or "secret" in lower
+                or "password" in lower
+            )
+            if is_secret:
+                out[key] = "***" if item else item
+            else:
+                out[key] = _redact_config(item)
+        return out
+    if isinstance(value, list):
+        return [_redact_config(item) for item in value]
+    return value
 
 
 def _visible_rows(rows: list[_PickerRow], ft: str) -> list[_PickerRow]:
@@ -1396,8 +1463,12 @@ def list_models(
         console.print("[dim]No models downloaded yet. Run: ppmlx pull <model>[/dim]")
         return
 
-    from ppmlx.tui import browse_models
     title = "Models" if all_models else "Local Models"
+    if not _is_interactive_terminal():
+        _print_model_rows(rows, title=title)
+        return
+
+    from ppmlx.tui import browse_models
     browse_models(rows, title=title, command_str="ppmlx list")
 
 
@@ -1603,6 +1674,13 @@ def config_cmd(
         console.print(f"[dim]{cfg_path}[/dim]")
         return
 
+    if not _is_interactive_terminal():
+        console.print(f"[bold]Config:[/bold] {cfg_path}")
+        redacted = _redact_config(data)
+        rendered = tomli_w.dumps(redacted).strip()
+        console.print(rendered or "[dim]No config set.[/dim]")
+        return
+
     # Interactive TUI config
     from ppmlx.tui import config_menu
     config_menu()
@@ -1761,6 +1839,414 @@ def stats(
             f"Avg reasoning tokens: [bold]{t.get('avg_reasoning_tokens', 'N/A')}[/bold]",
             title="Thinking Stats",
         ))
+
+
+@memory_app.command(name="status")
+def memory_status_cmd(
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Show temporal memory graph storage stats."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    stats = get_memory_store().stats()
+    if json_output:
+        typer.echo(json.dumps(stats, indent=2))
+        return
+
+    table = Table(title="Temporal Memory Graph")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    table.add_row("DB", stats["path"])
+    table.add_row("Events", str(stats["events"]))
+    table.add_row("Candidates", str(stats["candidates"]))
+    table.add_row("Entities", str(stats["entities"]))
+    table.add_row("Edges", str(stats["edges"]))
+    for status, count in stats.get("by_status", {}).items():
+        table.add_row(f"Status: {status}", str(count))
+    console.print(table)
+
+
+@memory_app.command(name="list")
+def memory_list_cmd(
+    status: Optional[str] = typer.Option("active", "--status", "-s", help="Filter by status; use 'all' for every status"),
+    scope: Optional[str] = typer.Option(None, "--scope", help="Filter by scope"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Maximum rows"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """List memory candidates."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    status_filter = None if status == "all" else status
+    rows = get_memory_store().query_candidates(status=status_filter, scope=scope, limit=limit)
+    if json_output:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+    if not rows:
+        console.print("[yellow]No memory candidates found.[/yellow]")
+        return
+
+    table = Table(title="Memory Candidates")
+    table.add_column("ID", style="dim")
+    table.add_column("Status")
+    table.add_column("Scope")
+    table.add_column("Type")
+    table.add_column("Text")
+    for row in rows:
+        table.add_row(
+            row["candidate_id"],
+            row["status"],
+            row["scope"],
+            row["type"],
+            row["text"][:100],
+        )
+    console.print(table)
+
+
+@memory_app.command(name="search")
+def memory_search_cmd(
+    query: str = typer.Argument(..., help="Search query"),
+    status: Optional[str] = typer.Option("active", "--status", "-s", help="Filter by status; use 'all' for every status"),
+    scope: Optional[str] = typer.Option(None, "--scope", help="Filter by scope"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Maximum rows"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Search temporal memory candidates."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    status_filter = None if status == "all" else status
+    rows = get_memory_store().search(query, status=status_filter, scope=scope, limit=limit)
+    if json_output:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+    if not rows:
+        console.print("[yellow]No matching memories found.[/yellow]")
+        return
+
+    table = Table(title=f"Memory Search: {query}")
+    table.add_column("ID", style="dim")
+    table.add_column("Status")
+    table.add_column("Scope")
+    table.add_column("Type")
+    table.add_column("Text")
+    for row in rows:
+        table.add_row(row["candidate_id"], row["status"], row["scope"], row["type"], row["text"][:100])
+    console.print(table)
+
+
+@memory_app.command(name="inspect")
+def memory_inspect_cmd(
+    candidate_id: str = typer.Argument(..., help="Memory candidate id"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Inspect one memory candidate and its graph edges."""
+    from rich.panel import Panel
+    from ppmlx.memory_store import get_memory_store
+
+    row = get_memory_store().inspect_candidate(candidate_id)
+    if row is None:
+        console.print(f"[red]Memory candidate not found: {candidate_id}[/red]")
+        raise typer.Exit(1)
+    if json_output:
+        typer.echo(json.dumps(row, indent=2, ensure_ascii=False))
+        return
+    console.print(Panel(json.dumps(row, indent=2, ensure_ascii=False), title=candidate_id))
+
+
+@memory_app.command(name="compact-stats")
+def memory_compact_stats_cmd(
+    since: Optional[float] = typer.Option(24, "--since", help="Hours to look back; use 0 for all history"),
+    project_id: Optional[str] = typer.Option(None, "--project", help="Filter by project namespace"),
+    session_id: Optional[str] = typer.Option(None, "--session", help="Filter by session namespace"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Recent rows to include in JSON output"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Show rolling-context compaction observability stats."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    since_hours = None if since == 0 else since
+    stats = get_memory_store().compact_stats(
+        since_hours=since_hours,
+        project_id=project_id,
+        session_id=session_id,
+        limit=limit,
+    )
+    if json_output:
+        typer.echo(json.dumps(stats, indent=2, ensure_ascii=False))
+        return
+
+    table = Table(title="Compact Observability")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    table.add_row("Window", "all" if since_hours is None else f"last {since_hours:g}h")
+    table.add_row("Requests", str(stats["total"]))
+    table.add_row("Compacted", str(stats["compacted"]))
+    table.add_row("Injected", str(stats["injected"]))
+    table.add_row("Avg original tokens", _fmt_stat(stats.get("avg_original_tokens")))
+    table.add_row("Avg reduced tokens", _fmt_stat(stats.get("avg_reduced_tokens")))
+    table.add_row("Avg compression", _fmt_stat(stats.get("avg_compression_ratio"), suffix="x"))
+    table.add_row("Avg cold messages", _fmt_stat(stats.get("avg_cold_messages")))
+    table.add_row("Avg context items", _fmt_stat(stats.get("avg_context_items")))
+    table.add_row("Avg latency", _fmt_stat(stats.get("avg_latency_ms"), suffix=" ms"))
+    table.add_row("p95 latency", _fmt_stat(stats.get("p95_latency_ms"), suffix=" ms"))
+    table.add_row("Max original tokens", str(stats.get("max_original_tokens", 0)))
+    table.add_row("Max reduced tokens", str(stats.get("max_reduced_tokens", 0)))
+    console.print(table)
+
+
+@memory_app.command(name="handoff")
+def memory_handoff_cmd(
+    query: Optional[str] = typer.Option(None, "--query", "-q", help="Optional retrieval query to prioritize relevant context"),
+    app_id: Optional[str] = typer.Option(None, "--app", help="Filter to app namespace"),
+    project_id: Optional[str] = typer.Option(None, "--project", help="Filter to project namespace"),
+    session_id: Optional[str] = typer.Option(None, "--session", help="Filter to session namespace"),
+    max_items: int = typer.Option(40, "--max-items", help="Maximum graph items"),
+    max_tokens: int = typer.Option(2000, "--max-tokens", help="Maximum rendered context tokens"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Render the compacted handoff/session context for a namespace."""
+    from rich.panel import Panel
+    from ppmlx.context_reducer import build_handoff_context
+
+    result = build_handoff_context(
+        query=query,
+        app_id=app_id,
+        project_id=project_id,
+        session_id=session_id,
+        max_items=max_items,
+        max_tokens=max_tokens,
+    )
+    if json_output:
+        typer.echo(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        return
+    if not result.context:
+        console.print("[yellow]No active memory context found for that namespace.[/yellow]")
+        return
+    title_parts = ["Memory Handoff"]
+    if project_id:
+        title_parts.append(f"project={project_id}")
+    if session_id:
+        title_parts.append(f"session={session_id}")
+    console.print(Panel(result.context, title=" | ".join(title_parts)))
+    console.print(f"[dim]{len(result.items)} items | ~{result.tokens} tokens[/dim]")
+
+
+@memory_app.command(name="forget")
+def memory_forget_cmd(
+    candidate_id: str = typer.Argument(..., help="Memory candidate id"),
+):
+    """Mark a memory candidate and its edges as forgotten."""
+    from ppmlx.memory_store import get_memory_store
+
+    if not get_memory_store().forget_candidate(candidate_id):
+        console.print(f"[red]Memory candidate not found: {candidate_id}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Forgot memory candidate: {candidate_id}[/green]")
+
+
+@trace_app.command(name="export")
+def trace_export_cmd(
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Write trace JSON to this path; stdout when omitted"),
+    app_id: Optional[str] = typer.Option(None, "--app", help="Filter to app namespace"),
+    project_id: Optional[str] = typer.Option(None, "--project", help="Filter to project namespace"),
+    session_id: Optional[str] = typer.Option(None, "--session", help="Filter to session namespace"),
+    since: Optional[float] = typer.Option(None, "--since", help="Hours to look back"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Maximum events"),
+    include_internal: bool = typer.Option(False, "--include-internal", help="Include internal #compact events"),
+):
+    """Export local memory events as a replayable trace JSON.
+
+    Trace files may contain prompts, responses, and tool outputs. Keep them local
+    unless you intentionally want to share them.
+    """
+    from ppmlx.trace_replay import export_trace, save_trace
+
+    trace = export_trace(
+        app_id=app_id,
+        project_id=project_id,
+        session_id=session_id,
+        since_hours=since,
+        limit=limit,
+        include_internal=include_internal,
+    )
+    if output:
+        out_path = save_trace(trace, Path(output))
+        console.print(f"[green]Trace exported to {out_path}[/green]")
+        console.print("[yellow]Trace may contain prompts/responses/tool outputs. Keep it local unless intentional.[/yellow]")
+        return
+    typer.echo(json.dumps(trace.to_dict(), indent=2, ensure_ascii=False))
+
+
+@app.command(name="compact-replay")
+def compact_replay_cmd(
+    trace_path: str = typer.Argument(..., help="Trace JSON path from `ppmlx trace export`"),
+    expect: Optional[list[str]] = typer.Option(None, "--expect", help="Expected term that must survive compaction; repeatable"),
+    forbid: Optional[list[str]] = typer.Option(None, "--forbid", help="Forbidden term that must not appear; repeatable"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Save full JSON report to this path"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Print full JSON report"),
+    fail_on_threshold: bool = typer.Option(True, "--fail-on-threshold/--no-fail-on-threshold", help="Exit 1 if expected/forbidden terms fail"),
+):
+    """Replay a saved trace through compact reducer/distillers without a model."""
+    from rich.table import Table
+    from ppmlx.trace_replay import compact_replay, load_trace
+
+    try:
+        trace = load_trace(Path(trace_path))
+        report = compact_replay(trace, expected_terms=expect or [], forbidden_terms=forbid or [])
+    except Exception as exc:
+        console.print(f"[red]Compact replay failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if output:
+        out = Path(output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+        console.print(f"[green]Compact replay report saved to {out}[/green]")
+
+    if json_output:
+        typer.echo(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+        if fail_on_threshold and not report.passed:
+            raise typer.Exit(1)
+        return
+
+    status = "[green]PASS[/green]" if report.passed else "[red]FAIL[/red]"
+    table = Table(title=f"Compact Replay: {status}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    table.add_row("Events", str(report.events))
+    table.add_row("Selected event", str(report.selected_event_id or "-"))
+    table.add_row("Tokens", f"{report.original_tokens} -> {report.reduced_tokens}")
+    table.add_row("Compression", f"{report.compression_ratio:.2f}x")
+    table.add_row("Cold messages", str(report.cold_messages))
+    table.add_row("Context items", str(report.context_items))
+    table.add_row("Session context tokens", str(report.session_context_tokens))
+    table.add_row("Latency", f"{report.latency_ms:.2f} ms")
+    table.add_row("Missed expected", str(len(report.missed_terms)))
+    table.add_row("Wrong forbidden", str(len(report.wrong_terms)))
+    console.print(table)
+    if report.missed_terms or report.wrong_terms:
+        console.print(f"[red]Missed:[/red] {report.missed_terms}")
+        console.print(f"[red]Wrong:[/red] {report.wrong_terms}")
+    if report.session_context:
+        console.print(Panel(report.session_context, title="Replay handoff context"))
+
+    if not report.passed and fail_on_threshold:
+        raise typer.Exit(1)
+
+
+@app.command(name="compact-eval")
+def compact_eval_cmd(
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Save full JSON report to this path"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Print full JSON report"),
+    fail_on_threshold: bool = typer.Option(True, "--fail-on-threshold/--no-fail-on-threshold", help="Exit 1 when compact eval fails"),
+):
+    """Run long-session rolling-context compact evals."""
+    from rich.table import Table
+    from ppmlx.compact_eval import CompactEvalRunner, save_report
+
+    try:
+        report = CompactEvalRunner().run()
+    except Exception as exc:
+        console.print(f"[red]Compact eval failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if output:
+        out_path = save_report(report, Path(output))
+        console.print(f"[green]Compact eval report saved to {out_path}[/green]")
+
+    if json_output:
+        typer.echo(json.dumps(report.to_dict(), indent=2))
+        if fail_on_threshold and not report.passed:
+            raise typer.Exit(1)
+        return
+
+    status = "[green]PASS[/green]" if report.passed else "[red]FAIL[/red]"
+    summary = report.summary
+    table = Table(title=f"Compact Eval Suite: {status}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    table.add_row("Cases", str(summary["cases"]))
+    table.add_row("Passed cases", str(summary["passed_cases"]))
+    table.add_row("Avg compression", f"{summary['avg_compression_ratio']:.2f}x")
+    table.add_row("Avg continuity", f"{summary['avg_continuity_score'] * 100:.1f}%")
+    table.add_row("Missed terms", str(summary["missed_terms"]))
+    table.add_row("Wrong terms", str(summary["wrong_terms"]))
+    table.add_row("Max reduced tokens", str(summary["max_reduced_tokens"]))
+    console.print(table)
+
+    for case in report.cases:
+        case_status = "[green]PASS[/green]" if case.passed else "[red]FAIL[/red]"
+        console.print(
+            f"{case_status} {case.case_id}: "
+            f"{case.original_tokens} -> {case.reduced_tokens} tokens "
+            f"({case.compression_ratio:.2f}x), continuity={case.continuity_score * 100:.1f}%"
+        )
+        if case.missed_terms or case.wrong_terms:
+            console.print(f"[red]Missed:[/red] {case.missed_terms} [red]Wrong:[/red] {case.wrong_terms}")
+
+    if not report.passed and fail_on_threshold:
+        raise typer.Exit(1)
+
+
+@app.command(name="memory-eval")
+def memory_eval_cmd(
+    dataset: Optional[str] = typer.Option(None, "--dataset", "-d", help="Golden dataset JSON path (defaults to built-in corpus)"),
+    predictions: Optional[str] = typer.Option(None, "--predictions", "-p", help="Optional case_runs JSON from a memory engine"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Save full JSON report to this path"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Print full JSON report"),
+    fail_on_threshold: bool = typer.Option(True, "--fail-on-threshold/--no-fail-on-threshold", help="Exit 1 when SLO thresholds fail"),
+):
+    """Run the temporal-memory anti-garbage eval suite."""
+    from rich.table import Table
+    from ppmlx.memory_eval import MemoryEvalRunner, load_case_runs, load_cases, save_report
+
+    try:
+        cases = load_cases(Path(dataset)) if dataset else load_cases()
+        case_runs = load_case_runs(Path(predictions)) if predictions else None
+        report = MemoryEvalRunner().run(cases=cases, case_runs=case_runs)
+    except Exception as exc:
+        console.print(f"[red]Memory eval failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if output:
+        out_path = save_report(report, Path(output))
+        console.print(f"[green]Memory eval report saved to {out_path}[/green]")
+
+    if json_output:
+        typer.echo(json.dumps(report.to_dict(), indent=2))
+        if fail_on_threshold and not report.passed:
+            raise typer.Exit(1)
+        return
+
+    summary = report.summary
+    latency = summary["latency_ms"]
+    status = "[green]PASS[/green]" if report.passed else "[red]FAIL[/red]"
+    table = Table(title=f"Memory Eval Suite: {status}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    table.add_column("SLO", justify="right", style="dim")
+
+    table.add_row("Cases", str(summary["cases"]), "-")
+    table.add_row("Candidates", str(summary["candidates"]), "-")
+    table.add_row("Status accuracy", f"{summary['status_accuracy'] * 100:.1f}%", "-")
+    table.add_row("Active recall", f"{summary['active_recall'] * 100:.1f}%", "-")
+    table.add_row("Retrieval recall", f"{summary['retrieval_recall'] * 100:.1f}%", "-")
+    table.add_row("False active rate", f"{summary['false_active_rate'] * 100:.2f}%", f"<= {report.thresholds.max_false_active_rate * 100:.2f}%")
+    table.add_row("Secret leaks", str(summary["secret_leak_count"]), "0")
+    table.add_row("Scope leakage rate", f"{summary['scope_leakage_rate'] * 100:.2f}%", f"<= {report.thresholds.max_scope_leakage_rate * 100:.2f}%")
+    table.add_row("Bad injection rate", f"{summary['bad_injection_rate'] * 100:.2f}%", f"<= {report.thresholds.max_bad_injection_rate * 100:.2f}%")
+    table.add_row("Manual review burden", f"{summary['manual_review_burden'] * 100:.2f}%", f"<= {report.thresholds.max_manual_review_burden * 100:.2f}%")
+    table.add_row("Validation p95", f"{latency['validation_p95']:.3f} ms", f"<= {report.thresholds.max_validation_p95_ms:.0f} ms")
+    table.add_row("Retrieval p95", f"{latency['retrieval_p95']:.3f} ms", f"<= {report.thresholds.max_retrieval_p95_ms:.0f} ms")
+    console.print(table)
+
+    if not report.passed:
+        console.print("[red]Failed IDs:[/red] " + json.dumps(summary.get("ids", {}), ensure_ascii=False))
+        if fail_on_threshold:
+            raise typer.Exit(1)
 
 
 @app.command()

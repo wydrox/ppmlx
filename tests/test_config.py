@@ -41,6 +41,13 @@ class TestDefaultValues:
     def test_memory_defaults(self):
         cfg = MemoryConfig()
         assert cfg.wired_limit_mb == 0
+        assert cfg.mode == "off"
+        assert cfg.max_candidates_per_event == 12
+        assert cfg.rolling_tokens == 10000
+        assert cfg.hot_tail_tokens == 6500
+        assert cfg.session_context_tokens == 2000
+        assert cfg.compact_threshold_tokens == 12000
+        assert cfg.max_context_items == 40
 
     def test_config_defaults(self):
         cfg = Config()
@@ -96,6 +103,13 @@ snapshot_interval_seconds = 120
 
 [memory]
 wired_limit_mb = 1024
+mode = "compact"
+max_candidates_per_event = 8
+rolling_tokens = 9000
+hot_tail_tokens = 6000
+session_context_tokens = 1800
+compact_threshold_tokens = 11000
+max_context_items = 30
 
 [tool_awareness]
 mode = "all"
@@ -121,6 +135,13 @@ respect_do_not_track = true
         assert cfg.logging.enabled is False
         assert cfg.logging.snapshot_interval_seconds == 120
         assert cfg.memory.wired_limit_mb == 1024
+        assert cfg.memory.mode == "compact"
+        assert cfg.memory.max_candidates_per_event == 8
+        assert cfg.memory.rolling_tokens == 9000
+        assert cfg.memory.hot_tail_tokens == 6000
+        assert cfg.memory.session_context_tokens == 1800
+        assert cfg.memory.compact_threshold_tokens == 11000
+        assert cfg.memory.max_context_items == 30
         assert cfg.tool_awareness.mode == "all"
         assert cfg.analytics.enabled is False
         assert cfg.analytics.provider == "posthog"
@@ -209,6 +230,34 @@ class TestEnvVarOverrides:
         monkeypatch.setenv("PPMLX_MEMORY_WIRED_LIMIT", "2048")
         cfg = load_config()
         assert cfg.memory.wired_limit_mb == 2048
+
+    def test_memory_mode_env_var(self, tmp_home, monkeypatch):
+        monkeypatch.setenv("PPMLX_MEMORY_MODE", "shadow")
+        cfg = load_config()
+        assert cfg.memory.mode == "shadow"
+
+    def test_memory_mode_bool_env_var_maps_to_shadow(self, tmp_home, monkeypatch):
+        monkeypatch.setenv("PPMLX_MEMORY_MODE", "true")
+        cfg = load_config()
+        assert cfg.memory.mode == "shadow"
+
+    def test_memory_max_candidates_env_var(self, tmp_home, monkeypatch):
+        monkeypatch.setenv("PPMLX_MEMORY_MAX_CANDIDATES", "6")
+        cfg = load_config()
+        assert cfg.memory.max_candidates_per_event == 6
+
+    def test_memory_compact_budget_env_vars(self, tmp_home, monkeypatch):
+        monkeypatch.setenv("PPMLX_MEMORY_ROLLING_TOKENS", "9000")
+        monkeypatch.setenv("PPMLX_MEMORY_HOT_TAIL_TOKENS", "5000")
+        monkeypatch.setenv("PPMLX_MEMORY_SESSION_CONTEXT_TOKENS", "1500")
+        monkeypatch.setenv("PPMLX_MEMORY_COMPACT_THRESHOLD_TOKENS", "10000")
+        monkeypatch.setenv("PPMLX_MEMORY_MAX_CONTEXT_ITEMS", "25")
+        cfg = load_config()
+        assert cfg.memory.rolling_tokens == 9000
+        assert cfg.memory.hot_tail_tokens == 5000
+        assert cfg.memory.session_context_tokens == 1500
+        assert cfg.memory.compact_threshold_tokens == 10000
+        assert cfg.memory.max_context_items == 25
 
     def test_invalid_env_var_ignored(self, tmp_home, monkeypatch):
         monkeypatch.setenv("PPMLX_PORT", "not_a_number")

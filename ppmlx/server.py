@@ -238,6 +238,181 @@ def _log_request(_, **kwargs) -> None:
         pass
 
 
+def _memory_mode() -> str:
+    try:
+        from ppmlx.config import load_config
+
+        cfg = load_config()
+        memory_cfg = getattr(cfg, "memory", None)
+        return str(getattr(memory_cfg, "mode", "off")).lower()
+    except Exception:
+        return "off"
+
+
+def _memory_shadow_enabled() -> bool:
+    """Return whether memory capture should run in shadow/write mode."""
+    return _memory_mode() in {"shadow", "compact", "inject"}
+
+
+def _memory_compact_enabled() -> bool:
+    """Return whether request context should be reduced before inference."""
+    return _memory_mode() in {"compact", "inject"}
+
+
+def _memory_context_from_request(request: Request, body: dict, messages: list[dict]) -> dict:
+    """Build memory namespace metadata from OpenAI metadata and headers."""
+    raw_meta = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    headers = request.headers
+    return {
+        "app_id": raw_meta.get("app_id") or raw_meta.get("app") or headers.get("x-ppmlx-app"),
+        "project_id": raw_meta.get("project_id") or raw_meta.get("project") or headers.get("x-ppmlx-project"),
+        "session_id": raw_meta.get("session_id") or headers.get("x-ppmlx-session") or body.get("user"),
+        "metadata": {
+            "client_ip": request.client.host if request.client else None,
+            "user_agent": headers.get("user-agent"),
+            "openai_metadata": raw_meta,
+            "message_count": len(messages),
+        },
+    }
+
+
+def _record_compact_observability(*, request_id: str, metadata: dict, memory_context: dict | None) -> None:
+    """Record local compact metrics and emit privacy-safe PostHog analytics."""
+    context = memory_context or {}
+    original_tokens = int(metadata.get("original_tokens") or 0)
+    reduced_tokens = int(metadata.get("reduced_tokens") or 0)
+    compression_ratio = (original_tokens / reduced_tokens) if reduced_tokens > 0 else 0.0
+    local_record = {
+        "request_id": request_id,
+        "endpoint": "/v1/chat/completions",
+        "app_id": context.get("app_id"),
+        "project_id": context.get("project_id"),
+        "session_id": context.get("session_id"),
+        "mode": metadata.get("mode") or _memory_mode(),
+        "original_tokens": original_tokens,
+        "reduced_tokens": reduced_tokens,
+        "compression_ratio": compression_ratio,
+        "hot_tail_tokens": int(metadata.get("hot_tail_tokens") or 0),
+        "session_context_tokens": int(metadata.get("session_context_tokens") or 0),
+        "cold_messages": int(metadata.get("cold_messages") or 0),
+        "context_items": int(metadata.get("context_items") or 0),
+        "compacted": bool(metadata.get("compacted")),
+        "injected": bool(metadata.get("injected")),
+        "latency_ms": float(metadata.get("latency_ms") or 0.0),
+    }
+    try:
+        from ppmlx.memory_store import get_memory_store
+
+        get_memory_store().record_compaction(local_record)
+    except Exception:
+        log.debug("Failed to record local compact observability", exc_info=True)
+
+    # Privacy contract: never send prompt/response/tool/model/project/session IDs.
+    _track_usage(
+        "memory_context_reduction",
+        {
+            "endpoint": "/v1/chat/completions",
+            "memory_mode": str(local_record["mode"]),
+            "original_tokens": original_tokens,
+            "reduced_tokens": reduced_tokens,
+            "compression_ratio": round(compression_ratio, 4),
+            "hot_tail_tokens": local_record["hot_tail_tokens"],
+            "session_context_tokens": local_record["session_context_tokens"],
+            "cold_messages": local_record["cold_messages"],
+            "context_items": local_record["context_items"],
+            "compacted": local_record["compacted"],
+            "injected": local_record["injected"],
+            "latency_ms": round(float(local_record["latency_ms"]), 3),
+            "has_app_id": bool(context.get("app_id")),
+            "has_project_id": bool(context.get("project_id")),
+            "has_session_id": bool(context.get("session_id")),
+        },
+        context="server",
+    )
+
+
+def _reduce_messages_for_memory(
+    *,
+    request_id: str,
+    model_alias: str,
+    model_repo: str,
+    messages: list[dict],
+    memory_context: dict | None,
+) -> tuple[list[dict], dict | None]:
+    """Apply rolling-context compaction when memory.mode is compact/inject."""
+    if not _memory_compact_enabled():
+        return messages, None
+    try:
+        from ppmlx.context_reducer import reduce_chat_context
+
+        compact_start = time.perf_counter()
+        result = reduce_chat_context(
+            request_id=request_id,
+            model_alias=model_alias,
+            model_repo=model_repo,
+            messages=messages,
+            memory_context=memory_context,
+        )
+        latency_ms = (time.perf_counter() - compact_start) * 1000
+        metadata = result.to_metadata()
+        metadata["latency_ms"] = round(latency_ms, 3)
+        _record_compact_observability(request_id=request_id, metadata=metadata, memory_context=memory_context)
+        if result.changed:
+            log.info(
+                "memory compact mode: tokens %s -> %s, cold_messages=%s, context_items=%s, latency_ms=%.2f",
+                metadata.get("original_tokens"), metadata.get("reduced_tokens"),
+                metadata.get("cold_messages"), metadata.get("context_items"), latency_ms,
+            )
+        return result.messages, metadata
+    except Exception:
+        log.debug("Memory context reduction failed", exc_info=True)
+        return messages, None
+
+
+def _schedule_memory_shadow_capture(
+    *,
+    request_id: str,
+    endpoint: str,
+    model_alias: str,
+    model_repo: str,
+    messages: list[dict],
+    response_text: str | None,
+    memory_context: dict | None,
+) -> None:
+    """Best-effort async shadow memory capture; never blocks the response path."""
+    if not _memory_shadow_enabled():
+        return
+    context = memory_context or {}
+    payload = {
+        "request_id": request_id,
+        "endpoint": endpoint,
+        "model_alias": model_alias,
+        "model_repo": model_repo,
+        "messages": [dict(msg) for msg in messages],
+        "response_text": response_text,
+        "app_id": context.get("app_id"),
+        "project_id": context.get("project_id"),
+        "session_id": context.get("session_id"),
+        "metadata": context.get("metadata") or {},
+    }
+
+    def _run_capture() -> None:
+        try:
+            from ppmlx.memory_engine import get_memory_engine
+
+            get_memory_engine().capture_chat(**payload)
+        except Exception:
+            log.debug("Memory shadow capture failed", exc_info=True)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(asyncio.to_thread(_run_capture))
+    except RuntimeError:
+        _run_capture()
+    except Exception:
+        pass
+
+
 def _track_usage(event: str, data: dict | None = None, *, context: str = "server") -> None:
     try:
         from ppmlx.analytics import track_async
@@ -733,7 +908,9 @@ async def chat_completions(request: Request):
     from ppmlx.schema import ChatCompletionRequest as _CCReq; _CCReq.model_validate(body)
 
     model_name = body.get("model", "")
+    raw_messages = [dict(msg) for msg in body.get("messages", [])]
     messages = body.get("messages", [])
+    memory_context = _memory_context_from_request(request, body, raw_messages)
     # Normalize messages for model compatibility
     tools = _limit_tools(body.get("tools") or None)
     for msg in messages:
@@ -799,12 +976,22 @@ async def chat_completions(request: Request):
         len(tools) if tools else 0,
     )
 
-    has_imgs = _has_images(messages)
-    engine_type = _route_engine(repo_id, has_imgs)
-
     request_id = "chatcmpl-" + uuid.uuid4().hex[:12]
     start_ts = time.time()
     created = int(start_ts)
+
+    messages, reduction_metadata = _reduce_messages_for_memory(
+        request_id=request_id,
+        model_alias=model_name,
+        model_repo=repo_id,
+        messages=messages,
+        memory_context=memory_context,
+    )
+    if reduction_metadata:
+        memory_context.setdefault("metadata", {})["context_reduction"] = reduction_metadata
+
+    has_imgs = _has_images(messages)
+    engine_type = _route_engine(repo_id, has_imgs)
 
     if stream:
         return _stream_chat(
@@ -812,6 +999,7 @@ async def chat_completions(request: Request):
             engine_type, temperature, top_p, max_tokens, stop, seed,
             repetition_penalty, request, start_ts, tools,
             think=think, reasoning_budget=reasoning_budget,
+            memory_messages=raw_messages, memory_context=memory_context,
         )
     else:
         return await _nonstream_chat(
@@ -819,6 +1007,7 @@ async def chat_completions(request: Request):
             engine_type, temperature, top_p, max_tokens, stop, seed,
             repetition_penalty, request, start_ts, tools,
             think=think, reasoning_budget=reasoning_budget,
+            memory_messages=raw_messages, memory_context=memory_context,
         )
 
 
@@ -827,6 +1016,7 @@ def _stream_chat(
     engine_type, temperature, top_p, max_tokens, stop, seed,
     repetition_penalty, request, start_ts, tools=None,
     think=None, reasoning_budget=None,
+    memory_messages=None, memory_context=None,
 ):
     """Return streaming SSE response."""
     from fastapi.responses import StreamingResponse
@@ -1187,6 +1377,15 @@ def _stream_chat(
             messages_count=len(messages),
             **log_extra,
         )
+        _schedule_memory_shadow_capture(
+            request_id=request_id,
+            endpoint="/v1/chat/completions",
+            model_alias=model_name,
+            model_repo=repo_id,
+            messages=memory_messages or messages,
+            response_text=full_text,
+            memory_context=memory_context,
+        )
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1196,6 +1395,7 @@ async def _nonstream_chat(
     engine_type, temperature, top_p, max_tokens, stop, seed,
     repetition_penalty, request, start_ts, tools=None,
     think=None, reasoning_budget=None,
+    memory_messages=None, memory_context=None,
 ):
     """Return non-streaming JSON response."""
     # Determine thinking mode: explicit param > tool heuristic > default on
@@ -1320,6 +1520,16 @@ async def _nonstream_chat(
     except Exception:
         # db.py may not support thinking fields yet; fall back without them
         _log_request(request, **log_kwargs)
+
+    _schedule_memory_shadow_capture(
+        request_id=request_id,
+        endpoint="/v1/chat/completions",
+        model_alias=model_name,
+        model_repo=repo_id,
+        messages=memory_messages or messages,
+        response_text=remaining_text,
+        memory_context=memory_context,
+    )
 
     return JSONResponse(response)
 

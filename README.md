@@ -116,6 +116,10 @@ print(response.choices[0].message.content)
 | `ppmlx rm <model>` | Remove a model | `-f` skip confirmation |
 | `ppmlx ps` | Show loaded models & memory | |
 | `ppmlx quantize <model>` | Convert & quantize HF model to MLX | `-b bits`, `--group-size`, `-o output` |
+| `ppmlx memory status/search/list/handoff/compact-stats` | Inspect the experimental local temporal memory graph | `--json`, `--status`, `--scope`, `--session` |
+| `ppmlx memory-eval` | Run the anti-garbage memory eval suite | `--json`, `--dataset`, `--predictions` |
+| `ppmlx compact-eval` | Run long-session rolling-context compaction evals | `--json`, `--output` |
+| `ppmlx trace export` / `ppmlx compact-replay` | Export and replay local traces through compact mode | `--project`, `--session`, `--expect` |
 | `ppmlx config` | View/set configuration | `--hf-token` |
 
 ## Connect Your Tools
@@ -144,6 +148,46 @@ enabled = true
 provider = "posthog"
 respect_do_not_track = true
 ```
+
+### Experimental local memory
+
+Shadow-mode memory capture stores request/response events and high-precision memory candidates locally in `~/.ppmlx/memory.db`. It does **not** inject memory into prompts yet.
+
+```toml
+[memory]
+mode = "shadow"   # off | shadow | compact | inject
+# compact mode keeps a rolling prompt tail and renders scoped graph context
+rolling_tokens = 10000
+hot_tail_tokens = 6500
+session_context_tokens = 2000
+compact_threshold_tokens = 12000
+max_context_items = 40
+```
+
+Modes:
+- `shadow`: store events/candidates only; prompts are unchanged.
+- `compact`: before inference, replace long histories with system context from the graph + a hot tail.
+- `inject`: reserved for compact + broader memory retrieval.
+
+Compact observability is recorded locally in `memory.db` and, if analytics are enabled, sent as privacy-safe aggregate metrics to PostHog. It never sends prompts, responses, tool output, model repo IDs, project IDs, or session IDs.
+
+Tool/MCP outputs are distilled through a plugin-style distiller interface. The built-in generic JSON distiller extracts small evidence-backed atoms such as candidates, prices, availability, specs, source URLs, and rejected items, while raw JSON stays local in the event log.
+
+CLI:
+
+```bash
+ppmlx memory status
+ppmlx memory search "concise answers"
+ppmlx memory list --status active
+ppmlx memory handoff --project tv-shopping --session tv-session-001
+ppmlx memory compact-stats --since 24
+ppmlx trace export --project tv-shopping --session tv-session-001 --output trace.json
+ppmlx compact-replay trace.json --expect "budget = 5000 PLN"
+ppmlx memory-eval
+ppmlx compact-eval
+```
+
+`trace export` is local-only and may include prompts, responses, and tool outputs. Keep exported traces private unless you intentionally want to share them.
 
 ## Anonymous Usage Analytics
 

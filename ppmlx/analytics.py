@@ -29,6 +29,7 @@ _SAFE_STRING_KEYS = {
     "endpoint",
     "error_type",
     "error_stage",
+    "memory_mode",
 }
 
 

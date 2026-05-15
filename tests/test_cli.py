@@ -81,13 +81,59 @@ def test_list_command_with_model():
         local_models=mock_models,
     )
 
-    with patch("ppmlx.tui.browse_models") as mock_browse:
+    with patch("ppmlx.cli._is_interactive_terminal", return_value=True), patch("ppmlx.tui.browse_models") as mock_browse:
         result = runner.invoke(app, ["list"])
         assert result.exit_code == 0
         mock_browse.assert_called_once()
         rows = mock_browse.call_args[0][0]
         aliases = [r.alias for r in rows if r.section_header is None]
         assert "llama3" in aliases
+
+
+def test_list_command_non_tty_prints_plain_text():
+    """list command does not launch TUI in non-interactive environments."""
+    mock_models = [
+        {
+            "name": "Meta-Llama-3-8B-Instruct-4bit",
+            "alias": "llama3",
+            "repo_id": "mlx-community/Meta-Llama-3-8B-Instruct-4bit",
+            "size_gb": 4.5,
+            "path": "/Users/test/.ppmlx/models/llama3",
+        }
+    ]
+    _setup_model_mocks(
+        defaults={"llama3": "mlx-community/Meta-Llama-3-8B-Instruct-4bit"},
+        local_models=mock_models,
+    )
+
+    with patch("ppmlx.cli._is_interactive_terminal", return_value=False), patch("ppmlx.tui.browse_models") as mock_browse:
+        result = runner.invoke(app, ["list"])
+        assert result.exit_code == 0
+        mock_browse.assert_not_called()
+        assert "Local Models" in result.output
+        assert "llama3" in result.output
+
+
+def test_config_command_non_tty_prints_redacted_config(tmp_path):
+    """config command prints safe text config instead of launching TUI without a terminal."""
+    fake_config_dir = tmp_path / ".ppmlx"
+    fake_config_dir.mkdir()
+    (fake_config_dir / "config.toml").write_text(
+        "[auth]\nhf_token = 'secret-token'\n"
+        "[server]\nmax_tools_tokens = 3000\n"
+        "[defaults]\nmax_tokens = 2048\n"
+    )
+    sys.modules["ppmlx.config"].get_ppmlx_dir = MagicMock(return_value=fake_config_dir)
+
+    with patch("ppmlx.cli._is_interactive_terminal", return_value=False), patch("ppmlx.tui.config_menu") as mock_menu:
+        result = runner.invoke(app, ["config"])
+        assert result.exit_code == 0
+        mock_menu.assert_not_called()
+        assert "Config:" in result.output
+        assert "hf_token = \"***\"" in result.output
+        assert "secret-token" not in result.output
+        assert "max_tokens = 2048" in result.output
+        assert "max_tools_tokens = 3000" in result.output
 
 
 def test_pull_command():
