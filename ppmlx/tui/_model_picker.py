@@ -22,21 +22,14 @@ def pick_model(
     )
 
     all_rows = _build_picker_rows(local_only=local_only)
+    try:
+        from ppmlx.registry_fetch import cache_status_text
+        registry_status = cache_status_text()
+    except Exception:
+        registry_status = "last refresh: unknown"
 
     # State
-    state = {"cursor": 0, "search": "", "status": ""}
-
-    def _refresh_rows(force: bool = False) -> None:
-        nonlocal all_rows
-        if force and not local_only:
-            try:
-                from ppmlx.registry import refresh_registry
-                refresh_registry()
-                state["status"] = "registry refreshed"
-            except Exception as exc:
-                state["status"] = f"refresh failed: {exc}"
-        all_rows = _build_picker_rows(local_only=local_only)
-        state["cursor"] = 0
+    state = {"cursor": 0, "search": ""}
 
     def _selectable_indices(rows):
         return [i for i, r in enumerate(rows) if r.section_header is None]
@@ -57,8 +50,8 @@ def pick_model(
         fragments.append(("", "Search: "))
         fragments.append(("class:value", state["search"]))
         fragments.append(("class:value", "\u2588"))
-        if state["status"]:
-            fragments.append(("class:dim", f"  {state['status']}"))
+        if not local_only:
+            fragments.append(("class:dim", f"  Registry {registry_status}"))
         fragments.append(("", "\n"))
         return fragments
 
@@ -93,7 +86,7 @@ def pick_model(
         return fragments
 
     def _get_footer():
-        return [("class:footer", "\u2191\u2193 navigate \u2022 enter select \u2022 r refresh registry \u2022 esc cancel \u2022 type to search")]
+        return [("class:footer", "\u2191\u2193 navigate \u2022 enter select \u2022 esc cancel \u2022 type to search")]
 
     kb = KeyBindings()
 
@@ -131,10 +124,6 @@ def pick_model(
             row = rows[state["cursor"]]
             event.app.exit(result=row.alias)
 
-    @kb.add("r")
-    def _refresh(event):
-        _refresh_rows(force=True)
-
     @kb.add("escape")
     def _escape(event):
         event.app.exit(result=None)
@@ -148,8 +137,6 @@ def pick_model(
     @kb.add("<any>")
     def _char(event):
         ch = event.data
-        if ch == "r":
-            return
         if ch.isprintable() and len(ch) == 1:
             state["search"] += ch
             state["cursor"] = 0

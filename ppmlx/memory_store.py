@@ -11,6 +11,18 @@ from typing import Any
 
 
 ACTIVE_STATUSES = {"active"}
+MAX_GRAPH_ENTITY_LABEL_CHARS = 80
+MAX_GRAPH_ENTITY_LABEL_WORDS = 12
+_SAFE_ENTITY_PREFIXES = (
+    "project",
+    "repo",
+    "repository",
+    "app",
+    "application",
+    "package",
+    "module",
+    "workspace",
+)
 
 
 def _default_memory_db_path() -> Path:
@@ -627,12 +639,52 @@ class MemoryStore:
 
     def upsert_memory_edge(self, candidate: dict[str, Any]) -> None:
         self.init()
-        from_entity_id = self._entity_id(candidate["subject"], "concept")
-        to_entity_id = self._entity_id(candidate["object"], "concept")
+        subject_projection = canonicalize_graph_entity(candidate["subject"])
+        object_projection = canonicalize_graph_entity(candidate["object"])
+        if subject_projection is None or object_projection is None:
+            with self._lock, self._connect() as conn:
+                conn.execute("DELETE FROM memory_edges WHERE source_candidate_id = ?", (candidate["candidate_id"],))
+                for raw_name, projection in ((candidate["subject"], subject_projection), (candidate["object"], object_projection)):
+                    if projection is None:
+                        continue
+                    entity_id = self._entity_id(projection, "concept")
+                    self._upsert_entity_conn(conn, entity_id, projection, "concept")
+                    self._upsert_canonical_alias_conn(
+                        conn,
+                        entity_id=entity_id,
+                        raw_name=raw_name,
+                        canonical_name=projection,
+                        entity_type="concept",
+                        scope=str(candidate.get("scope") or "global"),
+                        candidate_id=str(candidate.get("candidate_id") or ""),
+                    )
+                conn.commit()
+            return
+
+        from_entity_id = self._entity_id(subject_projection, "concept")
+        to_entity_id = self._entity_id(object_projection, "concept")
         edge_id = self._edge_id(candidate["candidate_id"], candidate["predicate"])
         with self._lock, self._connect() as conn:
-            self._upsert_entity_conn(conn, from_entity_id, candidate["subject"], "concept")
-            self._upsert_entity_conn(conn, to_entity_id, candidate["object"], "concept")
+            self._upsert_entity_conn(conn, from_entity_id, subject_projection, "concept")
+            self._upsert_entity_conn(conn, to_entity_id, object_projection, "concept")
+            self._upsert_canonical_alias_conn(
+                conn,
+                entity_id=from_entity_id,
+                raw_name=candidate["subject"],
+                canonical_name=subject_projection,
+                entity_type="concept",
+                scope=str(candidate.get("scope") or "global"),
+                candidate_id=str(candidate.get("candidate_id") or ""),
+            )
+            self._upsert_canonical_alias_conn(
+                conn,
+                entity_id=to_entity_id,
+                raw_name=candidate["object"],
+                canonical_name=object_projection,
+                entity_type="concept",
+                scope=str(candidate.get("scope") or "global"),
+                candidate_id=str(candidate.get("candidate_id") or ""),
+            )
             conn.execute(
                 """INSERT OR REPLACE INTO memory_edges (
                     edge_id, from_entity_id, relation, to_entity_id,
@@ -966,7 +1018,7 @@ class MemoryStore:
         nodes: dict[str, dict[str, Any]] = {}
 
         def add(name: str, *, role: str, candidate: dict[str, Any] | None = None) -> None:
-            cleaned = str(name or "").strip()
+            cleaned = canonicalize_graph_entity(name)
             if not cleaned:
                 return
             entity_id = self._entity_id(cleaned, "concept")
@@ -1294,7 +1346,8 @@ class MemoryStore:
 
     @staticmethod
     def _entity_id(name: str, entity_type: str) -> str:
-        digest = sha1(f"{entity_type}:{_norm(name)}".encode()).hexdigest()[:16]
+        canonical = canonicalize_entity_name(name) or _norm(name)
+        digest = sha1(f"{entity_type}:{canonical}".encode()).hexdigest()[:16]
         return f"ent_{digest}"
 
     @staticmethod
@@ -1307,6 +1360,47 @@ class MemoryStore:
         conn.execute(
             "INSERT OR IGNORE INTO memory_entities (entity_id, name, type) VALUES (?,?,?)",
             (entity_id, name, entity_type),
+        )
+
+    @classmethod
+    def _upsert_canonical_alias_conn(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        entity_id: str,
+        raw_name: str,
+        canonical_name: str,
+        entity_type: str,
+        scope: str,
+        candidate_id: str,
+    ) -> None:
+        alias = _clean_entity_label(raw_name)
+        if not alias or _norm(alias) == _norm(canonical_name):
+            return
+        alias_record = {
+            "entity_id": entity_id,
+            "alias": alias,
+            "type": entity_type,
+            "scope": scope,
+        }
+        alias_id = cls._alias_id(alias_record)
+        conn.execute(
+            """INSERT OR REPLACE INTO memory_entity_aliases (
+                alias_id, entity_id, alias, type, scope, confidence,
+                valid_at, invalid_at, expired_at, metadata_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                alias_id,
+                entity_id,
+                alias,
+                entity_type,
+                scope,
+                1.0,
+                None,
+                None,
+                None,
+                json.dumps({"source": "canonical_graph_projection", "candidate_id": candidate_id}, ensure_ascii=False),
+            ),
         )
 
 
@@ -1331,6 +1425,59 @@ def get_memory_store(path: Path | None = None) -> MemoryStore:
 def reset_memory_store() -> None:
     global _store_instance
     _store_instance = None
+
+
+def canonicalize_entity_name(value: str) -> str | None:
+    """Return a short deterministic entity label for graph projection.
+
+    Memory candidates keep their raw subject/object text for retrieval. Graph
+    nodes use this safer form so legacy facts do not turn arbitrary prose into
+    node identifiers.
+    """
+    cleaned = _clean_entity_label(value)
+    if not cleaned:
+        return None
+    lowered = cleaned.lower()
+    for prefix in _SAFE_ENTITY_PREFIXES:
+        match = re.fullmatch(rf"{re.escape(prefix)}\s+(.+)", lowered)
+        if match:
+            lowered = match.group(1).strip()
+            break
+    return lowered
+
+
+def canonicalize_graph_entity(value: str) -> str | None:
+    canonical = canonicalize_entity_name(value)
+    if not canonical or _looks_like_long_text_entity(canonical):
+        return None
+    return canonical
+
+
+def _clean_entity_label(value: str) -> str:
+    cleaned = " ".join(str(value or "").strip().strip("'\"").split())
+    return cleaned.strip(" .;:-")
+
+
+def _looks_like_long_text_entity(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    words = re.findall(r"\w+", text)
+    if len(text) > MAX_GRAPH_ENTITY_LABEL_CHARS or len(words) > MAX_GRAPH_ENTITY_LABEL_WORDS:
+        return True
+    if "\n" in text or "\r" in text:
+        return True
+    if any(char in text for char in "{}[]"):
+        return True
+    if len(re.findall(r"[.!?]", text)) >= 2:
+        return True
+    if re.search(r"[.!?]\s+\w", text):
+        return True
+    # Legacy remembered facts often place a complete clause in the object; keep
+    # the fact searchable, but do not project that clause as a graph node.
+    if len(words) >= 7 and re.search(r"\b(is|are|was|were|will|should|must|need|needs|prefer|prefers|decided|uses|use|has|have)\b", text):
+        return True
+    return False
 
 
 def _search_terms(query: str) -> list[str]:

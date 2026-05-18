@@ -276,14 +276,27 @@ def download_model(alias_or_repo: str, token: str | None = None) -> Path:
     Download a model from HuggingFace Hub with a single Rich progress bar.
 
     HuggingFace already emits byte-level progress through ``tqdm_class``.
-    We adapt those callbacks into Rich instead of polling filesystem sizes,
-    which makes updates regular for HTTP and Xet-backed downloads.
+    We adapt those callbacks into Rich instead of polling filesystem sizes.
+    Xet is disabled by default because its progress callbacks can arrive in
+    large bursts, making terminal progress appear frozen and then jump.
     """
     import threading
     from rich.progress import (
         Progress, BarColumn, DownloadColumn, TransferSpeedColumn,
         TimeRemainingColumn, TextColumn, SpinnerColumn,
     )
+
+    # Prefer smoother, HTTP-backed progress by default. Users can still opt
+    # into Xet explicitly with HF_HUB_DISABLE_XET=0.
+    if "HF_HUB_DISABLE_XET" not in os.environ:
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        try:
+            from huggingface_hub import constants as hf_constants
+
+            hf_constants.HF_HUB_DISABLE_XET = True
+        except Exception:
+            pass
+
     from huggingface_hub import snapshot_download
 
     token = _get_hf_token(token)

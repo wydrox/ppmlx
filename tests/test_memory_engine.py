@@ -218,6 +218,56 @@ def test_memory_store_graph_snapshot_returns_nodes_edges_and_events(tmp_path):
     assert source_node["size"] > 20
 
 
+def test_long_sentence_fact_remains_searchable_without_graph_object_node_or_edge(tmp_path):
+    engine, store = _make_engine(tmp_path)
+    content = (
+        "Remember that ppmlx should keep canonical graph nodes short because arbitrary extracted "
+        "sentences make unusable node labels and noisy JSON-like graph entities."
+    )
+
+    result = engine.capture_chat(
+        request_id="graph-long-fact",
+        endpoint="/v1/chat/completions",
+        model_alias="test-model",
+        model_repo="repo/test",
+        project_id="ppmlx",
+        messages=[{"role": "user", "content": content}],
+        response_text="ok",
+    )
+
+    assert result["active"] == 1
+    assert store.stats()["edges"] == 0
+    rows = store.search("unusable node labels", project_id="ppmlx")
+    assert len(rows) == 1
+    snapshot = store.graph_snapshot(project_id="ppmlx", query="unusable node labels")
+    assert snapshot["candidates"]
+    assert snapshot["edges"] == []
+    node_labels = {node["label"] for node in snapshot["nodes"]}
+    assert "ppmlx" in node_labels
+    assert all("unusable node labels" not in label for label in node_labels)
+
+
+def test_canonicalized_entity_alias_is_stored_for_raw_label(tmp_path):
+    engine, store = _make_engine(tmp_path)
+
+    result = engine.capture_chat(
+        request_id="graph-alias",
+        endpoint="/v1/chat/completions",
+        model_alias="test-model",
+        model_repo="repo/test",
+        project_id="Project PPMLX",
+        messages=[{"role": "user", "content": "We decided to support canonical aliases."}],
+        response_text="ok",
+    )
+
+    assert result["active"] == 1
+    snapshot = store.graph_snapshot(project_id="Project PPMLX", query="canonical aliases")
+    assert any(node["label"] == "ppmlx" for node in snapshot["nodes"])
+    aliases = store.query_entity_aliases(alias="Project PPMLX", scope="project")
+    assert len(aliases) == 1
+    assert aliases[0]["entity_id"] == next(node["id"] for node in snapshot["nodes"] if node["label"] == "ppmlx")
+
+
 def test_graph_cli_json_outputs_snapshot(tmp_home):
     reset_memory_store()
     store = MemoryStore(tmp_home / ".ppmlx" / "memory.db")

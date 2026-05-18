@@ -1,7 +1,9 @@
 """Tests for ppmlx.models — Model Registry."""
 from __future__ import annotations
-import pytest
+import os
 from pathlib import Path
+
+import pytest
 
 from ppmlx.models import (
     DEFAULT_ALIASES,
@@ -145,6 +147,7 @@ def test_download_model_already_exists(tmp_home, monkeypatch):
 
 
 def test_download_model_calls_snapshot(tmp_home, monkeypatch):
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
     called = []
 
     def fake_snapshot_download(repo_id, local_dir, token, ignore_patterns, **kwargs):
@@ -155,6 +158,7 @@ def test_download_model_calls_snapshot(tmp_home, monkeypatch):
             "token": token,
             "ignore_patterns": ignore_patterns,
             "tqdm_class": tqdm_class,
+            "disable_xet": os.environ.get("HF_HUB_DISABLE_XET"),
         })
 
         # Exercise both tqdm shapes used by huggingface_hub.snapshot_download:
@@ -188,4 +192,23 @@ def test_download_model_calls_snapshot(tmp_home, monkeypatch):
     assert "Qwen3.5-0.8B-OptiQ-4bit" in called[0]["local_dir"]
     assert called[0]["token"] is None
     assert called[0]["tqdm_class"] is not None
+    assert called[0]["disable_xet"] == "1"
+    assert result.exists()
+
+
+def test_download_model_respects_explicit_xet_env(tmp_home, monkeypatch):
+    monkeypatch.setenv("HF_HUB_DISABLE_XET", "0")
+    called = []
+
+    def fake_snapshot_download(repo_id, local_dir, token, ignore_patterns, **kwargs):
+        called.append(os.environ.get("HF_HUB_DISABLE_XET"))
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        (Path(local_dir) / "config.json").write_text("{}")
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+
+    result = download_model("qwen3.5:0.8b")
+
+    assert called == ["0"]
     assert result.exists()
