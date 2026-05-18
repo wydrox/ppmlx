@@ -41,13 +41,26 @@ COL_W = {
     "cursor":  4,   # "  ▸ " or "    "
     "check":   4,   # "[x] " or "[ ] "
     "flag":    3,   # "★✓●"
-    "alias":  28,
+    "alias":  42,
     "params":  8,
+    "precision":  10,
     "size":   10,
+    "downloads":  10,
+    "updated":  12,
 }
 
 
+def _clip(text: str, width: int) -> str:
+    """Clip text to a fixed terminal column width using a single ellipsis."""
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return text[:width]
+    return text[: width - 1] + "…"
+
+
 def _pad(text: str, width: int, align: str = "left") -> str:
+    text = _clip(str(text), width)
     if align == "right":
         return text.rjust(width)
     return text.ljust(width)
@@ -66,7 +79,10 @@ def render_table_header(*, show_checkbox: bool = False) -> list[tuple[str, str]]
     parts.append(" ")
     parts.append(_pad("Alias", w["alias"]))
     parts.append(_pad("Params", w["params"], "right"))
+    parts.append(_pad("Precision", w["precision"], "right"))
     parts.append(_pad("Size", w["size"], "right"))
+    parts.append(_pad("Downloads", w["downloads"], "right"))
+    parts.append(_pad("Updated", w["updated"], "right"))
     header_line = "".join(parts)
 
     total_w = len(header_line)
@@ -95,9 +111,9 @@ def render_model_row(
     is_cursor: bool = False,
     checkbox: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Render one table row: cursor | [checkbox] | flags | alias | params | size.
+    """Render one table row: cursor | [checkbox] | flags | alias | params | precision | size.
 
-    ``row`` must have: alias, params_b, size_gb, is_favorite, downloaded, is_loaded.
+    ``row`` must have: alias, params_b, precision, size_gb, downloads, updated_at, is_favorite, downloaded, is_loaded.
     ``checkbox`` — "[x]" or "[ ]" for multi-select; None to hide the column.
     """
     w = COL_W
@@ -128,12 +144,16 @@ def render_model_row(
     # Data columns
     alias = _pad(row.alias, w["alias"])
     params = _pad(f"{row.params_b}B" if row.params_b else "—", w["params"], "right")
+    precision = _pad(getattr(row, "precision", None) or "—", w["precision"], "right")
     size = _pad(f"{row.size_gb:.1f} GB" if row.size_gb else "—", w["size"], "right")
+    downloads_raw = getattr(row, "downloads", None)
+    downloads = _pad(f"{round(downloads_raw / 1000):,}k" if downloads_raw is not None else "—", w["downloads"], "right")
+    updated = _pad(getattr(row, "updated_at", None) or "—", w["updated"], "right")
 
     if is_cursor:
-        fragments.extend([(style, alias), (style, params), (style, size)])
+        fragments.extend([(style, alias), (style, params), (style, precision), (style, size), (style, downloads), (style, updated)])
     else:
-        fragments.extend([("", alias), ("class:dim", params), ("class:size", size)])
+        fragments.extend([("", alias), ("class:dim", params), ("class:dim", precision), ("class:size", size), ("class:dim", downloads), ("class:dim", updated)])
 
     fragments.append(("", "\n"))
     return fragments

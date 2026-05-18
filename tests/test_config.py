@@ -41,6 +41,7 @@ class TestDefaultValues:
 
     def test_memory_defaults(self):
         cfg = MemoryConfig()
+        assert cfg.enabled is True
         assert cfg.wired_limit_mb == 0
         assert cfg.mode == "off"
         assert cfg.max_candidates_per_event == 12
@@ -53,6 +54,9 @@ class TestDefaultValues:
         assert cfg.extraction_model == "gemma-4-e2b"
         assert cfg.extraction_workers == 1
         assert cfg.extraction_max_tokens == 1200
+        assert cfg.extraction_input_tokens == 6000
+        assert cfg.extraction_overlap_tokens == 600
+        assert cfg.extraction_max_chunks_per_event == 32
         assert cfg.extraction_timeout_seconds == 45.0
 
     def test_config_defaults(self):
@@ -75,6 +79,7 @@ class TestDefaultValues:
         cfg = RegistryConfig()
         assert cfg.enabled is True
         assert cfg.refresh == "weekly"
+        assert cfg.display_limit == 50
 
 
 class TestLoadConfigDefaults:
@@ -113,6 +118,7 @@ enabled = false
 snapshot_interval_seconds = 120
 
 [memory]
+enabled = true
 wired_limit_mb = 1024
 mode = "compact"
 max_candidates_per_event = 8
@@ -125,6 +131,9 @@ extractor = "llm"
 extraction_model = "qwen3.5:0.8b"
 extraction_workers = 3
 extraction_max_tokens = 900
+extraction_input_tokens = 4096
+extraction_overlap_tokens = 512
+extraction_max_chunks_per_event = 16
 extraction_timeout_seconds = 12.5
 
 [tool_awareness]
@@ -133,6 +142,7 @@ mode = "all"
 [registry]
 enabled = true
 refresh = "monthly"
+display_limit = 25
 
 [analytics]
 enabled = false
@@ -154,6 +164,7 @@ respect_do_not_track = true
         assert cfg.defaults.max_tokens == 4096
         assert cfg.logging.enabled is False
         assert cfg.logging.snapshot_interval_seconds == 120
+        assert cfg.memory.enabled is True
         assert cfg.memory.wired_limit_mb == 1024
         assert cfg.memory.mode == "compact"
         assert cfg.memory.max_candidates_per_event == 8
@@ -162,14 +173,18 @@ respect_do_not_track = true
         assert cfg.memory.session_context_tokens == 1800
         assert cfg.memory.compact_threshold_tokens == 11000
         assert cfg.memory.max_context_items == 30
-        assert cfg.memory.extractor == "llm"
+        assert cfg.memory.extractor == "model_memory_json"
         assert cfg.memory.extraction_model == "qwen3.5:0.8b"
         assert cfg.memory.extraction_workers == 3
         assert cfg.memory.extraction_max_tokens == 900
+        assert cfg.memory.extraction_input_tokens == 4096
+        assert cfg.memory.extraction_overlap_tokens == 512
+        assert cfg.memory.extraction_max_chunks_per_event == 16
         assert cfg.memory.extraction_timeout_seconds == 12.5
         assert cfg.tool_awareness.mode == "all"
         assert cfg.registry.enabled is True
         assert cfg.registry.refresh == "monthly"
+        assert cfg.registry.display_limit == 25
         assert cfg.analytics.enabled is False
         assert cfg.analytics.provider == "posthog"
         assert cfg.analytics.host == "https://stats.example.com"
@@ -253,6 +268,11 @@ class TestEnvVarOverrides:
         cfg = load_config()
         assert cfg.logging.snapshot_interval_seconds == 300
 
+    def test_memory_enabled_env_var(self, tmp_home, monkeypatch):
+        monkeypatch.setenv("PPMLX_MEMORY_ENABLED", "false")
+        cfg = load_config()
+        assert cfg.memory.enabled is False
+
     def test_memory_wired_limit(self, tmp_home, monkeypatch):
         monkeypatch.setenv("PPMLX_MEMORY_WIRED_LIMIT", "2048")
         cfg = load_config()
@@ -287,16 +307,22 @@ class TestEnvVarOverrides:
         assert cfg.memory.max_context_items == 25
 
     def test_memory_extraction_env_vars(self, tmp_home, monkeypatch):
-        monkeypatch.setenv("PPMLX_MEMORY_EXTRACTOR", "llm")
+        monkeypatch.setenv("PPMLX_MEMORY_EXTRACTOR", "llm_json")
         monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_MODEL", "llama3:8b")
         monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_WORKERS", "4")
         monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_MAX_TOKENS", "1000")
+        monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_INPUT_TOKENS", "4096")
+        monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_OVERLAP_TOKENS", "512")
+        monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_MAX_CHUNKS", "16")
         monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_TIMEOUT", "30.5")
         cfg = load_config()
-        assert cfg.memory.extractor == "llm"
+        assert cfg.memory.extractor == "model_memory_json"
         assert cfg.memory.extraction_model == "llama3:8b"
         assert cfg.memory.extraction_workers == 4
         assert cfg.memory.extraction_max_tokens == 1000
+        assert cfg.memory.extraction_input_tokens == 4096
+        assert cfg.memory.extraction_overlap_tokens == 512
+        assert cfg.memory.extraction_max_chunks_per_event == 16
         assert cfg.memory.extraction_timeout_seconds == 30.5
 
     def test_invalid_env_var_ignored(self, tmp_home, monkeypatch):
@@ -318,6 +344,16 @@ class TestEnvVarOverrides:
         monkeypatch.setenv("PPMLX_REGISTRY_REFRESH", "hourly")
         cfg = load_config()
         assert cfg.registry.refresh == "weekly"
+
+    def test_registry_display_limit_env_var(self, tmp_home, monkeypatch):
+        monkeypatch.setenv("PPMLX_REGISTRY_DISPLAY_LIMIT", "25")
+        cfg = load_config()
+        assert cfg.registry.display_limit == 25
+
+    def test_registry_display_limit_env_var_is_clamped(self, tmp_home, monkeypatch):
+        monkeypatch.setenv("PPMLX_REGISTRY_DISPLAY_LIMIT", "500")
+        cfg = load_config()
+        assert cfg.registry.display_limit == 100
 
     def test_tool_awareness_env_var_legacy_true_maps_to_all(self, tmp_home, monkeypatch):
         monkeypatch.setenv("PPMLX_INJECT_TOOL_AWARENESS", "true")

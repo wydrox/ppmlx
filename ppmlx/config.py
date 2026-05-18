@@ -40,6 +40,7 @@ class LoggingConfig:
 
 @dataclass
 class MemoryConfig:
+    enabled: bool = True
     wired_limit_mb: int = 0
     mode: str = "off"  # off | shadow | compact | inject
     max_candidates_per_event: int = 12
@@ -48,10 +49,13 @@ class MemoryConfig:
     session_context_tokens: int = 2000
     compact_threshold_tokens: int = 12000
     max_context_items: int = 40
-    extractor: str = "rule_based"
+    extractor: str = "rule_based"  # rule_based | model_memory_json; llm_json/gemma_json are legacy aliases
     extraction_model: str = "gemma-4-e2b"
     extraction_workers: int = 1
     extraction_max_tokens: int = 1200
+    extraction_input_tokens: int = 6000
+    extraction_overlap_tokens: int = 600
+    extraction_max_chunks_per_event: int = 32
     extraction_timeout_seconds: float = 45.0
 
 
@@ -59,6 +63,7 @@ class MemoryConfig:
 class RegistryConfig:
     enabled: bool = True
     refresh: str = "weekly"  # "always" | "weekly" | "monthly" | "never"
+    display_limit: int = 50  # number of available registry models shown in `ppmlx pull`
 
 
 @dataclass
@@ -132,6 +137,45 @@ def _normalize_memory_mode(value: Any) -> str:
 def _normalize_refresh(value: Any) -> str:
     raw = str(value).strip().lower()
     return raw if raw in {"always", "weekly", "monthly", "never"} else "weekly"
+
+
+def _normalize_memory_extractor(value: Any) -> str:
+    raw = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "rule": "rule_based",
+        "rules": "rule_based",
+        "rule_based": "rule_based",
+        "regex": "rule_based",
+        "model_memory_json": "model_memory_json",
+        "memory_model_json": "model_memory_json",
+        "model_json_memory": "model_memory_json",
+        "strict_json_memory": "model_memory_json",
+        "llm": "model_memory_json",
+        "json": "model_memory_json",
+        "json_llm": "model_memory_json",
+        "llm_json": "model_memory_json",
+        "gemma_json": "model_memory_json",
+    }
+    return aliases.get(raw, "rule_based")
+
+
+def _clamped_int(value: Any, *, default: int, min_value: int, max_value: int | None = None) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    parsed = max(min_value, parsed)
+    if max_value is not None:
+        parsed = min(max_value, parsed)
+    return parsed
+
+
+def _normalize_registry_display_limit(value: Any) -> int:
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return 50
+    return min(100, max(1, limit))
 
 
 def _normalize_tool_awareness_mode(value: Any) -> str:
@@ -208,23 +252,28 @@ def _apply_toml(cfg: Config, data: dict) -> None:
             cfg.logging.snapshot_interval_seconds = int(lg["snapshot_interval_seconds"])
     if "memory" in data:
         m = data["memory"]
+        if "enabled" in m: cfg.memory.enabled = bool(m["enabled"])
         if "wired_limit_mb" in m: cfg.memory.wired_limit_mb = int(m["wired_limit_mb"])
         if "mode" in m: cfg.memory.mode = _normalize_memory_mode(m["mode"])
-        if "max_candidates_per_event" in m: cfg.memory.max_candidates_per_event = int(m["max_candidates_per_event"])
+        if "max_candidates_per_event" in m: cfg.memory.max_candidates_per_event = _clamped_int(m["max_candidates_per_event"], default=12, min_value=0)
         if "rolling_tokens" in m: cfg.memory.rolling_tokens = int(m["rolling_tokens"])
         if "hot_tail_tokens" in m: cfg.memory.hot_tail_tokens = int(m["hot_tail_tokens"])
         if "session_context_tokens" in m: cfg.memory.session_context_tokens = int(m["session_context_tokens"])
         if "compact_threshold_tokens" in m: cfg.memory.compact_threshold_tokens = int(m["compact_threshold_tokens"])
         if "max_context_items" in m: cfg.memory.max_context_items = int(m["max_context_items"])
-        if "extractor" in m: cfg.memory.extractor = str(m["extractor"])
+        if "extractor" in m: cfg.memory.extractor = _normalize_memory_extractor(m["extractor"])
         if "extraction_model" in m: cfg.memory.extraction_model = str(m["extraction_model"])
-        if "extraction_workers" in m: cfg.memory.extraction_workers = int(m["extraction_workers"])
-        if "extraction_max_tokens" in m: cfg.memory.extraction_max_tokens = int(m["extraction_max_tokens"])
+        if "extraction_workers" in m: cfg.memory.extraction_workers = _clamped_int(m["extraction_workers"], default=1, min_value=1, max_value=32)
+        if "extraction_max_tokens" in m: cfg.memory.extraction_max_tokens = _clamped_int(m["extraction_max_tokens"], default=1200, min_value=1)
+        if "extraction_input_tokens" in m: cfg.memory.extraction_input_tokens = _clamped_int(m["extraction_input_tokens"], default=6000, min_value=256)
+        if "extraction_overlap_tokens" in m: cfg.memory.extraction_overlap_tokens = _clamped_int(m["extraction_overlap_tokens"], default=600, min_value=0)
+        if "extraction_max_chunks_per_event" in m: cfg.memory.extraction_max_chunks_per_event = _clamped_int(m["extraction_max_chunks_per_event"], default=32, min_value=1, max_value=512)
         if "extraction_timeout_seconds" in m: cfg.memory.extraction_timeout_seconds = float(m["extraction_timeout_seconds"])
     if "registry" in data:
         r = data["registry"]
         if "enabled" in r: cfg.registry.enabled = bool(r["enabled"])
         if "refresh" in r: cfg.registry.refresh = _normalize_refresh(r["refresh"])
+        if "display_limit" in r: cfg.registry.display_limit = _normalize_registry_display_limit(r["display_limit"])
     if "tool_awareness" in data:
         ta = data["tool_awareness"]
         if "mode" in ta:
@@ -261,6 +310,7 @@ def _apply_env(cfg: Config) -> None:
         "PPMLX_MAX_TOKENS": ("defaults", "max_tokens", int),
         "PPMLX_LOG_ENABLED": ("logging", "enabled", _parse_bool),
         "PPMLX_LOG_SNAPSHOT_INTERVAL": ("logging", "snapshot_interval_seconds", int),
+        "PPMLX_MEMORY_ENABLED": ("memory", "enabled", _parse_bool),
         "PPMLX_MEMORY_WIRED_LIMIT": ("memory", "wired_limit_mb", int),
         "PPMLX_MEMORY_MODE": ("memory", "mode", _normalize_memory_mode),
         "PPMLX_MEMORY_MAX_CANDIDATES": ("memory", "max_candidates_per_event", int),
@@ -269,13 +319,17 @@ def _apply_env(cfg: Config) -> None:
         "PPMLX_MEMORY_SESSION_CONTEXT_TOKENS": ("memory", "session_context_tokens", int),
         "PPMLX_MEMORY_COMPACT_THRESHOLD_TOKENS": ("memory", "compact_threshold_tokens", int),
         "PPMLX_MEMORY_MAX_CONTEXT_ITEMS": ("memory", "max_context_items", int),
-        "PPMLX_MEMORY_EXTRACTOR": ("memory", "extractor", str),
+        "PPMLX_MEMORY_EXTRACTOR": ("memory", "extractor", _normalize_memory_extractor),
         "PPMLX_MEMORY_EXTRACTION_MODEL": ("memory", "extraction_model", str),
         "PPMLX_MEMORY_EXTRACTION_WORKERS": ("memory", "extraction_workers", int),
         "PPMLX_MEMORY_EXTRACTION_MAX_TOKENS": ("memory", "extraction_max_tokens", int),
+        "PPMLX_MEMORY_EXTRACTION_INPUT_TOKENS": ("memory", "extraction_input_tokens", int),
+        "PPMLX_MEMORY_EXTRACTION_OVERLAP_TOKENS": ("memory", "extraction_overlap_tokens", int),
+        "PPMLX_MEMORY_EXTRACTION_MAX_CHUNKS": ("memory", "extraction_max_chunks_per_event", int),
         "PPMLX_MEMORY_EXTRACTION_TIMEOUT": ("memory", "extraction_timeout_seconds", float),
         "PPMLX_REGISTRY_ENABLED": ("registry", "enabled", _parse_bool),
         "PPMLX_REGISTRY_REFRESH": ("registry", "refresh", _normalize_refresh),
+        "PPMLX_REGISTRY_DISPLAY_LIMIT": ("registry", "display_limit", _normalize_registry_display_limit),
         "PPMLX_INJECT_TOOL_AWARENESS": ("tool_awareness", "mode", _normalize_tool_awareness_mode),
         "PPMLX_THINKING_ENABLED": ("thinking", "enabled", _parse_bool),
         "PPMLX_THINKING_BUDGET": ("thinking", "default_reasoning_budget", int),

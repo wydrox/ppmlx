@@ -1,10 +1,12 @@
 from __future__ import annotations
+import json
 import logging
 import re
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterator, NamedTuple
 
 log = logging.getLogger("ppmlx.engine")
@@ -118,6 +120,42 @@ def _resolve_model_path(repo_id: str) -> str:
         return repo_id
 
 
+def _can_retry_gemma4_non_strict(path: str, exc: ValueError) -> bool:
+    """Return true for the known MLX Gemma 4 extra-weight mismatch.
+
+    Some converted Gemma 4 MLX checkpoints include explicit KV weights for
+    layers that the current ``mlx-lm`` Gemma 4 implementation treats as
+    KV-shared. Strict loading rejects those unused extra tensors before the
+    model can run. Keep the fallback narrow so unrelated shape/config errors
+    still fail loudly.
+    """
+    message = str(exc)
+    if "parameters not in model" not in message:
+        return False
+    model_path = Path(path).expanduser()
+    if not model_path.exists() or not model_path.is_dir():
+        return False
+    config_path = model_path / "config.json"
+    try:
+        with open(config_path, "rb") as f:
+            config = json.load(f)
+    except Exception:
+        return False
+    model_type = str(config.get("model_type") or "").lower()
+    text_model_type = str((config.get("text_config") or {}).get("model_type") or "").lower()
+    return model_type == "gemma4" or text_model_type == "gemma4_text"
+
+
+def _load_local_model_non_strict(path: str):
+    """Load a local model path with strict weight matching disabled."""
+    from mlx_lm.utils import load_model, load_tokenizer
+
+    model_path = Path(path).expanduser()
+    model, config = load_model(model_path, strict=False)
+    tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
+    return model, tokenizer
+
+
 class TextEngine:
     """
     Wraps mlx-lm for text generation with LRU model caching.
@@ -135,7 +173,17 @@ class TextEngine:
         """Actually load a model using mlx_lm.load. Called under lock."""
         from mlx_lm import load as mlx_load
         path = _resolve_model_path(repo_id)
-        model, tokenizer = mlx_load(path)
+        try:
+            model, tokenizer = mlx_load(path)
+        except ValueError as exc:
+            if not _can_retry_gemma4_non_strict(path, exc):
+                raise
+            log.warning(
+                "Gemma 4 checkpoint has extra weights not represented by this mlx-lm model class; "
+                "retrying load with strict=False for %s",
+                repo_id,
+            )
+            model, tokenizer = _load_local_model_non_strict(path)
         return LoadedModel(repo_id=repo_id, model=model, tokenizer=tokenizer)
 
     def load(self, repo_id: str) -> LoadedModel:

@@ -7,6 +7,7 @@ for shadow-mode evaluation.
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -479,12 +480,18 @@ class MemoryEngine:
         extraction_workers: int = 1,
         parallel_extraction: bool = False,
         enqueue_extraction: bool = False,
+        extraction_input_tokens: int = 6000,
+        extraction_overlap_tokens: int = 600,
+        extraction_max_chunks_per_event: int = 32,
     ):
         self.store = store or get_memory_store()
         self.extractor = extractor or RuleBasedMemoryExtractor()
         self.extraction_workers = max(1, int(extraction_workers))
         self.parallel_extraction = parallel_extraction and self.extraction_workers > 1
         self.enqueue_extraction = bool(enqueue_extraction)
+        self.extraction_input_tokens = max(32, int(extraction_input_tokens))
+        self.extraction_overlap_tokens = max(0, min(int(extraction_overlap_tokens), self.extraction_input_tokens // 2))
+        self.extraction_max_chunks_per_event = max(1, int(extraction_max_chunks_per_event))
         self.validator = MemoryValidator(self.store)
 
     def capture_chat(
@@ -608,22 +615,46 @@ class MemoryEngine:
         }
 
     def _extract_candidates(self, event: dict[str, Any], *, suppress_errors: bool = True) -> list[ShadowMemoryCandidate]:
+        chunks = _event_extraction_chunks(
+            event,
+            max_input_tokens=self.extraction_input_tokens,
+            overlap_tokens=self.extraction_overlap_tokens,
+            max_chunks=self.extraction_max_chunks_per_event,
+        )
         try:
-            if self.parallel_extraction:
-                return self._extract_candidates_parallel(event)
-            candidates = self.extractor.extract(event)
+            if len(chunks) <= 1:
+                candidates = self.extractor.extract(chunks[0])
+            elif self.parallel_extraction:
+                candidates = self._extract_candidates_parallel(chunks, suppress_errors=suppress_errors)
+            else:
+                candidates = self._extract_candidates_sequential(chunks, suppress_errors=suppress_errors)
         except Exception:
             if suppress_errors:
                 return []
             raise
         return self._dedupe_candidates(candidates)[: self._max_candidates_per_event()]
 
-    def _extract_candidates_parallel(self, event: dict[str, Any]) -> list[ShadowMemoryCandidate]:
-        chunks = _event_message_chunks(event)
-        if len(chunks) <= 1:
-            candidates = self.extractor.extract(event)
-            return self._dedupe_candidates(candidates)[: self._max_candidates_per_event()]
+    def _extract_candidates_sequential(
+        self,
+        chunks: list[dict[str, Any]],
+        *,
+        suppress_errors: bool,
+    ) -> list[ShadowMemoryCandidate]:
+        merged: list[ShadowMemoryCandidate] = []
+        for chunk in chunks:
+            try:
+                merged.extend(self.extractor.extract(chunk))
+            except Exception:
+                if not suppress_errors:
+                    raise
+        return merged
 
+    def _extract_candidates_parallel(
+        self,
+        chunks: list[dict[str, Any]],
+        *,
+        suppress_errors: bool,
+    ) -> list[ShadowMemoryCandidate]:
         chunk_results: list[list[ShadowMemoryCandidate]] = [[] for _ in chunks]
         with ThreadPoolExecutor(max_workers=self.extraction_workers) as executor:
             futures = {executor.submit(self.extractor.extract, chunk): idx for idx, chunk in enumerate(chunks)}
@@ -631,12 +662,14 @@ class MemoryEngine:
                 try:
                     chunk_results[idx] = future.result()
                 except Exception:
+                    if not suppress_errors:
+                        raise
                     chunk_results[idx] = []
 
         merged: list[ShadowMemoryCandidate] = []
         for result in chunk_results:
             merged.extend(result)
-        return self._dedupe_candidates(merged)[: self._max_candidates_per_event()]
+        return merged
 
     def _max_candidates_per_event(self) -> int:
         return max(0, int(getattr(self.extractor, "max_candidates", 12)))
@@ -660,11 +693,16 @@ class MemoryEngine:
 def get_memory_engine(path: Path | None = None) -> MemoryEngine:
     store = get_memory_store(path) if path else get_memory_store()
     cfg = load_config()
-    extractor_name = cfg.memory.extractor.strip().lower()
-    if extractor_name in {"gemma_json", "llm"}:
-        from ppmlx.memory_extractors import GemmaJsonMemoryExtractor
+    extractor_name = cfg.memory.extractor.strip().lower().replace("-", "_")
+    common_kwargs = {
+        "extraction_input_tokens": cfg.memory.extraction_input_tokens,
+        "extraction_overlap_tokens": cfg.memory.extraction_overlap_tokens,
+        "extraction_max_chunks_per_event": cfg.memory.extraction_max_chunks_per_event,
+    }
+    if extractor_name in {"model_memory_json", "memory_model_json", "model_json_memory", "strict_json_memory", "llm_json", "json_llm", "llm", "gemma_json"}:
+        from ppmlx.memory_extractors import ModelMemoryJsonExtractor
 
-        extractor = GemmaJsonMemoryExtractor(
+        extractor = ModelMemoryJsonExtractor(
             model_name=cfg.memory.extraction_model,
             max_candidates=cfg.memory.max_candidates_per_event,
             max_tokens=cfg.memory.extraction_max_tokens,
@@ -675,8 +713,13 @@ def get_memory_engine(path: Path | None = None) -> MemoryEngine:
             extraction_workers=cfg.memory.extraction_workers,
             parallel_extraction=cfg.memory.extraction_workers > 1,
             enqueue_extraction=True,
+            **common_kwargs,
         )
-    return MemoryEngine(store=store, extractor=RuleBasedMemoryExtractor(max_candidates=cfg.memory.max_candidates_per_event))
+    return MemoryEngine(
+        store=store,
+        extractor=RuleBasedMemoryExtractor(max_candidates=cfg.memory.max_candidates_per_event),
+        **common_kwargs,
+    )
 
 
 def event_source_text(event: dict[str, Any]) -> str:
@@ -686,15 +729,157 @@ def event_source_text(event: dict[str, Any]) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _event_message_chunks(event: dict[str, Any]) -> list[dict[str, Any]]:
-    chunks: list[dict[str, Any]] = []
-    for message in event.get("messages", []):
+def _event_extraction_chunks(
+    event: dict[str, Any],
+    *,
+    max_input_tokens: int,
+    overlap_tokens: int,
+    max_chunks: int,
+) -> list[dict[str, Any]]:
+    """Split an event into token-budgeted extraction windows with overlap.
+
+    The estimate is intentionally heuristic (roughly 4 chars/token) so this
+    remains tokenizer-independent. It keeps full events intact when they fit;
+    long events become message windows, and oversized single messages are split
+    into overlapping text fragments.
+    """
+    max_input_tokens = max(32, int(max_input_tokens))
+    overlap_tokens = max(0, min(int(overlap_tokens), max_input_tokens // 2))
+    max_chunks = max(1, int(max_chunks))
+    if _estimate_event_tokens(event) <= max_input_tokens:
+        return [event]
+
+    segments = _event_extraction_segments(event, max_input_tokens=max_input_tokens, overlap_tokens=overlap_tokens)
+    if not segments:
+        return [event]
+
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_tokens = 0
+    for segment in segments:
+        segment_tokens = _estimate_message_tokens(segment)
+        if current and current_tokens + segment_tokens > max_input_tokens:
+            chunks.append(current)
+            if len(chunks) >= max_chunks:
+                break
+            current = _tail_overlap_messages(current, overlap_tokens)
+            current_tokens = sum(_estimate_message_tokens(item) for item in current)
+            if current and current_tokens + segment_tokens > max_input_tokens:
+                current = []
+                current_tokens = 0
+        current.append(segment)
+        current_tokens += segment_tokens
+    if current and len(chunks) < max_chunks:
+        chunks.append(current)
+
+    out: list[dict[str, Any]] = []
+    total = len(chunks)
+    for idx, messages in enumerate(chunks):
         chunk = dict(event)
-        chunk["messages"] = [message]
-        chunk["request"] = {"messages": [message]}
+        chunk["messages"] = messages
+        chunk["request"] = {"messages": messages}
         chunk["response_text"] = ""
+        metadata = dict(event.get("metadata") or {})
+        metadata["extraction_chunk"] = {
+            "index": idx,
+            "total": total,
+            "estimated_tokens": sum(_estimate_message_tokens(item) for item in messages),
+            "max_input_tokens": max_input_tokens,
+            "overlap_tokens": overlap_tokens,
+        }
+        chunk["metadata"] = metadata
+        out.append(chunk)
+    return out or [event]
+
+
+def _event_extraction_segments(
+    event: dict[str, Any],
+    *,
+    max_input_tokens: int,
+    overlap_tokens: int,
+) -> list[dict[str, Any]]:
+    messages = [dict(message) for message in event.get("messages", [])]
+    if event.get("response_text"):
+        messages.append({"role": "assistant", "content": str(event.get("response_text") or "")})
+
+    segments: list[dict[str, Any]] = []
+    for message in messages:
+        if _estimate_message_tokens(message) <= max_input_tokens:
+            segments.append(message)
+            continue
+        segments.extend(_split_oversized_message(message, max_input_tokens=max_input_tokens, overlap_tokens=overlap_tokens))
+    return segments
+
+
+def _split_oversized_message(
+    message: dict[str, Any],
+    *,
+    max_input_tokens: int,
+    overlap_tokens: int,
+) -> list[dict[str, Any]]:
+    content = message.get("content", "")
+    if isinstance(content, str):
+        text = content
+    else:
+        try:
+            text = json.dumps(content, ensure_ascii=False, default=str)
+        except TypeError:
+            text = str(content)
+    if not text:
+        return [message]
+
+    max_chars = max(64, (max_input_tokens - 16) * 4)
+    overlap_chars = min(max_chars // 2, overlap_tokens * 4)
+    step = max(1, max_chars - overlap_chars)
+    chunks: list[dict[str, Any]] = []
+    for start in range(0, len(text), step):
+        piece = text[start : start + max_chars]
+        if not piece:
+            break
+        chunk = dict(message)
+        chunk["content"] = piece
+        chunk["metadata"] = {
+            **(message.get("metadata") if isinstance(message.get("metadata"), dict) else {}),
+            "extraction_fragment": {"start": start, "end": start + len(piece)},
+        }
         chunks.append(chunk)
-    return chunks or [event]
+        if start + max_chars >= len(text):
+            break
+    return chunks or [message]
+
+
+def _tail_overlap_messages(messages: list[dict[str, Any]], overlap_tokens: int) -> list[dict[str, Any]]:
+    if overlap_tokens <= 0:
+        return []
+    selected: list[dict[str, Any]] = []
+    total = 0
+    for message in reversed(messages):
+        tokens = _estimate_message_tokens(message)
+        if selected and total + tokens > overlap_tokens:
+            break
+        selected.append(message)
+        total += tokens
+        if total >= overlap_tokens:
+            break
+    return list(reversed(selected))
+
+
+def _estimate_event_tokens(event: dict[str, Any]) -> int:
+    return sum(_estimate_message_tokens(message) for message in event.get("messages", [])) + _estimate_text_tokens(event.get("response_text"))
+
+
+def _estimate_message_tokens(message: dict[str, Any]) -> int:
+    try:
+        raw = json.dumps(message, ensure_ascii=False, default=str)
+    except TypeError:
+        raw = str(message)
+    return _estimate_text_tokens(raw) + 4
+
+
+def _estimate_text_tokens(text: Any) -> int:
+    if not text:
+        return 0
+    return max(1, (len(str(text)) + 3) // 4)
 
 
 def _candidate_sources(messages_text: str) -> list[str]:

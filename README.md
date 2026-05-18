@@ -160,6 +160,7 @@ Shadow-mode memory capture stores request/response events and high-precision mem
 
 ```toml
 [memory]
+enabled = true
 mode = "shadow"   # off | shadow | compact | inject
 # compact mode keeps a rolling prompt tail and renders scoped graph context
 rolling_tokens = 10000
@@ -169,11 +170,14 @@ compact_threshold_tokens = 12000
 max_context_items = 40
 
 # graph-memory extraction
-# default rule_based extraction runs synchronously; set extractor="gemma_json" to enqueue async jobs
-extractor = "rule_based"      # off | rule_based | gemma_json
+# default rule_based extraction runs synchronously; set extractor="model_memory_json" to enqueue async jobs
+extractor = "rule_based"      # rule_based | model_memory_json (llm_json/gemma_json are legacy aliases)
 extraction_model = "gemma-4-e2b"
 extraction_workers = 1
-extraction_max_tokens = 1200
+extraction_max_tokens = 1200       # output tokens per extraction call
+extraction_input_tokens = 6000     # approximate input budget per chunk
+extraction_overlap_tokens = 600    # overlap between chunks for cross-boundary facts
+extraction_max_chunks_per_event = 32
 extraction_timeout_seconds = 45
 ```
 
@@ -182,7 +186,7 @@ Modes:
 - `compact`: before inference, replace long histories with system context from the graph + a hot tail.
 - `inject`: reserved for compact + broader memory retrieval.
 
-Graph-engine maintenance is local and explicit: `gemma_json` extraction is asynchronous via durable jobs processed by `ppmlx memory worker`; the default `rule_based` extractor remains synchronous and `off` is available when configured.
+Graph-engine maintenance is local and explicit: `model_memory_json` extraction is asynchronous via durable jobs processed by `ppmlx memory worker`; the default `rule_based` extractor remains synchronous. `llm_json` and `gemma_json` are still accepted as legacy aliases. Long events are split into token-budgeted extraction chunks with overlap before model extraction.
 
 Compact observability is recorded locally in `memory.db` and, if analytics are enabled, sent as privacy-safe aggregate metrics to PostHog. It never sends prompts, responses, tool output, model repo IDs, project IDs, or session IDs.
 
@@ -191,6 +195,8 @@ Tool/MCP outputs are distilled through a plugin-style distiller interface. The b
 CLI:
 
 ```bash
+ppmlx memory config --enabled --extractor model_memory_json --model gemma-4-e2b
+ppmlx memory config --input-limit 6000 --overlap 600
 ppmlx memory status
 ppmlx memory search "concise answers"
 ppmlx memory list --status active

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,8 @@ from ppmlx.registry_fetch import (
     _extract_lab,
     _extract_modalities,
     _extract_params_b,
+    _extract_precision,
+    _extract_updated_at,
     _repo_id_to_alias,
     cache_status_text,
     is_cache_stale,
@@ -73,6 +76,13 @@ def test_staleness_no_cache_file(tmp_path: Path):
         assert is_cache_stale("weekly") is True
 
 
+def test_staleness_refreshes_old_cache_without_updated_at(tmp_path: Path):
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"fetched_at": time.time(), "models": {"m": {"repo_id": "x/y"}}}))
+    with patch("ppmlx.registry_fetch.get_cache_path", return_value=cache):
+        assert is_cache_stale("weekly") is True
+
+
 def test_cache_status_text_never_without_cache(tmp_path: Path):
     with patch("ppmlx.registry_fetch.get_cache_path", return_value=tmp_path / "nope.json"):
         assert cache_status_text() == "top downloads refreshed: never"
@@ -96,7 +106,7 @@ def test_fetch_from_hf_uses_top_downloaded_limit():
         def list_models(self, **kwargs):
             calls.append(kwargs)
             models = []
-            for i in range(60):
+            for i in range(120):
                 m = MagicMock()
                 m.id = f"mlx-community/Test-{i + 1}B-4bit"
                 m.tags = []
@@ -111,12 +121,14 @@ def test_fetch_from_hf_uses_top_downloaded_limit():
 
     assert calls[0]["author"] == "mlx-community"
     assert calls[0]["sort"] == "downloads"
-    assert calls[0]["limit"] >= 50
+    assert calls[0]["limit"] >= 100
+    assert "lastModified" in calls[0]["expand"]
+    assert "createdAt" in calls[0]["expand"]
     assert data is not None
     assert data["source"] == "huggingface-api-downloads"
-    assert len(data["models"]) == 50
+    assert len(data["models"]) == 100
     assert list(data["models"])[0] == "test:1b"
-    assert list(data["models"])[-1] == "test:50b"
+    assert list(data["models"])[-1] == "test:100b"
 
 
 # ── maybe_refresh ────────────────────────────────────────────────────
@@ -187,6 +199,36 @@ def test_extract_params_b():
     assert _extract_params_b(_make_model("mlx-community/Qwen3.5-9B-4bit")) == 9.0
     assert _extract_params_b(_make_model("mlx-community/parakeet-0.6b")) == 0.6
     assert _extract_params_b(_make_model("mlx-community/Kimi-K2.5")) is None
+
+
+def test_extract_params_b_from_safetensors_total():
+    model = _make_model("mlx-community/Kimi-K2.5")
+    model.safetensors = MagicMock(total=12_345_000_000)
+    assert _extract_params_b(model) == 12.3
+
+
+def test_extract_params_b_from_safetensors_parameters():
+    model = _make_model("mlx-community/custom-model")
+    model.safetensors = MagicMock(total=None, parameters={"BF16": 1_000_000_000, "U8": 500_000_000})
+    assert _extract_params_b(model) == 1.5
+
+
+@pytest.mark.parametrize("repo_id, expected", [
+    ("mlx-community/Qwen3.5-9B-MLX-4bit", "4bit"),
+    ("mlx-community/Qwen3.5-0.8B-8bit", "8bit"),
+    ("mlx-community/gpt-oss-20b-MXFP4-Q8", "mxfp4-q8"),
+    ("mlx-community/HiDream-O1-Image-Dev-mlx-bf16", "bf16"),
+    ("mlx-community/Kimi-K2.5", None),
+])
+def test_extract_precision(repo_id: str, expected: str | None):
+    assert _extract_precision(repo_id) == expected
+
+
+def test_extract_updated_at_prefers_last_modified():
+    m = _make_model("mlx-community/Test-1B-4bit")
+    m.last_modified = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    m.created_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    assert _extract_updated_at(m) == "2026-05-18"
 
 
 # ── Registry load semantics ──────────────────────────────────────────

@@ -16,19 +16,23 @@ def browse_models(
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.data_structures import Point
 
-    from ppmlx.cli import _visible_rows
+    from ppmlx.cli import _FILTER_COLUMNS, _FILTER_LABELS, _sort_rows, _visible_rows
     from ppmlx.tui._style import (
         get_style, header_text,
         render_model_row, render_table_header, render_section_title,
     )
 
-    state = {"cursor": 0, "search": ""}
+    state = {"cursor": 0, "search": "", "filter_col": "alias", "sort_desc": False}
 
     def _selectable_indices(r):
         return [i for i, row in enumerate(r) if row.section_header is None]
 
     def _filtered():
-        return _visible_rows(rows, state["search"])
+        return _sort_rows(
+            _visible_rows(rows, state["search"], state["filter_col"]),
+            state["filter_col"],
+            descending=state["sort_desc"],
+        )
 
     def _clamp_cursor(r):
         indices = _selectable_indices(r)
@@ -40,7 +44,11 @@ def browse_models(
 
     def _get_header():
         fragments = list(header_text(command_str))
-        fragments.append(("", "Search: "))
+        fragments.append(("", "Filter: "))
+        fragments.append(("class:value", _FILTER_LABELS[state["filter_col"]]))
+        fragments.append(("", "  Sort: "))
+        fragments.append(("class:value", "Desc" if state["sort_desc"] else "Asc"))
+        fragments.append(("", "  Search: "))
         fragments.append(("class:value", state["search"]))
         fragments.append(("class:value", "\u2588"))
         fragments.append(("", "\n"))
@@ -81,7 +89,7 @@ def browse_models(
         parts = []
         if footer_extra:
             parts.append(("class:dim", f"  {footer_extra}  "))
-        parts.append(("class:footer", "\u2191\u2193 navigate \u2022 type to search \u2022 esc/q quit"))
+        parts.append(("class:footer", "↑↓ move • tab filter • [/] asc/desc • esc/q"))
         return parts
 
     kb = KeyBindings()
@@ -115,6 +123,28 @@ def browse_models(
     @kb.add("escape")
     def _escape(event):
         event.app.exit()
+
+    @kb.add("tab")
+    def _next_filter_column(event):
+        idx = _FILTER_COLUMNS.index(state["filter_col"])
+        state["filter_col"] = _FILTER_COLUMNS[(idx + 1) % len(_FILTER_COLUMNS)]
+        state["cursor"] = 0
+
+    @kb.add("s-tab")
+    def _prev_filter_column(event):
+        idx = _FILTER_COLUMNS.index(state["filter_col"])
+        state["filter_col"] = _FILTER_COLUMNS[(idx - 1) % len(_FILTER_COLUMNS)]
+        state["cursor"] = 0
+
+    @kb.add("[")
+    def _sort_asc(event):
+        state["sort_desc"] = False
+        state["cursor"] = 0
+
+    @kb.add("]")
+    def _sort_desc(event):
+        state["sort_desc"] = True
+        state["cursor"] = 0
 
     @kb.add("q")
     def _quit(event):

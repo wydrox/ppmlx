@@ -73,6 +73,9 @@ class _PickerRow:
     downloaded: bool
     section_header: str | None  # non-None → non-selectable section label
     params_b: float | None = None
+    precision: str | None = None
+    downloads: int | None = None
+    updated_at: str | None = None
     is_loaded: bool = False
     is_favorite: bool = False
 
@@ -158,9 +161,11 @@ class ModelRecord:
     local_path: Path | None = None
     params_b: float | None = None
     model_type: str | None = None   # "dense" | "sparse"
+    precision: str | None = None
     lab: str | None = None
     modalities: str | None = None
     downloads: int | None = None
+    updated_at: str | None = None
     released: str | None = None
     source: str = "registry"        # "built-in" | "custom" | "registry" | "local-only"
 
@@ -204,8 +209,18 @@ def _build_model_records(
             aliases.setdefault(alias, repo_id)
     aliases.update(user_aliases)
 
-    # Source priority: custom > registry > built-in
-    _SOURCE_PRIO = {"custom": 0, "registry": 1, "built-in": 2, "local-only": 3}
+    def _source_prio(record: ModelRecord) -> int:
+        # Prefer custom aliases only for downloaded models. For not-yet-downloaded
+        # rows, the picker should show only HF registry aliases.
+        if record.source == "custom" and record.is_downloaded:
+            return 0
+        if record.source == "registry":
+            return 1
+        if record.source == "custom":
+            return 2
+        if record.source == "built-in":
+            return 3
+        return 4
 
     # Group by repo_id, keeping only the best alias per repo.
     by_repo: dict[str, ModelRecord] = {}
@@ -227,10 +242,12 @@ def _build_model_records(
             size_gb=lm["size_gb"] if lm else reg_entry.get("size_gb"),
             local_path=lm["path"] if lm else None,
             params_b=reg_entry.get("params_b") or None,
+            precision=reg_entry.get("precision"),
             model_type=reg_entry.get("type"),
             lab=reg_entry.get("lab"),
             modalities=reg_entry.get("modalities"),
             downloads=reg_entry.get("downloads"),
+            updated_at=reg_entry.get("updated_at") or reg_entry.get("created"),
             released=reg_entry.get("created"),
             source=source,
         )
@@ -240,8 +257,8 @@ def _build_model_records(
             by_repo[repo_id] = candidate
         else:
             # Pick best alias: higher source priority wins, then shorter name.
-            e_prio = _SOURCE_PRIO.get(existing.source, 9)
-            c_prio = _SOURCE_PRIO.get(candidate.source, 9)
+            e_prio = _source_prio(existing)
+            c_prio = _source_prio(candidate)
             if (c_prio, len(alias)) < (e_prio, len(existing.alias)):
                 # Carry over fields the new candidate might lack.
                 if candidate.params_b is None:
@@ -250,6 +267,10 @@ def _build_model_records(
                     candidate.size_gb = existing.size_gb
                 if candidate.lab is None:
                     candidate.lab = existing.lab
+                if candidate.precision is None:
+                    candidate.precision = existing.precision
+                if candidate.updated_at is None:
+                    candidate.updated_at = existing.updated_at
                 if not candidate.is_favorite and existing.is_favorite:
                     candidate.is_favorite = True
                 by_repo[repo_id] = candidate
@@ -261,6 +282,10 @@ def _build_model_records(
                     existing.size_gb = candidate.size_gb
                 if existing.lab is None:
                     existing.lab = candidate.lab
+                if existing.precision is None:
+                    existing.precision = candidate.precision
+                if existing.updated_at is None:
+                    existing.updated_at = candidate.updated_at
                 if not existing.is_favorite and candidate.is_favorite:
                     existing.is_favorite = True
 
@@ -333,18 +358,23 @@ def _group_by_lab(records: list[ModelRecord]) -> list[tuple[str, list[ModelRecor
     return sorted(groups.items(), key=lambda x: (x[0] == "Other", x[0]))
 
 
-def _build_picker_rows(*, local_only: bool = False) -> list[_PickerRow]:
+def _build_picker_rows(*, local_only: bool = False, available_limit: int | None = None) -> list[_PickerRow]:
     records = _build_model_records()
     rows: list[_PickerRow] = []
 
-    fav_records = [r for r in records if r.is_favorite and (not local_only or r.is_downloaded)]
-    dl_records = [r for r in records if r.is_downloaded and not r.is_favorite]
-    avail_records = [r for r in records if not r.is_downloaded and not r.is_favorite]
+    fav_records = [
+        r for r in records
+        if r.is_favorite and not r.is_downloaded and r.source == "registry" and not local_only
+    ]
+    dl_records = [r for r in records if r.is_downloaded]
+    avail_records = [r for r in records if not r.is_downloaded and not r.is_favorite and r.source == "registry"]
+    if available_limit is not None:
+        avail_records = sorted(avail_records, key=lambda r: (-(r.downloads or 0), r.alias))[:available_limit]
 
     def _row(r: ModelRecord) -> _PickerRow:
         return _PickerRow(
             alias=r.alias, size_gb=r.size_gb, downloaded=r.is_downloaded,
-            section_header=None, params_b=r.params_b,
+            section_header=None, params_b=r.params_b, precision=r.precision, downloads=r.downloads, updated_at=r.updated_at,
             is_loaded=r.is_loaded, is_favorite=r.is_favorite,
         )
 
@@ -360,7 +390,8 @@ def _build_picker_rows(*, local_only: bool = False) -> list[_PickerRow]:
 
     if avail_records and not local_only:
         rows.append(_PickerRow("", None, False, "Available"))
-        for r in sorted(avail_records, key=lambda r: r.alias):
+        sort_key = (lambda r: (-(r.downloads or 0), r.alias)) if available_limit is not None else (lambda r: r.alias)
+        for r in sorted(avail_records, key=sort_key):
             rows.append(_row(r))
 
     return rows
@@ -377,6 +408,9 @@ def _print_model_rows(rows: list[_PickerRow], *, title: str) -> None:
             continue
         size = _fmt_stat(row.size_gb, " GB") if row.size_gb is not None else "-"
         params = _fmt_stat(row.params_b, "B") if row.params_b is not None else "-"
+        precision = row.precision or "-"
+        downloads = f"{round(row.downloads / 1000):,}k" if row.downloads is not None else "-"
+        updated_at = row.updated_at or "-"
         badges = []
         if row.is_favorite:
             badges.append("favorite")
@@ -385,7 +419,29 @@ def _print_model_rows(rows: list[_PickerRow], *, title: str) -> None:
         if row.is_loaded:
             badges.append("loaded")
         suffix = f" ({', '.join(badges)})" if badges else ""
-        console.print(f"  {row.alias}\t{size}\t{params}{suffix}")
+        console.print(f"  {row.alias}\t{size}\t{params}\t{precision}\t{downloads}\t{updated_at}{suffix}")
+
+
+def _normalize_memory_mode_cli(value) -> str:
+    raw = str(value).strip().lower()
+    aliases = {
+        "0": "off", "false": "off", "no": "off", "off": "off",
+        "1": "shadow", "true": "shadow", "yes": "shadow", "on": "shadow",
+        "shadow": "shadow", "compact": "compact", "inject": "inject",
+    }
+    return aliases.get(raw, "off")
+
+
+def _normalize_memory_extractor_cli(value) -> str:
+    raw = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "rule": "rule_based", "rules": "rule_based", "rule_based": "rule_based", "regex": "rule_based",
+        "model_memory_json": "model_memory_json", "memory_model_json": "model_memory_json",
+        "model_json_memory": "model_memory_json", "strict_json_memory": "model_memory_json",
+        "llm": "model_memory_json", "json": "model_memory_json", "json_llm": "model_memory_json",
+        "llm_json": "model_memory_json", "gemma_json": "model_memory_json",
+    }
+    return aliases.get(raw, "rule_based")
 
 
 def _redact_config(value):
@@ -411,20 +467,84 @@ def _redact_config(value):
     return value
 
 
-def _visible_rows(rows: list[_PickerRow], ft: str) -> list[_PickerRow]:
+_FILTER_COLUMNS = ["alias", "params", "precision", "size", "downloads", "updated", "all"]
+_FILTER_LABELS = {
+    "alias": "Alias",
+    "params": "Params",
+    "precision": "Precision",
+    "size": "Size",
+    "downloads": "Downloads",
+    "updated": "Updated",
+    "all": "All",
+}
+
+
+def _row_filter_value(row: _PickerRow, column: str) -> str:
+    values = {
+        "alias": row.alias,
+        "params": f"{row.params_b:g}b" if row.params_b else "",
+        "precision": row.precision or "",
+        "size": f"{row.size_gb:.1f} gb" if row.size_gb else "",
+        "downloads": f"{round(row.downloads / 1000)}k {row.downloads}" if row.downloads is not None else "",
+        "updated": row.updated_at or "",
+    }
+    if column == "all":
+        return " ".join(values.values())
+    return values.get(column, values["alias"])
+
+
+def _visible_rows(rows: list[_PickerRow], ft: str, column: str = "alias") -> list[_PickerRow]:
     if not ft:
         return rows
     result: list[_PickerRow] = []
     pending_header: _PickerRow | None = None
+    needle = ft.lower()
     for row in rows:
         if row.section_header is not None:
             pending_header = row
             continue
-        if ft.lower() in row.alias.lower():
+        if needle in _row_filter_value(row, column).lower():
             if pending_header is not None:
                 result.append(pending_header)
                 pending_header = None
             result.append(row)
+    return result
+
+
+def _row_sort_key(row: _PickerRow, column: str):
+    if column == "params":
+        return ((row.params_b is None), row.params_b or 0, row.alias)
+    if column == "size":
+        return ((row.size_gb is None), row.size_gb or 0, row.alias)
+    if column == "downloads":
+        return ((row.downloads is None), row.downloads or 0, row.alias)
+    if column == "precision":
+        return (row.precision or "", row.alias)
+    if column == "updated":
+        return (row.updated_at or "", row.alias)
+    return (row.alias,)
+
+
+def _sort_rows(rows: list[_PickerRow], column: str = "alias", descending: bool = False) -> list[_PickerRow]:
+    """Sort selectable rows within each section by active filter column."""
+    if column == "all" or column not in _FILTER_COLUMNS:
+        column = "alias"
+    result: list[_PickerRow] = []
+    pending: list[_PickerRow] = []
+
+    def flush() -> None:
+        if pending:
+            pending.sort(key=lambda r: _row_sort_key(r, column), reverse=descending)
+            result.extend(pending)
+            pending.clear()
+
+    for row in rows:
+        if row.section_header is not None:
+            flush()
+            result.append(row)
+        else:
+            pending.append(row)
+    flush()
     return result
 
 
@@ -1447,9 +1567,10 @@ def pull(
             refresh_registry()
             console.print("[dim]Registry refreshed.[/dim]")
 
+        from ppmlx.config import load_config
         from ppmlx.tui import pick_models
 
-        selected = pick_models(local_only=False)
+        selected = pick_models(local_only=False, available_limit=load_config().registry.display_limit)
         if not selected:
             console.print("[dim]Nothing selected.[/dim]")
             return
@@ -1689,7 +1810,10 @@ def config_cmd(
         console.print(f"[bold]Config:[/bold] {cfg_path}")
         redacted = _redact_config(data)
         rendered = tomli_w.dumps(redacted).strip()
-        console.print(rendered or "[dim]No config set.[/dim]")
+        if rendered:
+            console.print(rendered, markup=False)
+        else:
+            console.print("[dim]No config set.[/dim]")
         return
 
     # Interactive TUI config
@@ -1900,6 +2024,98 @@ def graph_cmd(
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]Graph view stopped.[/yellow]")
+
+
+@memory_app.command(name="config")
+def memory_config_cmd(
+    enabled: Optional[bool] = typer.Option(None, "--enabled/--disabled", help="Enable or disable the local memory feature."),
+    mode: Optional[str] = typer.Option(None, "--mode", help="Memory mode: off, shadow, compact, or inject."),
+    extractor: Optional[str] = typer.Option(None, "--extractor", help="Extractor: rule_based or model_memory_json."),
+    model: Optional[str] = typer.Option(None, "--model", help="Local model used by model_memory_json extraction."),
+    max_candidates_per_event: Optional[int] = typer.Option(
+        None,
+        "--max-candidates-per-event",
+        "--max-jobs-per-event",
+        help="Maximum memory candidates extracted from one event.",
+    ),
+    output_limit: Optional[int] = typer.Option(None, "--output-limit", help="Max output tokens for each extraction model call."),
+    workers: Optional[int] = typer.Option(None, "--workers", help="Max parallel extractor calls within one oversized event."),
+    input_limit: Optional[int] = typer.Option(None, "--input-limit", help="Approximate input-token budget per extraction chunk."),
+    overlap: Optional[int] = typer.Option(None, "--overlap", help="Approximate token overlap between extraction chunks."),
+    max_chunks: Optional[int] = typer.Option(None, "--max-chunks", help="Maximum extraction chunks/calls created for one event."),
+    timeout: Optional[float] = typer.Option(None, "--timeout", help="Extraction timeout in seconds for future worker integrations."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """View or edit dedicated local memory configuration."""
+    import tomllib
+    import tomli_w  # type: ignore[import]
+    from ppmlx.config import get_ppmlx_dir
+
+    cfg_path = get_ppmlx_dir() / "config.toml"
+    try:
+        with open(cfg_path, "rb") as f:
+            data: dict = tomllib.load(f)
+    except Exception:
+        data = {}
+
+    flag_values = [enabled, mode, extractor, model, max_candidates_per_event, output_limit, workers, input_limit, overlap, max_chunks, timeout]
+    has_flag = any(value is not None for value in flag_values)
+    memory_data = data.setdefault("memory", {})
+    if has_flag:
+        if enabled is not None:
+            memory_data["enabled"] = enabled
+            if enabled and _normalize_memory_mode_cli(memory_data.get("mode", "off")) == "off":
+                memory_data["mode"] = "shadow"
+            elif not enabled:
+                memory_data["mode"] = "off"
+        if mode is not None:
+            memory_data["mode"] = _normalize_memory_mode_cli(mode)
+            memory_data["enabled"] = memory_data["mode"] != "off"
+        if extractor is not None:
+            memory_data["extractor"] = _normalize_memory_extractor_cli(extractor)
+        if model is not None:
+            memory_data["extraction_model"] = model
+        if max_candidates_per_event is not None:
+            memory_data["max_candidates_per_event"] = max(0, int(max_candidates_per_event))
+        if output_limit is not None:
+            memory_data["extraction_max_tokens"] = max(1, int(output_limit))
+        if workers is not None:
+            memory_data["extraction_workers"] = max(1, int(workers))
+        if input_limit is not None:
+            memory_data["extraction_input_tokens"] = max(256, int(input_limit))
+        if overlap is not None:
+            memory_data["extraction_overlap_tokens"] = max(0, int(overlap))
+        if max_chunks is not None:
+            memory_data["extraction_max_chunks_per_event"] = max(1, int(max_chunks))
+        if timeout is not None:
+            memory_data["extraction_timeout_seconds"] = max(0.1, float(timeout))
+        try:
+            cfg_path.write_bytes(tomli_w.dumps(data).encode())
+        except Exception as exc:
+            console.print(f"[red]Failed to write config: {exc}[/red]")
+            raise typer.Exit(1)
+
+    if json_output:
+        typer.echo(json.dumps(memory_data, indent=2, ensure_ascii=False))
+        return
+
+    if has_flag:
+        console.print("[green]Memory config saved.[/green]")
+        console.print(f"[dim]{cfg_path}[/dim]")
+        return
+
+    if not _is_interactive_terminal():
+        console.print(f"[bold]Memory config:[/bold] {cfg_path}")
+        rendered = tomli_w.dumps({"memory": memory_data}).strip()
+        if rendered:
+            console.print(rendered, markup=False)
+        else:
+            console.print("[dim]No memory config set.[/dim]")
+        return
+
+    from ppmlx.tui import memory_config_menu
+
+    memory_config_menu()
 
 
 @memory_app.command(name="status")

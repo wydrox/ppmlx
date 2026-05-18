@@ -244,6 +244,8 @@ def _memory_mode() -> str:
 
         cfg = load_config()
         memory_cfg = getattr(cfg, "memory", None)
+        if not bool(getattr(memory_cfg, "enabled", True)):
+            return "off"
         return str(getattr(memory_cfg, "mode", "off")).lower()
     except Exception:
         return "off"

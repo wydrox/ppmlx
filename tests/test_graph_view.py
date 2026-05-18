@@ -49,3 +49,15 @@ def test_render_graph_html_includes_polluted_data_diagnosis_text() -> None:
     assert "suspicious facts" in html
     assert "weak labels" in html
     assert "Details & evidence" in html
+
+
+def test_render_graph_html_includes_live_refresh_and_new_memory_animation() -> None:
+    html = render_graph_html()
+
+    assert 'id="live"' in html
+    assert "Live 1s" in html
+    assert "setInterval(() => { if (!document.hidden) load({ auto: true }); }, 1000)" in html
+    assert "snapshotFingerprint" in html
+    assert "new-memory" in html
+    assert "@keyframes pulseNew" in html
+    assert "animateNewGraphItems" in html

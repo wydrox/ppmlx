@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
@@ -35,6 +36,7 @@ def _setup_model_mocks(
     user_aliases=None,
     local_models=None,
     favorites=None,
+    registry_entries=None,
 ):
     """Configure ppmlx.models mocks for commands using _build_model_records."""
     if defaults is None:
@@ -45,13 +47,15 @@ def _setup_model_mocks(
         local_models = []
     if favorites is None:
         favorites = []
+    if registry_entries is None:
+        registry_entries = {}
     merged = {**defaults, **user_aliases}
     sys.modules["ppmlx.models"].DEFAULT_ALIASES = defaults
     sys.modules["ppmlx.models"].load_user_aliases = MagicMock(return_value=user_aliases)
     sys.modules["ppmlx.models"].all_aliases = MagicMock(return_value=merged)
     sys.modules["ppmlx.models"].list_local_models = MagicMock(return_value=local_models)
     sys.modules["ppmlx.models"].load_favorites = MagicMock(return_value=favorites)
-    sys.modules["ppmlx.registry"].registry_entries = MagicMock(return_value={})
+    sys.modules["ppmlx.registry"].registry_entries = MagicMock(return_value=registry_entries)
 
 
 def test_list_command_empty():
@@ -61,6 +65,107 @@ def test_list_command_empty():
     result = runner.invoke(app, ["list"])
     assert result.exit_code == 0
     assert "No models" in result.output
+
+
+def test_visible_rows_filters_by_selected_column():
+    """Model table search can target any table column, with All as broad search."""
+    from ppmlx.cli import _PickerRow, _visible_rows
+
+    rows = [
+        _PickerRow("", None, False, "Available"),
+        _PickerRow("qwen", 4.0, False, None, params_b=7.0, precision="4bit", downloads=150_000, updated_at="2026-05-18"),
+        _PickerRow("gemma", 8.0, False, None, params_b=27.0, precision="bf16", downloads=2_500, updated_at="2025-01-01"),
+    ]
+
+    assert [r.alias for r in _visible_rows(rows, "bf16", "precision") if r.section_header is None] == ["gemma"]
+    assert [r.alias for r in _visible_rows(rows, "150k", "downloads") if r.section_header is None] == ["qwen"]
+    assert [r.alias for r in _visible_rows(rows, "8.0", "size") if r.section_header is None] == ["gemma"]
+    assert [r.alias for r in _visible_rows(rows, "2026", "updated") if r.section_header is None] == ["qwen"]
+    assert [r.alias for r in _visible_rows(rows, "27", "all") if r.section_header is None] == ["gemma"]
+
+
+def test_sort_rows_sorts_active_column_with_direction():
+    """Rows can be sorted asc/desc by the active filter column."""
+    from ppmlx.cli import _FILTER_COLUMNS, _PickerRow, _sort_rows
+
+    rows = [
+        _PickerRow("", None, False, "Available"),
+        _PickerRow("qwen", 4.0, False, None, params_b=7.0, precision="4bit", downloads=150_000, updated_at="2026-05-18"),
+        _PickerRow("gemma", 8.0, False, None, params_b=27.0, precision="bf16", downloads=2_500, updated_at="2025-01-01"),
+    ]
+
+    assert _FILTER_COLUMNS == ["alias", "params", "precision", "size", "downloads", "updated", "all"]
+    assert [r.alias for r in _sort_rows(rows, "params") if r.section_header is None] == ["qwen", "gemma"]
+    assert [r.alias for r in _sort_rows(rows, "params", descending=True) if r.section_header is None] == ["gemma", "qwen"]
+    assert [r.alias for r in _sort_rows(rows, "size", descending=True) if r.section_header is None] == ["gemma", "qwen"]
+    assert [r.alias for r in _sort_rows(rows, "downloads", descending=True) if r.section_header is None] == ["qwen", "gemma"]
+    assert [r.alias for r in _sort_rows(rows, "updated", descending=True) if r.section_header is None] == ["qwen", "gemma"]
+
+
+def test_build_picker_rows_limits_available_by_downloads():
+    """available_limit caps available pull rows, keeping highest-download registry entries."""
+    from ppmlx.cli import _build_picker_rows
+
+    registry_entries = {
+        "low:1b": {"repo_id": "mlx-community/Low-1B-4bit", "downloads": 100},
+        "high:1b": {"repo_id": "mlx-community/High-1B-4bit", "downloads": 5000},
+        "mid:1b": {"repo_id": "mlx-community/Mid-1B-4bit", "downloads": 1000},
+    }
+    _setup_model_mocks(registry_entries=registry_entries)
+
+    rows = _build_picker_rows(local_only=False, available_limit=2)
+    aliases = [r.alias for r in rows if r.section_header is None]
+
+    assert aliases == ["high:1b", "mid:1b"]
+
+
+def test_build_picker_rows_available_contains_only_hf_registry_models():
+    """User aliases that are not downloaded are not shown in Available."""
+    from ppmlx.cli import _build_picker_rows
+
+    registry_entries = {
+        "hf:1b": {"repo_id": "mlx-community/HF-1B-4bit", "downloads": 1000},
+    }
+    _setup_model_mocks(
+        user_aliases={"custom:1b": "myorg/Custom-1B"},
+        registry_entries=registry_entries,
+    )
+
+    rows = _build_picker_rows(local_only=False)
+    aliases = [r.alias for r in rows if r.section_header is None]
+
+    assert aliases == ["hf:1b"]
+
+
+def test_build_picker_rows_downloaded_contains_user_downloads_only_there():
+    """Downloaded user/local models are shown under Downloaded, not Available."""
+    from ppmlx.cli import _build_picker_rows
+
+    local_models = [
+        {
+            "name": "myorg--Custom-1B",
+            "alias": "myorg/Custom-1B",
+            "repo_id": "myorg/Custom-1B",
+            "size_gb": 1.0,
+            "path": "/tmp/myorg--Custom-1B",
+        }
+    ]
+    _setup_model_mocks(
+        user_aliases={"custom:1b": "myorg/Custom-1B"},
+        local_models=local_models,
+    )
+
+    rows = _build_picker_rows(local_only=False)
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for row in rows:
+        if row.section_header is not None:
+            current = row.section_header
+            sections.setdefault(current, [])
+        else:
+            sections.setdefault(current, []).append(row.alias)
+
+    assert sections == {"Downloaded": ["custom:1b"]}
 
 
 def test_list_command_with_model():
@@ -136,6 +241,65 @@ def test_config_command_non_tty_prints_redacted_config(tmp_path):
         assert "max_tools_tokens = 3000" in result.output
 
 
+def test_memory_config_command_sets_memory_flags(tmp_path):
+    """memory config command writes memory on/off and extraction settings."""
+    import tomllib
+
+    fake_config_dir = tmp_path / ".ppmlx"
+    fake_config_dir.mkdir()
+    sys.modules["ppmlx.config"].get_ppmlx_dir = MagicMock(return_value=fake_config_dir)
+
+    result = runner.invoke(app, [
+        "memory", "config",
+        "--enabled",
+        "--extractor", "model_memory_json",
+        "--model", "qwen3.5:0.8b",
+        "--max-jobs-per-event", "7",
+        "--output-limit", "900",
+        "--workers", "2",
+        "--input-limit", "4096",
+        "--overlap", "512",
+        "--max-chunks", "12",
+        "--timeout", "30",
+    ])
+
+    assert result.exit_code == 0
+    with open(fake_config_dir / "config.toml", "rb") as f:
+        data = tomllib.load(f)
+    assert data["memory"]["enabled"] is True
+    assert data["memory"]["mode"] == "shadow"
+    assert data["memory"]["extractor"] == "model_memory_json"
+    assert data["memory"]["extraction_model"] == "qwen3.5:0.8b"
+    assert data["memory"]["max_candidates_per_event"] == 7
+    assert data["memory"]["extraction_max_tokens"] == 900
+    assert data["memory"]["extraction_workers"] == 2
+    assert data["memory"]["extraction_input_tokens"] == 4096
+    assert data["memory"]["extraction_overlap_tokens"] == 512
+    assert data["memory"]["extraction_max_chunks_per_event"] == 12
+    assert data["memory"]["extraction_timeout_seconds"] == 30.0
+
+
+def test_memory_config_command_non_tty_prints_toml_section(tmp_path):
+    fake_config_dir = tmp_path / ".ppmlx"
+    fake_config_dir.mkdir()
+    sys.modules["ppmlx.config"].get_ppmlx_dir = MagicMock(return_value=fake_config_dir)
+
+    with patch("ppmlx.cli._is_interactive_terminal", return_value=False):
+        result = runner.invoke(app, ["memory", "config"])
+
+    assert result.exit_code == 0
+    assert "Memory config:" in result.output
+    assert "[memory]" in result.output
+
+
+def test_config_command_help_does_not_include_memory_flags():
+    result = runner.invoke(app, ["config", "--help"])
+
+    assert result.exit_code == 0
+    assert "--memory-extractor" not in result.output
+    assert "--memory-mode" not in result.output
+
+
 def test_pull_command():
     """pull command calls download_model with the correct model name."""
     ModelNotFoundError = type("ModelNotFoundError", (Exception,), {})
@@ -154,10 +318,16 @@ def test_pull_command():
 
 def test_pull_refreshes_registry_before_interactive_picker():
     """pull --refresh force-refreshes registry before opening the selector."""
-    with patch("ppmlx.registry.refresh_registry") as mock_refresh, patch("ppmlx.tui.pick_models", return_value=[]):
+    cfg = SimpleNamespace(registry=SimpleNamespace(display_limit=25))
+    with (
+        patch("ppmlx.registry.refresh_registry") as mock_refresh,
+        patch("ppmlx.config.load_config", return_value=cfg),
+        patch("ppmlx.tui.pick_models", return_value=[]) as mock_pick,
+    ):
         result = runner.invoke(app, ["pull", "--refresh"])
     assert result.exit_code == 0
     mock_refresh.assert_called_once()
+    mock_pick.assert_called_once_with(local_only=False, available_limit=25)
     assert "Registry refreshed" in result.output
 
 

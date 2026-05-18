@@ -15,7 +15,10 @@ def pick_model(
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.data_structures import Point
 
-    from ppmlx.cli import _build_picker_rows, _visible_rows
+    from ppmlx.cli import (
+        _FILTER_COLUMNS, _FILTER_LABELS,
+        _build_picker_rows, _sort_rows, _visible_rows,
+    )
     from ppmlx.tui._style import (
         get_style, header_text,
         render_model_row, render_table_header, render_section_title,
@@ -29,13 +32,17 @@ def pick_model(
         registry_status = "last refresh: unknown"
 
     # State
-    state = {"cursor": 0, "search": ""}
+    state = {"cursor": 0, "search": "", "filter_col": "alias", "sort_desc": False}
 
     def _selectable_indices(rows):
         return [i for i, r in enumerate(rows) if r.section_header is None]
 
     def _filtered():
-        return _visible_rows(all_rows, state["search"])
+        return _sort_rows(
+            _visible_rows(all_rows, state["search"], state["filter_col"]),
+            state["filter_col"],
+            descending=state["sort_desc"],
+        )
 
     def _clamp_cursor(rows):
         indices = _selectable_indices(rows)
@@ -47,7 +54,11 @@ def pick_model(
 
     def _get_header():
         fragments = list(header_text(command_str))
-        fragments.append(("", "Search: "))
+        fragments.append(("", "Filter: "))
+        fragments.append(("class:value", _FILTER_LABELS[state["filter_col"]]))
+        fragments.append(("", "  Sort: "))
+        fragments.append(("class:value", "Desc" if state["sort_desc"] else "Asc"))
+        fragments.append(("", "  Search: "))
         fragments.append(("class:value", state["search"]))
         fragments.append(("class:value", "\u2588"))
         if not local_only:
@@ -87,7 +98,7 @@ def pick_model(
         return fragments
 
     def _get_footer():
-        return [("class:footer", "\u2191\u2193 navigate \u2022 enter select \u2022 esc cancel \u2022 type to search")]
+        return [("class:footer", "↑↓ move • tab filter • [/] asc/desc • enter select • esc")]
 
     kb = KeyBindings()
 
@@ -124,6 +135,28 @@ def pick_model(
         if state["cursor"] in indices:
             row = rows[state["cursor"]]
             event.app.exit(result=row.alias)
+
+    @kb.add("tab")
+    def _next_filter_column(event):
+        idx = _FILTER_COLUMNS.index(state["filter_col"])
+        state["filter_col"] = _FILTER_COLUMNS[(idx + 1) % len(_FILTER_COLUMNS)]
+        state["cursor"] = 0
+
+    @kb.add("s-tab")
+    def _prev_filter_column(event):
+        idx = _FILTER_COLUMNS.index(state["filter_col"])
+        state["filter_col"] = _FILTER_COLUMNS[(idx - 1) % len(_FILTER_COLUMNS)]
+        state["cursor"] = 0
+
+    @kb.add("[")
+    def _sort_asc(event):
+        state["sort_desc"] = False
+        state["cursor"] = 0
+
+    @kb.add("]")
+    def _sort_desc(event):
+        state["sort_desc"] = True
+        state["cursor"] = 0
 
     @kb.add("escape")
     def _escape(event):

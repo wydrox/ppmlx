@@ -8,7 +8,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from ppmlx.cli import app
-from ppmlx.memory_engine import MemoryEngine, ShadowMemoryCandidate, get_memory_engine
+from ppmlx.memory_engine import MemoryEngine, ShadowMemoryCandidate, _event_extraction_chunks, get_memory_engine
 from ppmlx.memory_store import MemoryStore, reset_memory_store
 
 
@@ -589,6 +589,21 @@ def test_memory_cli_jobs_json_lists_jobs(tmp_home):
     reset_memory_store()
 
 
+def test_event_extraction_chunks_use_token_budget_and_overlap():
+    messages = [
+        {"role": "user", "content": f"chunk-marker-{idx} " + ("x" * 90)}
+        for idx in range(5)
+    ]
+    event = {"event_id": "chunked", "messages": messages, "response_text": ""}
+
+    chunks = _event_extraction_chunks(event, max_input_tokens=80, overlap_tokens=40, max_chunks=10)
+
+    assert len(chunks) > 1
+    assert all(chunk["response_text"] == "" for chunk in chunks)
+    assert all(chunk["metadata"]["extraction_chunk"]["max_input_tokens"] == 80 for chunk in chunks)
+    assert chunks[0]["messages"][-1]["content"] == chunks[1]["messages"][0]["content"]
+
+
 def test_capture_chat_records_event_when_extraction_fails(tmp_path):
     class FailingExtractor:
         max_candidates = 2
@@ -615,10 +630,10 @@ def test_capture_chat_records_event_when_extraction_fails(tmp_path):
     assert stats["candidates"] == 0
 
 
-def test_get_memory_engine_uses_configured_gemma_extractor(tmp_home, monkeypatch):
+def test_get_memory_engine_uses_configured_model_memory_json_extractor(tmp_home, monkeypatch):
     import ppmlx.memory_extractors as memory_extractors
 
-    class FakeGemmaExtractor:
+    class FakeModelMemoryJsonExtractor:
         def __init__(self, *, model_name, max_candidates, max_tokens):
             self.model_name = model_name
             self.max_candidates = max_candidates
@@ -627,25 +642,31 @@ def test_get_memory_engine_uses_configured_gemma_extractor(tmp_home, monkeypatch
         def extract(self, event):
             return []
 
-    monkeypatch.setenv("PPMLX_MEMORY_EXTRACTOR", "gemma_json")
-    monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_MODEL", "fake-gemma")
+    monkeypatch.setenv("PPMLX_MEMORY_EXTRACTOR", "model_memory_json")
+    monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_MODEL", "fake-extractor-model")
     monkeypatch.setenv("PPMLX_MEMORY_MAX_CANDIDATES", "3")
     monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_MAX_TOKENS", "321")
     monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_WORKERS", "2")
-    monkeypatch.setattr(memory_extractors, "GemmaJsonMemoryExtractor", FakeGemmaExtractor)
+    monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_INPUT_TOKENS", "2048")
+    monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_OVERLAP_TOKENS", "256")
+    monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_MAX_CHUNKS", "7")
+    monkeypatch.setattr(memory_extractors, "ModelMemoryJsonExtractor", FakeModelMemoryJsonExtractor)
 
     engine = get_memory_engine(tmp_home / "memory.db")
 
-    assert isinstance(engine.extractor, FakeGemmaExtractor)
-    assert engine.extractor.model_name == "fake-gemma"
+    assert isinstance(engine.extractor, FakeModelMemoryJsonExtractor)
+    assert engine.extractor.model_name == "fake-extractor-model"
     assert engine.extractor.max_candidates == 3
     assert engine.extractor.max_tokens == 321
     assert engine.extraction_workers == 2
     assert engine.parallel_extraction is True
     assert engine.enqueue_extraction is True
+    assert engine.extraction_input_tokens == 2048
+    assert engine.extraction_overlap_tokens == 256
+    assert engine.extraction_max_chunks_per_event == 7
 
 
-def test_parallel_gemma_extraction_merges_dedupes_and_writes_on_main_thread(tmp_path):
+def test_parallel_model_memory_json_extraction_merges_dedupes_and_writes_on_main_thread(tmp_path):
     main_thread_id = threading.get_ident()
     calls: list[list[dict]] = []
     lock = threading.Lock()
@@ -702,6 +723,8 @@ def test_parallel_gemma_extraction_merges_dedupes_and_writes_on_main_thread(tmp_
         extractor=FakeGemmaExtractor(),
         extraction_workers=3,
         parallel_extraction=True,
+        extraction_input_tokens=24,
+        extraction_overlap_tokens=0,
     )
 
     result = engine.capture_chat(
@@ -715,11 +738,11 @@ def test_parallel_gemma_extraction_merges_dedupes_and_writes_on_main_thread(tmp_
             {"role": "user", "content": "Remember tea."},
             {"role": "user", "content": "Remember coffee."},
         ],
-        response_text="ok",
+        response_text="",
     )
 
-    assert len(calls) == 4
-    assert all(len(messages) == 1 for messages in calls)
+    assert len(calls) >= 3
+    assert calls[0] == [{"role": "user", "content": "I prefer concise answers."}]
     assert result["candidates"] == 2
     assert result["active"] == 2
     rows = store.query_candidates(status="active")

@@ -106,10 +106,14 @@ body { margin:0; font:14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMa
 header { display:flex; gap:16px; align-items:center; padding:14px 18px; border-bottom:1px solid #1f2937; background:#0d131b; position:sticky; top:0; z-index:2; }
 h1 { font-size:18px; margin:0; letter-spacing:.02em; }
 .badge { color:#08111a; background:var(--accent); border-radius:999px; padding:2px 8px; font-weight:700; }
-.controls { display:grid; grid-template-columns:repeat(8, minmax(90px, 1fr)); gap:8px; padding:12px 18px; border-bottom:1px solid #1f2937; background:#0d131b; }
+.controls { display:grid; grid-template-columns:repeat(9, minmax(90px, 1fr)); gap:8px; padding:12px 18px; border-bottom:1px solid #1f2937; background:#0d131b; }
 label { color:var(--muted); font-size:12px; display:flex; flex-direction:column; gap:4px; }
 input, select, button { background:#0f1720; color:var(--text); border:1px solid #263244; border-radius:8px; padding:8px; }
 button { cursor:pointer; background:#132033; }
+button.live-on { border-color:#166534; color:#bbf7d0; box-shadow:0 0 0 1px #16653455 inset; }
+button.live-off { border-color:#475569; color:#94a3b8; }
+.live-dot { display:inline-block; width:8px; height:8px; margin-right:6px; border-radius:999px; background:var(--ok); box-shadow:0 0 12px var(--ok); animation:livePulse 1s ease-in-out infinite; }
+.live-off .live-dot { background:#64748b; box-shadow:none; animation:none; }
 main { display:grid; grid-template-columns:minmax(420px, 1fr) 420px; min-height:calc(100vh - 116px); }
 #graph-wrap { position:relative; width:100%; height:calc(100vh - 116px); background:radial-gradient(circle at center, #101923 0, #0b0f14 70%); }
 #graph { width:100%; height:100%; }
@@ -123,6 +127,9 @@ h2 { font-size:13px; margin:0 0 8px; color:var(--accent); text-transform:upperca
 .stat b { display:block; font-size:18px; }
 .item { border:1px solid #1f2b3d; border-radius:10px; padding:10px; margin:8px 0; background:#0d141e; cursor:pointer; }
 .item:hover { border-color:#3b82f6; }
+.item.new-memory { border-color:var(--hot); background:#201807; animation:pulseNew 1.8s ease-out 1; }
+@keyframes pulseNew { 0% { box-shadow:0 0 0 0 rgba(251,191,36,.9); transform:translateY(-1px); } 70% { box-shadow:0 0 0 12px rgba(251,191,36,0); } 100% { box-shadow:0 0 0 0 rgba(251,191,36,0); transform:translateY(0); } }
+@keyframes livePulse { 0%,100% { opacity:.55; transform:scale(.85); } 50% { opacity:1; transform:scale(1.15); } }
 .muted { color:var(--muted); }
 .mode-note, .diagnosis { color:var(--muted); font-size:13px; }
 .diagnosis ul { margin:8px 0 0; padding-left:18px; }
@@ -138,7 +145,7 @@ pre { white-space:pre-wrap; word-break:break-word; background:#0b1119; border:1p
 </style>
 </head>
 <body>
-<header><h1>ppmlx graph</h1><span class="badge">local read-only</span><span class="muted" id="path"></span></header>
+<header><h1>ppmlx graph</h1><span class="badge">local read-only</span><span class="muted" id="path"></span><span class="muted" id="live-status"></span></header>
 <div class="controls">
 <label>Search <input id="query" placeholder="fact, entity, source quote" /></label>
 <label>Project <input id="project_id" placeholder="project_id" /></label>
@@ -148,6 +155,7 @@ pre { white-space:pre-wrap; word-break:break-word; background:#0b1119; border:1p
 <label>Mode <select id="mode" aria-label="UI mode"><option value="curated">curated</option><option value="raw">raw/debug</option></select></label>
 <label>Limit <input id="limit" type="number" min="1" max="500" value="120" /></label>
 <button id="refresh">Refresh</button>
+<button id="live" class="live-on" aria-pressed="true"><span class="live-dot"></span>Live 1s</button>
 </div>
 <main>
 <div id="graph-wrap" role="img" aria-label="temporal memory graph"><div id="graph-message" class="graph-message" hidden></div><div id="graph"></div></div>
@@ -164,20 +172,89 @@ pre { white-space:pre-wrap; word-break:break-word; background:#0b1119; border:1p
 const defaults = __DEFAULTS_JSON__;
 const $ = id => document.getElementById(id);
 let graph = null;
+let liveTimer = null;
+let liveEnabled = true;
+let loadInFlight = false;
+let lastFingerprint = '';
+let seenIds = new Set();
 for (const [k,v] of Object.entries(defaults)) if ($(k) && v) $(k).value = v;
-$('refresh').onclick = load;
-$('mode').addEventListener('change', load);
+$('refresh').onclick = () => load({ force: true });
+$('mode').addEventListener('change', () => load({ force: true }));
+$('live').onclick = () => { liveEnabled = !liveEnabled; updateLiveUi(); resetAutoRefresh(); };
 for (const id of ['query','project_id','session_id','app_id','status','limit']) $(id).addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function modeLabel() { return $('mode').value === 'raw' ? 'raw/debug' : 'curated'; }
-async function load() {
-  const params = new URLSearchParams();
-  for (const id of ['query','project_id','session_id','app_id','status','limit','mode']) params.set(id, $(id).value || '');
-  const res = await fetch('/api/graph?' + params.toString());
-  const data = await res.json();
-  render(data);
+function updateLiveUi() {
+  const button = $('live');
+  button.className = liveEnabled ? 'live-on' : 'live-off';
+  button.setAttribute('aria-pressed', liveEnabled ? 'true' : 'false');
+  button.innerHTML = `<span class="live-dot"></span>${liveEnabled ? 'Live 1s' : 'Live off'}`;
 }
-function render(data) {
+function resetAutoRefresh() {
+  if (liveTimer) clearInterval(liveTimer);
+  liveTimer = null;
+  if (liveEnabled) liveTimer = setInterval(() => { if (!document.hidden) load({ auto: true }); }, 1000);
+}
+function stableId(kind, value) {
+  const id = String(value ?? '').trim();
+  return id ? `${kind}:${id}` : '';
+}
+function nodeKey(n) { return stableId('node', n.id || n.name || n.label); }
+function edgeStableId(e) { return e.id || e.edge_id || `${e.source || e.from_entity_id || ''}->${e.target || e.to_entity_id || ''}:${e.relation || e.label || ''}`; }
+function edgeKey(e) { return stableId('edge', edgeStableId(e)); }
+function candidateKey(c) { return stableId('fact', c.candidate_id || c.id || `${c.subject || ''}:${c.predicate || ''}:${c.object || ''}`); }
+function eventKey(e) { return stableId('event', e.event_id || e.id || `${e.timestamp || ''}:${e.endpoint || ''}`); }
+function snapshotIds(data) {
+  return [
+    ...(data.nodes || []).map(nodeKey),
+    ...(data.edges || []).map(edgeKey),
+    ...(data.candidates || []).map(candidateKey),
+    ...(data.events || []).map(eventKey),
+  ].filter(Boolean).sort();
+}
+function snapshotFingerprint(data) {
+  return [
+    ...(data.nodes || []).map(n => `${nodeKey(n)}:${n.degree ?? ''}:${n.candidate_count ?? ''}`),
+    ...(data.edges || []).map(e => `${edgeKey(e)}:${e.status ?? ''}`),
+    ...(data.candidates || []).map(c => `${candidateKey(c)}:${c.status ?? ''}:${c.confidence ?? ''}`),
+    ...(data.events || []).map(eventKey),
+  ].filter(Boolean).sort().join('|');
+}
+function updateLiveStatus(newCount = 0) {
+  const now = new Date().toLocaleTimeString();
+  $('live-status').textContent = `${liveEnabled ? 'live refresh every 1s' : 'live paused'} · last ${now}${newCount ? ` · ${newCount} new` : ''}`;
+}
+async function load(options = {}) {
+  if (loadInFlight) return;
+  loadInFlight = true;
+  try {
+    const params = new URLSearchParams();
+    for (const id of ['query','project_id','session_id','app_id','status','limit','mode']) params.set(id, $(id).value || '');
+    const res = await fetch('/api/graph?' + params.toString(), { cache: 'no-store' });
+    const data = await res.json();
+    const ids = snapshotIds(data);
+    const fingerprint = snapshotFingerprint(data);
+    if (!options.force && fingerprint === lastFingerprint) {
+      updateLiveStatus(0);
+      return;
+    }
+    const hadPriorSnapshot = seenIds.size > 0;
+    const newIds = new Set(ids.filter(id => hadPriorSnapshot && !seenIds.has(id)));
+    render(data, { newIds });
+    for (const id of ids) seenIds.add(id);
+    lastFingerprint = fingerprint;
+    updateLiveStatus(newIds.size);
+  } catch (err) {
+    const message = $('graph-message');
+    message.textContent = `Unable to refresh graph: ${err && err.message ? err.message : err}`;
+    message.className = 'graph-message error';
+    message.hidden = false;
+  } finally {
+    loadInFlight = false;
+  }
+}
+function render(data, options = {}) {
+  const newIds = options.newIds || new Set();
   const view = applyUiMode(data);
   const stats = data.stats || {};
   $('path').textContent = data.path || '';
@@ -189,10 +266,13 @@ function render(data) {
     ? 'UI mode: <b>curated</b> hides obvious rejected/forgotten/low-confidence noise in this browser only. /api/graph is unchanged.'
     : 'UI mode: <b>raw/debug</b> shows the snapshot as returned by /api/graph, with noise indicators left visible.';
   renderDiagnosis(data, view);
-  renderGraph(view);
-  $('facts').innerHTML = view.candidates.map(c => `<div class="item" data-id="${esc(c.candidate_id)}"><b>${esc(c.type)} · ${esc(c.subject)} → ${esc(c.predicate)} → ${esc(c.object)}</b><div>${esc(c.text)}</div><div class="muted">${esc(c.status)} · confidence ${esc(c.confidence)} · ${esc(c.project_id || '')}/${esc(c.session_id || '')}</div>${noisePills(c).join('')}</div>`).join('') || '<p class="muted">No facts for current filters.</p>';
+  renderGraph(view, newIds);
+  $('facts').innerHTML = view.candidates.map(c => {
+    const isNew = newIds.has(candidateKey(c));
+    return `<div class="item ${isNew ? 'new-memory' : ''}" data-id="${esc(c.candidate_id)}"><b>${esc(c.type)} · ${esc(c.subject)} → ${esc(c.predicate)} → ${esc(c.object)}</b><div>${esc(c.text)}</div><div class="muted">${esc(c.status)} · confidence ${esc(c.confidence)} · ${esc(c.project_id || '')}/${esc(c.session_id || '')}</div>${isNew ? '<span class="pill warn">new</span>' : ''}${noisePills(c).join('')}</div>`;
+  }).join('') || '<p class="muted">No facts for current filters.</p>';
   for (const el of document.querySelectorAll('#facts .item')) el.onclick = () => show(view.candidates.find(c => c.candidate_id === el.dataset.id));
-  $('events').innerHTML = view.events.map(e => `<div class="item"><b>${esc(e.timestamp)}</b><div>${esc(e.endpoint || '')}</div><div class="muted">${esc(e.event_id)} · ${esc(e.project_id || '')}/${esc(e.session_id || '')}</div></div>`).join('') || '<p class="muted">No events.</p>';
+  $('events').innerHTML = view.events.map(e => `<div class="item ${newIds.has(eventKey(e)) ? 'new-memory' : ''}"><b>${esc(e.timestamp)}</b><div>${esc(e.endpoint || '')}</div><div class="muted">${esc(e.event_id)} · ${esc(e.project_id || '')}/${esc(e.session_id || '')}</div>${newIds.has(eventKey(e)) ? '<span class="pill warn">new</span>' : ''}</div>`).join('') || '<p class="muted">No events.</p>';
 }
 function badText(value) {
   const text = String(value ?? '').trim();
@@ -272,7 +352,7 @@ function evidenceSummary(obj) {
   }
   return `Graph node\nLabel: ${obj.name || obj.label || obj.id || '—'}\nRoles: ${(obj.roles || []).join(', ') || '—'}\nDegree: ${obj.degree ?? '—'} · candidate count ${obj.candidate_count ?? '—'}\nNoise indicators: ${nodeIssues(obj).join(', ') || 'none'}\n\nRaw JSON:\n${JSON.stringify(obj, null, 2)}`;
 }
-function renderGraph(data) {
+function renderGraph(data, newIds = new Set()) {
   const container = $('graph');
   const message = $('graph-message');
   if (graph) { graph.destroy(); graph = null; }
@@ -294,22 +374,32 @@ function renderGraph(data) {
   const width = container.clientWidth || 800;
   const height = container.clientHeight || 600;
   const graphData = {
-    nodes: nodes.map(n => ({
-      ...n,
-      label: n.label || n.name || n.id,
-      size: n.size || Math.min(48, Math.max(18, 20 + Number(n.degree || n.candidate_count || 0) * 4)),
-      style: { fill: Number(n.degree || 0) > 1 ? '#92400e' : '#1d4ed8', stroke: Number(n.degree || 0) > 1 ? '#fbbf24' : '#93c5fd', lineWidth: 1.5 },
-      labelCfg: { style: { fill: '#dbeafe', fontSize: 11, stroke: '#0b0f14', lineWidth: 3 } },
-    })),
-    edges: edges.map(e => ({
-      ...e,
-      id: e.id || e.edge_id || `${e.source || e.from_entity_id}-${e.target || e.to_entity_id}-${e.relation || ''}`,
-      source: e.source || e.from_entity_id,
-      target: e.target || e.to_entity_id,
-      label: e.label || e.relation || '',
-      style: { stroke: '#334155', lineWidth: 1.2, opacity: 0.85 },
-      labelCfg: { autoRotate: true, style: { fill: '#93a4b8', fontSize: 10, stroke: '#0b0f14', lineWidth: 3 } },
-    })),
+    nodes: nodes.map(n => {
+      const isNew = newIds.has(nodeKey(n));
+      return {
+        ...n,
+        id: n.id || n.name || n.label,
+        label: n.label || n.name || n.id,
+        newMemory: isNew,
+        size: n.size || Math.min(48, Math.max(18, 20 + Number(n.degree || n.candidate_count || 0) * 4)),
+        style: { fill: isNew ? '#f59e0b' : (Number(n.degree || 0) > 1 ? '#92400e' : '#1d4ed8'), stroke: isNew ? '#fde68a' : (Number(n.degree || 0) > 1 ? '#fbbf24' : '#93c5fd'), lineWidth: isNew ? 3 : 1.5, shadowColor: isNew ? '#fbbf24' : undefined, shadowBlur: isNew ? 18 : 0 },
+        labelCfg: { style: { fill: '#dbeafe', fontSize: 11, stroke: '#0b0f14', lineWidth: 3 } },
+      };
+    }),
+    edges: edges.map(e => {
+      const stableId = edgeStableId(e);
+      const isNew = newIds.has(edgeKey(e));
+      return {
+        ...e,
+        id: stableId,
+        source: e.source || e.from_entity_id,
+        target: e.target || e.to_entity_id,
+        label: e.label || e.relation || '',
+        newMemory: isNew,
+        style: { stroke: isNew ? '#fbbf24' : '#334155', lineWidth: isNew ? 2.4 : 1.2, opacity: 0.9, shadowColor: isNew ? '#fbbf24' : undefined, shadowBlur: isNew ? 12 : 0 },
+        labelCfg: { autoRotate: true, style: { fill: isNew ? '#fde68a' : '#93a4b8', fontSize: 10, stroke: '#0b0f14', lineWidth: 3 } },
+      };
+    }),
   };
   graph = new G6.Graph({
     container: 'graph',
@@ -324,11 +414,34 @@ function renderGraph(data) {
   });
   graph.data(graphData);
   graph.render();
+  animateNewGraphItems();
   graph.on('node:click', ev => show(ev.item.getModel()));
   graph.on('edge:click', ev => show(ev.item.getModel()));
 }
+function animateNewGraphItems() {
+  if (!graph) return;
+  const items = [...graph.getNodes(), ...graph.getEdges()].filter(item => item.getModel && item.getModel().newMemory);
+  for (const item of items) {
+    try {
+      const shape = item.getKeyShape && item.getKeyShape();
+      if (!shape || !shape.animate) continue;
+      shape.animate(ratio => {
+        const pulse = ratio < 0.5 ? ratio * 2 : (1 - ratio) * 2;
+        return {
+          lineWidth: 1.5 + pulse * 2.5,
+          shadowBlur: Math.max(0, 18 * (1 - ratio)),
+          opacity: 0.65 + 0.35 * pulse,
+        };
+      }, { duration: 1600, repeat: false });
+    } catch (_) {
+      // Animation is a progressive enhancement; keep the graph readable if G6/canvas rejects it.
+    }
+  }
+}
 function show(obj) { $('details').textContent = evidenceSummary(obj); }
-load();
+updateLiveUi();
+load({ force: true });
+resetAutoRefresh();
 </script>
 </body>
 </html>"""

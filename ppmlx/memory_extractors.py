@@ -1,4 +1,4 @@
-"""Optional LLM-backed memory extractors.
+"""Optional model-backed memory extractors.
 
 This module is intentionally independent from memory_engine configuration and
 storage. Extractors here return ``ShadowMemoryCandidate`` instances compatible
@@ -15,14 +15,17 @@ from typing import Any
 from ppmlx.memory_engine import ALLOWED_TYPES, ShadowMemoryCandidate, event_source_text
 
 
-DEFAULT_GEMMA_MEMORY_MODEL = "gemma-4-e2b"
-GEMMA_STRICT_JSON_EXTRACTOR = "gemma_strict_json_v1"
+DEFAULT_MEMORY_EXTRACTION_MODEL = "gemma-4-e2b"
+DEFAULT_GEMMA_MEMORY_MODEL = DEFAULT_MEMORY_EXTRACTION_MODEL  # backward-compatible alias
+MODEL_MEMORY_JSON_EXTRACTOR = "model_memory_json_v1"
+LLM_STRICT_JSON_EXTRACTOR = MODEL_MEMORY_JSON_EXTRACTOR  # backward-compatible alias
+GEMMA_STRICT_JSON_EXTRACTOR = MODEL_MEMORY_JSON_EXTRACTOR  # backward-compatible alias
 _ALLOWED_SCOPES = {"global", "project", "session"}
 
 GenerationFn = Callable[[str, list[dict[str, str]], int, float], str]
 
 
-class GemmaJsonMemoryExtractor:
+class ModelMemoryJsonExtractor:
     """Extract small evidence-backed memory candidates via strict JSON.
 
     ``generation_fn`` is injectable so tests and downstream callers can replace
@@ -32,7 +35,7 @@ class GemmaJsonMemoryExtractor:
 
     def __init__(
         self,
-        model_name: str = DEFAULT_GEMMA_MEMORY_MODEL,
+        model_name: str = DEFAULT_MEMORY_EXTRACTION_MODEL,
         *,
         generation_fn: GenerationFn | None = None,
         max_candidates: int = 8,
@@ -145,7 +148,7 @@ EVIDENCE
 
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         metadata = dict(metadata)
-        metadata["extractor"] = GEMMA_STRICT_JSON_EXTRACTOR
+        metadata["extractor"] = MODEL_MEMORY_JSON_EXTRACTOR
         metadata["extraction_model"] = self.model_name
 
         return ShadowMemoryCandidate(
@@ -160,6 +163,10 @@ EVIDENCE
             salience=_clamp01(item.get("salience"), default=1.0),
             metadata=metadata,
         )
+
+
+JsonMemoryExtractor = ModelMemoryJsonExtractor  # backward-compatible alias
+GemmaJsonMemoryExtractor = ModelMemoryJsonExtractor  # backward-compatible alias
 
 
 def parse_strict_json_payload(text: str) -> Any:

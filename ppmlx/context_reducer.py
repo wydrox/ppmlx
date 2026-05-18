@@ -36,13 +36,14 @@ class ContextBudget:
             from ppmlx.config import load_config
 
             memory = load_config().memory
+            mode = "off" if not bool(getattr(memory, "enabled", True)) else str(getattr(memory, "mode", "off")).lower()
             return cls(
                 rolling_tokens=int(getattr(memory, "rolling_tokens", cls.rolling_tokens)),
                 hot_tail_tokens=int(getattr(memory, "hot_tail_tokens", cls.hot_tail_tokens)),
                 session_context_tokens=int(getattr(memory, "session_context_tokens", cls.session_context_tokens)),
                 compact_threshold_tokens=int(getattr(memory, "compact_threshold_tokens", cls.compact_threshold_tokens)),
                 max_context_items=int(getattr(memory, "max_context_items", cls.max_context_items)),
-                mode=str(getattr(memory, "mode", "off")).lower(),
+                mode=mode,
             )
         except Exception:
             return cls()

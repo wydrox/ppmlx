@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 _CACHE_FILE = "registry_cache.json"
 _HF_AUTHOR = "mlx-community"
-_DISPLAY_LIMIT = 50
-_FETCH_LIMIT = 75  # over-fetch slightly to survive alias collisions
+_DISPLAY_LIMIT = 100
+_FETCH_LIMIT = 150  # over-fetch slightly to survive alias collisions
 _FETCH_TIMEOUT = 8  # seconds
 
 _STALENESS_SECONDS: dict[str, float] = {
@@ -42,6 +42,9 @@ def is_cache_stale(refresh_mode: str) -> bool:
         data = json.loads(cache.read_text())
         fetched_at = data.get("fetched_at", 0)
         age = time.time() - fetched_at
+        models = data.get("models", {})
+        if models and not any(isinstance(m, dict) and m.get("updated_at") for m in models.values()):
+            return True
         return age > _STALENESS_SECONDS.get(refresh_mode, 7 * 86_400)
     except Exception:
         return True
@@ -98,7 +101,7 @@ def _fetch_from_hf() -> dict[str, Any] | None:
             author=_HF_AUTHOR,
             sort="downloads",
             limit=_FETCH_LIMIT,
-            expand=["safetensors", "downloads"],
+            expand=["safetensors", "downloads", "lastModified", "createdAt"],
             token=False,
         ))
         entries: dict[str, dict[str, Any]] = {}
@@ -110,12 +113,14 @@ def _fetch_from_hf() -> dict[str, Any] | None:
             entries[alias] = {
                 "repo_id": m.id,
                 "params_b": _extract_params_b(m),
+                "precision": _extract_precision(m.id),
                 "size_gb": size_gb,
                 "type": "dense",
                 "lab": _extract_lab(m),
                 "modalities": _extract_modalities(m),
                 "downloads": m.downloads or 0,
                 "created": m.created_at.strftime("%Y-%m-%d") if m.created_at else None,
+                "updated_at": _extract_updated_at(m),
             }
             if len(entries) >= _DISPLAY_LIMIT:
                 break
@@ -181,6 +186,29 @@ def _repo_id_to_alias(repo_id: str) -> str | None:
 # ── Metadata extraction heuristics ───────────────────────────────────
 
 
+def _extract_updated_at(model: Any) -> str | None:
+    """Extract last-updated timestamp/date from HuggingFace model metadata."""
+    updated = getattr(model, "last_modified", None) or getattr(model, "lastModified", None)
+    if updated is None:
+        updated = getattr(model, "created_at", None)
+    if hasattr(updated, "strftime"):
+        return updated.strftime("%Y-%m-%d")
+    if updated:
+        return str(updated)[:10]
+    return None
+
+
+def _extract_precision(repo_id: str) -> str | None:
+    """Extract model precision/quantization label from repo ID, e.g. 4bit or bf16."""
+    name = repo_id.split("/", 1)[1] if "/" in repo_id else repo_id
+    lower = name.lower()
+    m = re.search(r'(?<![a-z0-9])(mxfp4(?:[-_]?q8)?|[2-8]bit|bf16|fp16)(?![a-z0-9])', lower)
+    if not m:
+        return None
+    return m.group(1).replace("_", "-")
+
+
+
 _LAB_PATTERNS: dict[str, str] = {
     "Qwen": "Alibaba", "GLM": "Zhipu AI", "gpt-oss": "OpenAI",
     "Llama": "Meta", "Mistral": "Mistral AI", "Devstral": "Mistral AI",
@@ -219,6 +247,20 @@ def _extract_params_b(model: Any) -> float | None:
     m = re.search(r'(\d+\.?\d*)[Bb](?:-|$|[A-Z])', name)
     if m:
         return float(m.group(1))
+
+    # HuggingFace safetensors metadata exposes total parameter count for many
+    # repos whose names do not include a clear "7B"/"0.6B" marker.
+    sf = getattr(model, "safetensors", None)
+    total = getattr(sf, "total", None)
+    if isinstance(total, (int, float)) and total > 0:
+        return round(total / 1_000_000_000, 1)
+
+    parameters = getattr(sf, "parameters", None)
+    if isinstance(parameters, dict):
+        total_params = sum(v for v in parameters.values() if isinstance(v, (int, float)))
+        if total_params > 0:
+            return round(total_params / 1_000_000_000, 1)
+
     return None
 
 
