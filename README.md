@@ -166,12 +166,21 @@ hot_tail_tokens = 6500
 session_context_tokens = 2000
 compact_threshold_tokens = 12000
 max_context_items = 40
+
+# optional graph-memory extraction worker pool
+extractor = "llm"             # off | heuristic | llm
+extraction_model = "gemma-4-e2b"
+extraction_workers = 1
+extraction_max_tokens = 512
+extraction_timeout_seconds = 60
 ```
 
 Modes:
 - `shadow`: store events/candidates only; prompts are unchanged.
 - `compact`: before inference, replace long histories with system context from the graph + a hot tail.
 - `inject`: reserved for compact + broader memory retrieval.
+
+Current graph-engine status: the extraction worker pool exists, while durable `extraction_jobs` and extracted `atoms` storage are being introduced and should be treated as experimental.
 
 Compact observability is recorded locally in `memory.db` and, if analytics are enabled, sent as privacy-safe aggregate metrics to PostHog. It never sends prompts, responses, tool output, model repo IDs, project IDs, or session IDs.
 
@@ -198,6 +207,8 @@ ppmlx quality-bench ~/.pi/agent/sessions/.../session.jsonl \
   --split 0.8 --max-probes 5 \
   --model mlx-community/Qwopus3.5-4B-v3-4bit
 ```
+
+`ppmlx graph` serves a local read-only graph view. The current UI loads AntV G6 from a CDN, so the browser needs network access for graph rendering even though the memory data itself stays local.
 
 `answer-quality-replay` requires a running local ppmlx server. It generates a compact answer and a local reference answer, selects question-relevant required facts, filters embedded examples/fixtures, and reports recall, wrong facts, actionability, grounding, and A/B equivalence.
 
