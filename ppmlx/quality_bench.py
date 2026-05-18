@@ -9,6 +9,7 @@ The benchmark turns a real long transcript into prefix/holdout probes:
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -619,13 +620,13 @@ def _looks_like_delegated_action_request(user_norm: str) -> bool:
 
 
 def _looks_like_feedback_turn(user_norm: str) -> bool:
-    if len(user_norm) > 180:
+    if len(user_norm) > 180 or user_norm.endswith("?"):
         return False
-    feedback_markers = (
-        "works", "worked", "dziala", "działa", "lepiej", "plynniej", "płynniej",
-        "ok", "super", "great", "thanks", "dzieki", "dzięki", "swietnie", "świetnie",
-    )
-    return any(marker in user_norm for marker in feedback_markers) and not user_norm.endswith("?")
+    phrase_markers = ("dziala", "działa", "lepiej", "plynniej", "płynniej", "works", "worked")
+    if any(marker in user_norm for marker in phrase_markers):
+        return True
+    tokens = set(re.findall(r"[a-ząćęłńóśźż0-9_./:-]+", user_norm))
+    return bool(tokens & {"ok", "super", "great", "thanks", "dzieki", "dzięki", "swietnie", "świetnie"})
 
 
 def _looks_like_tool_call(text: str) -> bool:
@@ -662,8 +663,10 @@ def _looks_like_code_or_repo_action(user_norm: str, expected_norm: str) -> bool:
 
 def _looks_like_meta_or_ack(text: str) -> bool:
     lowered = _norm(text)
-    if len(lowered) < 80 and any(ack in lowered for ack in ("ok", "sure", "done", "got it", "jasne")):
-        return True
+    if len(lowered) < 80:
+        tokens = set(re.findall(r"[a-ząćęłńóśźż0-9_./:-]+", lowered))
+        if tokens & {"ok", "sure", "done", "jasne"} or "got it" in lowered:
+            return True
     meta_markers = (
         "i need to", "the user wants", "i should", "let me", "i'll proceed",
         "i will now", "we need answer", "analysis",
