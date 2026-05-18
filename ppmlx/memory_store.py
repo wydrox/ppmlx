@@ -591,7 +591,16 @@ class MemoryStore:
                     ORDER BY me.created_at DESC""",
                 params,
             ).fetchall()
-        return [dict(row) for row in rows]
+        enriched_edges = []
+        for row in rows:
+            edge = dict(row)
+            # G6-friendly aliases; preserve existing edge_id/from_entity_id/to_entity_id/relation fields.
+            edge["id"] = edge.get("edge_id")
+            edge["source"] = edge.get("from_entity_id")
+            edge["target"] = edge.get("to_entity_id")
+            edge["label"] = edge.get("relation")
+            enriched_edges.append(edge)
+        return enriched_edges
 
     def _graph_nodes(self, candidates: list[dict[str, Any]], edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
         nodes: dict[str, dict[str, Any]] = {}
@@ -603,11 +612,14 @@ class MemoryStore:
             entity_id = self._entity_id(cleaned, "concept")
             node = nodes.setdefault(entity_id, {
                 "id": entity_id,
+                "label": cleaned,
                 "name": cleaned,
                 "type": "concept",
                 "roles": [],
                 "candidate_count": 0,
                 "salience": 0.0,
+                "degree": 0,
+                "size": 20,
             })
             if role not in node["roles"]:
                 node["roles"].append(role)
@@ -624,6 +636,18 @@ class MemoryStore:
         for edge in edges:
             add(str(edge.get("from_name") or ""), role="edge_from")
             add(str(edge.get("to_name") or ""), role="edge_to")
+
+        for edge in edges:
+            for node_id in (edge.get("source") or edge.get("from_entity_id"), edge.get("target") or edge.get("to_entity_id")):
+                if node_id in nodes:
+                    nodes[node_id]["degree"] += 1
+
+        for node in nodes.values():
+            salience = float(node.get("salience") or 0.0)
+            degree = int(node.get("degree") or 0)
+            candidate_count = int(node.get("candidate_count") or 0)
+            node["size"] = min(48, max(16, round(20 + degree * 4 + candidate_count * 3 + salience * 6, 2)))
+
         return sorted(nodes.values(), key=lambda node: (-int(node.get("candidate_count") or 0), str(node.get("name") or "").lower()))
 
     def _graph_events(

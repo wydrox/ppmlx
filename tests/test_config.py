@@ -48,6 +48,11 @@ class TestDefaultValues:
         assert cfg.session_context_tokens == 2000
         assert cfg.compact_threshold_tokens == 12000
         assert cfg.max_context_items == 40
+        assert cfg.extractor == "rule_based"
+        assert cfg.extraction_model == "gemma-4-e2b"
+        assert cfg.extraction_workers == 1
+        assert cfg.extraction_max_tokens == 1200
+        assert cfg.extraction_timeout_seconds == 45.0
 
     def test_config_defaults(self):
         cfg = Config()
@@ -110,6 +115,11 @@ hot_tail_tokens = 6000
 session_context_tokens = 1800
 compact_threshold_tokens = 11000
 max_context_items = 30
+extractor = "llm"
+extraction_model = "qwen3.5:0.8b"
+extraction_workers = 3
+extraction_max_tokens = 900
+extraction_timeout_seconds = 12.5
 
 [tool_awareness]
 mode = "all"
@@ -142,6 +152,11 @@ respect_do_not_track = true
         assert cfg.memory.session_context_tokens == 1800
         assert cfg.memory.compact_threshold_tokens == 11000
         assert cfg.memory.max_context_items == 30
+        assert cfg.memory.extractor == "llm"
+        assert cfg.memory.extraction_model == "qwen3.5:0.8b"
+        assert cfg.memory.extraction_workers == 3
+        assert cfg.memory.extraction_max_tokens == 900
+        assert cfg.memory.extraction_timeout_seconds == 12.5
         assert cfg.tool_awareness.mode == "all"
         assert cfg.analytics.enabled is False
         assert cfg.analytics.provider == "posthog"
@@ -258,6 +273,19 @@ class TestEnvVarOverrides:
         assert cfg.memory.session_context_tokens == 1500
         assert cfg.memory.compact_threshold_tokens == 10000
         assert cfg.memory.max_context_items == 25
+
+    def test_memory_extraction_env_vars(self, tmp_home, monkeypatch):
+        monkeypatch.setenv("PPMLX_MEMORY_EXTRACTOR", "llm")
+        monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_MODEL", "llama3:8b")
+        monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_WORKERS", "4")
+        monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_MAX_TOKENS", "1000")
+        monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_TIMEOUT", "30.5")
+        cfg = load_config()
+        assert cfg.memory.extractor == "llm"
+        assert cfg.memory.extraction_model == "llama3:8b"
+        assert cfg.memory.extraction_workers == 4
+        assert cfg.memory.extraction_max_tokens == 1000
+        assert cfg.memory.extraction_timeout_seconds == 30.5
 
     def test_invalid_env_var_ignored(self, tmp_home, monkeypatch):
         monkeypatch.setenv("PPMLX_PORT", "not_a_number")

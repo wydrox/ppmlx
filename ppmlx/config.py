@@ -48,6 +48,11 @@ class MemoryConfig:
     session_context_tokens: int = 2000
     compact_threshold_tokens: int = 12000
     max_context_items: int = 40
+    extractor: str = "rule_based"
+    extraction_model: str = "gemma-4-e2b"
+    extraction_workers: int = 1
+    extraction_max_tokens: int = 1200
+    extraction_timeout_seconds: float = 45.0
 
 
 @dataclass
@@ -205,6 +210,11 @@ def _apply_toml(cfg: Config, data: dict) -> None:
         if "session_context_tokens" in m: cfg.memory.session_context_tokens = int(m["session_context_tokens"])
         if "compact_threshold_tokens" in m: cfg.memory.compact_threshold_tokens = int(m["compact_threshold_tokens"])
         if "max_context_items" in m: cfg.memory.max_context_items = int(m["max_context_items"])
+        if "extractor" in m: cfg.memory.extractor = str(m["extractor"])
+        if "extraction_model" in m: cfg.memory.extraction_model = str(m["extraction_model"])
+        if "extraction_workers" in m: cfg.memory.extraction_workers = int(m["extraction_workers"])
+        if "extraction_max_tokens" in m: cfg.memory.extraction_max_tokens = int(m["extraction_max_tokens"])
+        if "extraction_timeout_seconds" in m: cfg.memory.extraction_timeout_seconds = float(m["extraction_timeout_seconds"])
     if "registry" in data:
         r = data["registry"]
         if "enabled" in r: cfg.registry.enabled = bool(r["enabled"])
@@ -252,6 +262,11 @@ def _apply_env(cfg: Config) -> None:
         "PPMLX_MEMORY_SESSION_CONTEXT_TOKENS": ("memory", "session_context_tokens", int),
         "PPMLX_MEMORY_COMPACT_THRESHOLD_TOKENS": ("memory", "compact_threshold_tokens", int),
         "PPMLX_MEMORY_MAX_CONTEXT_ITEMS": ("memory", "max_context_items", int),
+        "PPMLX_MEMORY_EXTRACTOR": ("memory", "extractor", str),
+        "PPMLX_MEMORY_EXTRACTION_MODEL": ("memory", "extraction_model", str),
+        "PPMLX_MEMORY_EXTRACTION_WORKERS": ("memory", "extraction_workers", int),
+        "PPMLX_MEMORY_EXTRACTION_MAX_TOKENS": ("memory", "extraction_max_tokens", int),
+        "PPMLX_MEMORY_EXTRACTION_TIMEOUT": ("memory", "extraction_timeout_seconds", float),
         "PPMLX_REGISTRY_ENABLED": ("registry", "enabled", _parse_bool),
         "PPMLX_INJECT_TOOL_AWARENESS": ("tool_awareness", "mode", _normalize_tool_awareness_mode),
         "PPMLX_THINKING_ENABLED": ("thinking", "enabled", _parse_bool),

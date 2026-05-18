@@ -190,7 +190,14 @@ def test_memory_store_graph_snapshot_returns_nodes_edges_and_events(tmp_path):
     assert snapshot["edges"]
     assert snapshot["candidates"]
     assert snapshot["events"][0]["event_id"] == "graph-seed"
-    assert any(edge["relation"] == "decided" for edge in snapshot["edges"])
+    decided_edge = next(edge for edge in snapshot["edges"] if edge["relation"] == "decided")
+    assert decided_edge["source"] == decided_edge["from_entity_id"]
+    assert decided_edge["target"] == decided_edge["to_entity_id"]
+    assert decided_edge["label"] == "decided"
+    source_node = next(node for node in snapshot["nodes"] if node["id"] == decided_edge["source"])
+    assert source_node["label"] == source_node["name"]
+    assert source_node["degree"] >= 1
+    assert source_node["size"] > 20
 
 
 def test_graph_cli_json_outputs_snapshot(tmp_home):
