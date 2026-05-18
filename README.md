@@ -116,7 +116,7 @@ print(response.choices[0].message.content)
 | `ppmlx rm <model>` | Remove a model | `-f` skip confirmation |
 | `ppmlx ps` | Show loaded models & memory | |
 | `ppmlx quantize <model>` | Convert & quantize HF model to MLX | `-b bits`, `--group-size`, `-o output` |
-| `ppmlx graph` | Open a local read-only web view of the temporal memory graph | `--project`, `--session`, `--query`, `--json` |
+| `ppmlx graph` | Print a temporal memory graph snapshot as JSON | `--project`, `--session`, `--query`, `--status` |
 | `ppmlx memory status/search/list/handoff/compact-stats` | Inspect the experimental local temporal memory graph | `--json`, `--status`, `--scope`, `--session` |
 | `ppmlx memory jobs/worker/rebuild/prune` | Manage async extraction jobs and graph maintenance | `--status`, `--once`, `--max-jobs`, `--dry-run` |
 | `ppmlx memory-eval` | Run the anti-garbage memory eval suite | `--json`, `--dataset`, `--predictions` |
@@ -206,7 +206,7 @@ ppmlx memory jobs --status pending
 ppmlx memory worker --once
 ppmlx memory rebuild --dry-run
 ppmlx memory prune --dry-run
-ppmlx graph --project tv-shopping --session tv-session-001
+ppmlx graph --project tv-shopping --session tv-session-001 > graph.json
 ppmlx trace export --project tv-shopping --session tv-session-001 --output trace.json
 ppmlx compact-replay trace.json --expect "budget = 5000 PLN"
 ppmlx memory-eval
@@ -220,7 +220,7 @@ ppmlx quality-bench ~/.pi/agent/sessions/.../session.jsonl \
   --model mlx-community/Qwopus3.5-4B-v3-4bit
 ```
 
-`ppmlx graph` serves a local read-only graph view. The current UI loads AntV G6 from a CDN, so the browser needs network access for graph rendering even though the memory data itself stays local.
+`ppmlx graph` prints a local graph snapshot as JSON. The browser-based graph viewer has been removed; memory data remains local in `memory.db`.
 
 `answer-quality-replay` requires a running local ppmlx server. It generates a compact answer and a local reference answer, selects question-relevant required facts, filters embedded examples/fixtures, and reports recall, wrong facts, actionability, grounding, and A/B equivalence.
 

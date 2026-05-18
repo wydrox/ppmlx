@@ -1170,7 +1170,7 @@ class MemoryStore:
         session_id: str | None = None,
         limit: int = 120,
     ) -> dict[str, Any]:
-        """Return a read-only graph view of memory entities, edges, facts, and events."""
+        """Return a graph snapshot of memory entities, edges, facts, and events."""
         self.init()
         safe_limit = max(1, min(int(limit), 500))
         status_filter = None if status in {None, "", "all"} else status
@@ -1239,7 +1239,7 @@ class MemoryStore:
         enriched_edges = []
         for row in rows:
             edge = dict(row)
-            # G6-friendly aliases; preserve existing edge_id/from_entity_id/to_entity_id/relation fields.
+            # Graph-friendly aliases; preserve existing edge_id/from_entity_id/to_entity_id/relation fields.
             edge["id"] = edge.get("edge_id")
             edge["source"] = edge.get("from_entity_id")
             edge["target"] = edge.get("to_entity_id")

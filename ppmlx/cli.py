@@ -1978,8 +1978,6 @@ def stats(
 
 @app.command(name="graph")
 def graph_cmd(
-    host: str = typer.Option("127.0.0.1", "--host", help="Host for the local read-only graph web view"),
-    port: int = typer.Option(6777, "--port", help="Port for the local graph web view; use 0 for an ephemeral port"),
     db: Optional[str] = typer.Option(None, "--db", help="Path to memory.db; defaults to ~/.ppmlx/memory.db"),
     status: Optional[str] = typer.Option("active", "--status", "-s", help="Candidate/edge status; use 'all' for every status"),
     query: Optional[str] = typer.Option(None, "--query", "-q", help="Search query for facts/entities"),
@@ -1987,43 +1985,23 @@ def graph_cmd(
     project_id: Optional[str] = typer.Option(None, "--project", help="Filter to project namespace"),
     session_id: Optional[str] = typer.Option(None, "--session", help="Filter to session namespace"),
     limit: int = typer.Option(120, "--limit", "-n", help="Maximum candidates to load"),
-    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the web view in the default browser"),
-    json_output: bool = typer.Option(False, "--json", "-j", help="Print graph snapshot JSON and exit"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Deprecated; graph output is always JSON"),
 ):
-    """Open a local read-only web view of the temporal memory graph."""
-    from ppmlx.graph_view import serve_graph_view
+    """Print a temporal memory graph snapshot as JSON."""
     from ppmlx.memory_store import get_memory_store
 
+    _ = json_output
     store = get_memory_store(Path(db)) if db else get_memory_store()
     status_filter = None if status == "all" else status
-    if json_output:
-        snapshot = store.graph_snapshot(
-            status=status_filter,
-            query=query,
-            app_id=app_id,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-        )
-        typer.echo(json.dumps(snapshot, indent=2, ensure_ascii=False))
-        return
-
-    try:
-        serve_graph_view(
-            store,
-            host=host,
-            port=port,
-            status=status_filter,
-            query=query,
-            app_id=app_id,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-            open_browser=open_browser,
-            on_start=lambda url: console.print(f"[green]ppmlx graph:[/green] {url} [dim](read-only, local)[/dim]"),
-        )
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Graph view stopped.[/yellow]")
+    snapshot = store.graph_snapshot(
+        status=status_filter,
+        query=query,
+        app_id=app_id,
+        project_id=project_id,
+        session_id=session_id,
+        limit=limit,
+    )
+    typer.echo(json.dumps(snapshot, indent=2, ensure_ascii=False))
 
 
 @memory_app.command(name="config")
