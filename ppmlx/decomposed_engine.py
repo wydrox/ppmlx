@@ -72,8 +72,8 @@ class DecomposedMemoryEngine:
         self,
         store: MemoryStore | None = None,
         *,
-        extraction_model: str = "gemma-4-e2b",
-        embedding_model: str = "nomic-embed-text",
+        extraction_model: str = "gemma-4-e4b-it-optiq",
+        embedding_model: str = "qwen3-embedding:0.6b-4bit-dwq",
         # Stage toggles — disable any stage for testing/debug
         enable_dense_chunk: bool = True,
         enable_contrastive: bool = True,
@@ -150,6 +150,7 @@ class DecomposedMemoryEngine:
 
             # Stage 3-5: Per-segment classification + extraction + consistency
             all_candidates: list[ShadowMemoryCandidate] = []
+            event_id = f"{session_id}-decomp"
             for seg in relevant:
                 t3 = time.perf_counter()
                 classified = self._run_classify(seg, report)
@@ -164,13 +165,13 @@ class DecomposedMemoryEngine:
                     for cc in consensus:
                         shadow = self._to_shadow_candidate(cc.candidate)
                         if shadow:
-                            all_candidates.append(shadow)
+                            all_candidates.append(shadow.with_event(event_id))
                 else:
                     candidates = self._run_extract(classified, report)
                     for c in candidates:
                         shadow = self._to_shadow_candidate(c)
                         if shadow:
-                            all_candidates.append(shadow)
+                            all_candidates.append(shadow.with_event(event_id))
                 report.time_extract += (time.perf_counter() - t4) * 1000
 
             report.segments_classified = len(relevant)
@@ -178,6 +179,19 @@ class DecomposedMemoryEngine:
 
             # Stage 6: Validation + graph projection
             t5 = time.perf_counter()
+            # Record a synthetic event so the graph engine can resolve namespaces.
+            self.store.record_event({
+                "event_id": f"{session_id}-decomp",
+                "endpoint": "/v1/chat/completions#decomposed",
+                "app_id": app_id,
+                "project_id": project_id,
+                "session_id": session_id,
+                "model_alias": self.extraction_model,
+                "model_repo": f"mlx-community/{self.extraction_model}",
+                "request": {"messages": messages},
+                "response_text": "",
+                "metadata": {"pipeline": "decomposed_v2"},
+            })
             for candidate in all_candidates:
                 # Create a minimal event for the validator
                 event = {
@@ -216,41 +230,44 @@ class DecomposedMemoryEngine:
         self, messages: list[dict], report: ExtractionReport
     ) -> list[TextSegment]:
         if not self.enable_dense_chunk:
-            # Without dense chunking, treat the whole transcript as one segment
             full_text = "\n".join(
                 f"{m.get('role','user')}: {m.get('content','')}"
                 for m in messages
             )
-            return [TextSegment(text=full_text, start_idx=0, end_idx=len(full_text), density_score=0.5)]
+            segments = [TextSegment(text=full_text, start_idx=0, end_idx=len(full_text), density_score=0.5)]
+            report.segments_dense = len(segments)
+            return segments
 
         embed_fn = self._make_embed_fn()
-        return self._dense_chunker.chunk(
+        segments = self._dense_chunker.chunk(
             messages,
             self._indicator_embeddings,
             embed_fn,
         )
+        report.segments_dense = len(segments)
+        return segments
 
     def _run_contrastive(
         self, segments: list[TextSegment], report: ExtractionReport
     ) -> list[RelevantSegment]:
         if not self.enable_contrastive or self._retriever is None:
-            # Without contrastive, all segments pass through
-            embed_fn = self._make_embed_fn()
-            vecs = embed_fn([s.text for s in segments]) if segments else []
-            return [
+            relevant = [
                 RelevantSegment(
                     text=s.text,
                     novelty_score=0.5,
                     contradiction_flag=False,
                     related_candidate_ids=[],
-                    segment_embedding=vecs[i] if i < len(vecs) else np.zeros(128),
+                    segment_embedding=np.zeros(1024, dtype=np.float32),
                 )
-                for i, s in enumerate(segments)
+                for s in segments
             ]
+            report.segments_relevant = len(relevant)
+            return relevant
 
         embed_fn = self._make_batch_embed_fn()
-        report.segments_dense = len(segments)
-        return self._retriever.retrieve(segments, self._snapshot, embed_fn)
+        relevant = self._retriever.retrieve(segments, self._snapshot, embed_fn)
+        report.segments_relevant = len(relevant)
+        return relevant
 
     def _run_classify(
         self, seg: RelevantSegment, report: ExtractionReport
@@ -342,11 +359,14 @@ class DecomposedMemoryEngine:
         return self._generation_fn
 
     def _make_embed_fn(self) -> Callable[[str], np.ndarray]:
-        """Make a single-text embedding function."""
+        """Make a single-text embedding function with error handling."""
         batch_fn = self._make_batch_embed_fn()
         def embed_one(text: str) -> np.ndarray:
-            results = batch_fn([text])
-            return results[0] if results else np.zeros(128, dtype=np.float32)
+            try:
+                results = batch_fn([text])
+                return results[0] if results else np.zeros(128, dtype=np.float32)
+            except Exception:
+                return np.zeros(128, dtype=np.float32)
         return embed_one
 
     def _make_batch_embed_fn(self) -> Callable[[list[str]], list[np.ndarray]]:
@@ -357,8 +377,12 @@ class DecomposedMemoryEngine:
         def embed_batch(texts: list[str]) -> list[np.ndarray]:
             if not texts:
                 return []
-            vectors = embed_engine.encode(model, texts, normalize=True)
-            return [np.array(v, dtype=np.float32) for v in vectors]
+            try:
+                vectors = embed_engine.encode(model, texts, normalize=True)
+                return [np.array(v, dtype=np.float32) for v in vectors]
+            except Exception:
+                # Fallback: return zero vectors on embedding failure
+                return [np.zeros(128, dtype=np.float32) for _ in texts]
         return embed_batch
 
     # ------------------------------------------------------------------

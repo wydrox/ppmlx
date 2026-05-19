@@ -170,6 +170,7 @@ class ContextReducer:
         context_text = render_session_context(
             context_items,
             max_tokens=self.budget.session_context_tokens,
+            store=self.store or get_memory_store(),
         )
         context_message = {"role": _CONTEXT_ROLE, "content": context_text} if context_text else None
         reduced_messages = [*system_messages]
@@ -264,11 +265,12 @@ class ContextReducer:
 
     def _retrieve_context_items(self, hot_tail: list[dict[str, Any]], memory_context: dict) -> list[dict[str, Any]]:
         store = self.store or get_memory_store()
-        query = build_retrieval_query(hot_tail)
+        project_id = memory_context.get("project_id")
+        query = build_retrieval_query(hot_tail, store=store, project_id=project_id)
         intent_query = build_current_intent_query(hot_tail)
         scoped = dict(
             app_id=memory_context.get("app_id"),
-            project_id=memory_context.get("project_id"),
+            project_id=project_id,
             session_id=memory_context.get("session_id"),
         )
         rows: list[dict[str, Any]] = []
@@ -286,6 +288,13 @@ class ContextReducer:
             if query and not workflow_intent:
                 fallback = _filter_relevant_context_rows(fallback, intent_query)
             rows.extend(fallback)
+        
+        # Embedding re-rank: when an embedding engine is available, re-rank the
+        # top results by semantic similarity to the intent query.  This catches
+        # matches like "dense chunker" ↔ "sliding window embedder" that FTS5 misses.
+        if rows and intent_query and not workflow_intent:
+            rows = _embedding_rerank(rows, intent_query, top_k=self.budget.max_context_items * 2)
+        
         return _curate_context_rows(
             rows,
             query=intent_query or query,
@@ -345,7 +354,7 @@ def build_handoff_context(
         scoped=scoped,
         workflow_intent=is_generic_workflow_action_query(query or ""),
     )[:max_items]
-    context = render_session_context(items, max_tokens=max_tokens)
+    context = render_session_context(items, max_tokens=max_tokens, store=store)
     return HandoffResult(
         context=context,
         items=items,
@@ -357,11 +366,59 @@ def build_handoff_context(
     )
 
 
-def render_session_context(items: list[dict[str, Any]], *, max_tokens: int) -> str:
+def render_session_context(items: list[dict[str, Any]], *, max_tokens: int, store=None) -> str:
     if not items or max_tokens <= 0:
         return ""
-    grouped: dict[str, list[str]] = {}
+    
+    # Enrich with inferred edges: for each retrieved candidate, check if it
+    # has inferred connections.  These are tagged [inferred] so the model knows
+    # they haven't been directly verified.
+    enriched_items: list[dict[str, Any]] = []
+    inferred_bullets: list[str] = []
+    candidate_ids_seen: set[str] = set()
+    
     for item in items:
+        enriched_items.append(item)
+        cid = str(item.get("candidate_id", ""))
+        if cid and cid not in candidate_ids_seen:
+            candidate_ids_seen.add(cid)
+    
+    # Fetch inferred edges for these candidates (best-effort)
+    if store is not None and candidate_ids_seen:
+        try:
+            import sqlite3
+            db = sqlite3.connect(str(store.path))
+            db.row_factory = sqlite3.Row
+            for cid in candidate_ids_seen:
+                # Find edges connected to entities that appear in this candidate
+                rows = db.execute('''
+                    SELECT DISTINCT ef.name as from_n, inf.relation, et.name as to_n,
+                           inf.inference_method, inf.confidence
+                    FROM memory_inferred inf
+                    JOIN memory_entities ef ON ef.entity_id = inf.from_entity_id
+                    JOIN memory_entities et ON et.entity_id = inf.to_entity_id
+                    JOIN memory_edges ed ON (
+                        ed.from_entity_id = inf.from_entity_id 
+                        OR ed.to_entity_id = inf.to_entity_id
+                        OR ed.from_entity_id = inf.to_entity_id
+                    )
+                    WHERE ed.source_candidate_id = ? AND inf.status = 'active'
+                    LIMIT 3
+                ''', (cid,)).fetchall()
+                for row in rows:
+                    bullet = (
+                        f"[inferred:{row['inference_method']}] "
+                        f"{row['from_n']} → {row['relation']} → {row['to_n']} "
+                        f"(confidence={row['confidence']:.2f})"
+                    )
+                    if bullet not in inferred_bullets:
+                        inferred_bullets.append(bullet)
+            db.close()
+        except Exception:
+            pass  # inferred enrichment is best-effort
+    
+    grouped: dict[str, list[str]] = {}
+    for item in enriched_items:
         label = _context_label(item)
         bullet = _render_item(item)
         grouped.setdefault(label, []).append(bullet)
@@ -392,6 +449,16 @@ def render_session_context(items: list[dict[str, Any]], *, max_tokens: int) -> s
             if estimate_text_tokens("\n".join(candidate)) > max_tokens:
                 return "\n".join(lines)
             lines.append(f"- {bullet}")
+    
+    # Append inferred edges if they fit in budget
+    if inferred_bullets:
+        lines.append("Inferred connections (lower confidence, not directly verified):")
+        for bullet in inferred_bullets:
+            candidate = [*lines, f"- {bullet}"]
+            if estimate_text_tokens("\n".join(candidate)) > max_tokens:
+                break
+            lines.append(f"- {bullet}")
+    
     return "\n".join(lines) if len(lines) > 4 else ""
 
 
@@ -445,7 +512,18 @@ def is_generic_workflow_action_query(query: str) -> bool:
     return bool(tokens) and all(token in generic for token in tokens)
 
 
-def build_retrieval_query(messages: list[dict[str, Any]]) -> str:
+def build_retrieval_query(
+    messages: list[dict[str, Any]],
+    *,
+    store=None,
+    project_id: str | None = None,
+) -> str:
+    """Build retrieval query from user messages, expanded with recent active facts.
+    
+    Query expansion makes generic queries like "działaj" or "continue" match
+    the current workflow state by appending terms from the 5 most recent active
+    facts in this project.
+    """
     parts: list[str] = []
     for message in reversed(messages[-8:]):
         role = message.get("role")
@@ -453,6 +531,22 @@ def build_retrieval_query(messages: list[dict[str, Any]]) -> str:
             parts.append(_content_to_text(message.get("content", "")))
         if estimate_text_tokens("\n".join(parts)) >= 600:
             break
+    
+    # Query expansion: append recent fact text for better lexical overlap.
+    if store is not None and project_id:
+        try:
+            recent = store.query_candidates(
+                status="active", project_id=project_id, limit=5,
+            )
+            fact_terms = " ".join(
+                f"{c.get('subject','')} {c.get('predicate','')} {c.get('object','')}"
+                for c in recent
+            )
+            if fact_terms.strip():
+                parts.append(fact_terms)
+        except Exception:
+            pass  # query expansion is best-effort
+    
     return "\n".join(reversed(parts))[:3000]
 
 
@@ -812,6 +906,47 @@ def _content_to_text(content: Any) -> str:
                 parts.append(str(part.get("text", "")))
         return " ".join(parts)
     return str(content)
+
+
+def _embedding_rerank(
+    rows: list[dict[str, Any]],
+    query: str,
+    *,
+    top_k: int = 40,
+) -> list[dict[str, Any]]:
+    """Re-rank candidates by embedding cosine similarity to the query.
+    
+    Falls back to the original order if the embedding engine is unavailable
+    or if there are fewer rows than top_k.  Best-effort, never throws.
+    """
+    if len(rows) <= top_k:
+        return rows
+    try:
+        import numpy as np
+        from ppmlx.engine_embed import get_embed_engine
+        
+        embed_engine = get_embed_engine()
+        # Build candidate texts for embedding
+        texts = [
+            f"{r.get('subject','')} {r.get('predicate','')} {r.get('object','')} {r.get('text','')}"
+            for r in rows
+        ]
+        # Batch-embed query + all candidates
+        all_texts = [query] + texts
+        vectors = embed_engine.encode(
+            "qwen3-embedding:0.6b-4bit-dwq", all_texts, normalize=True,
+        )
+        query_vec = np.array(vectors[0], dtype=np.float32)
+        candidate_vecs = np.array(vectors[1:], dtype=np.float32)
+        
+        # Cosine similarity (vectors are already normalized)
+        similarities = np.dot(candidate_vecs, query_vec)
+        
+        # Sort by similarity descending, return top_k
+        indices = np.argsort(similarities)[::-1][:top_k]
+        return [rows[int(i)] for i in indices]
+    except Exception:
+        return rows[:top_k]  # fallback: truncate to top_k by original rank
 
 
 def _normalize_action_query(query: str) -> str:

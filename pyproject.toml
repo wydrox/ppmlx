@@ -33,6 +33,8 @@ dependencies = [
     "questionary>=2.0",
     "setproctitle>=1.3.7",
     "tomli-w>=1.0",
+    "mlx-embeddings>=0.1.0",
+    "mcp>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -57,6 +59,7 @@ Documentation = "https://github.com/the-focus-company/ppmlx#readme"
 
 [project.scripts]
 ppmlx = "ppmlx.cli:main_entry"
+ppmlx-memory-mcp = "ppmlx.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]

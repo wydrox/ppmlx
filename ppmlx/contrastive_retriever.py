@@ -212,6 +212,16 @@ class ContrastiveRetriever:
         # Search existing candidates for similar content
         top_hits = self._candidate_index.search(embedding, top_k=self.top_k_similar)
         
+        # Empty index: no existing memories → all segments are novel → KEEP
+        if not top_hits:
+            return RelevantSegment(
+                text=segment.text,
+                novelty_score=1.0,
+                contradiction_flag=False,
+                related_candidate_ids=[],
+                segment_embedding=embedding,
+            )
+        
         # No similar candidates at all → check if it's even relevant to our domain
         if not top_hits or top_hits[0][0] < self.relevance_floor:
             # This segment has no similarity to ANY known fact.

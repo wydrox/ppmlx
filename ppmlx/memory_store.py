@@ -899,12 +899,24 @@ class MemoryStore:
             "agent",
             "quality-bench",
             "shopping_session",
+            # First-person and model-reply subjects — when a candidate says
+            # "I need to audit" or "The assistant should X", the real-world
+            # subject is the project/user, not the pronoun.
+            "i",
+            "me",
+            "we",
+            "the assistant",
+            "the user",
         }
-        if raw_norm in generic_subjects and (scope == "project" or candidate_type in {"workflow_state", "todo"}):
+        if raw_norm in generic_subjects and (scope == "project" or candidate_type in {"workflow_state", "todo", "decision", "instruction", "entity_note"}):
             return canonicalize_graph_entity(project_id)
-        if raw_norm == "user" and candidate_type in {"todo", "decision", "workflow_state", "entity_note"}:
+        if raw_norm == "user" and candidate_type in {"todo", "decision", "workflow_state", "entity_note", "instruction"}:
             return canonicalize_graph_entity(project_id)
         if raw_norm == "session" and predicate in {"validation", "commit", "commit_pushed", "file_changed", "command_run"}:
+            return canonicalize_graph_entity(project_id)
+        # Short names (2-3 chars) that look like tool/project abbreviations
+        # are likely project-scoped entities, not global concepts.
+        if len(raw_norm) <= 3 and candidate_type in {"fact", "entity_note", "workflow_state"} and scope == "global":
             return canonicalize_graph_entity(project_id)
         return None
 
@@ -1736,6 +1748,121 @@ class MemoryStore:
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def graph_walk(
+        self,
+        entity_name: str,
+        *,
+        max_hops: int = 3,
+        include_inferred: bool = True,
+    ) -> dict[str, Any]:
+        """Multi-hop graph traversal from an entity using recursive CTE.
+
+        Returns all entities reachable within ``max_hops`` edges, with paths,
+        depths, and confidence decay.  Handles cycles via path tracking.
+        """
+        self.init()
+        max_hops = max(1, min(int(max_hops), 5))  # cap at 5 hops for safety
+
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+
+            # Resolve starting entity
+            root = conn.execute(
+                "SELECT entity_id, name FROM memory_entities WHERE name = ? LIMIT 1",
+                (canonicalize_entity_name(entity_name) or entity_name,),
+            ).fetchone()
+            if not root:
+                return {"entity": entity_name, "found": False, "nodes": [], "edges": []}
+
+            # Build the edge set: direct edges + optionally inferred edges
+            # We use a UNION to treat them as one traversable graph.
+            edge_sql = """
+                SELECT from_entity_id, relation, to_entity_id, confidence, 'direct' AS kind
+                FROM memory_edges WHERE status = 'active'
+            """
+            if include_inferred:
+                edge_sql += """
+                UNION ALL
+                SELECT from_entity_id, relation, to_entity_id, confidence, 'inferred' AS kind
+                FROM memory_inferred WHERE status = 'active'
+                """
+
+            # Recursive CTE: walk the graph up to max_hops
+            rows = conn.execute(f"""
+                WITH RECURSIVE walk AS (
+                    -- Seed: all edges from the root entity
+                    SELECT
+                        e.from_entity_id,
+                        e.relation,
+                        e.to_entity_id,
+                        e.confidence,
+                        e.kind,
+                        1 AS depth,
+                        json_array(e.from_entity_id, e.to_entity_id) AS path
+                    FROM ({edge_sql}) e
+                    WHERE e.from_entity_id = ?
+
+                    UNION ALL
+
+                    -- Recursive: follow edges from reached entities
+                    SELECT
+                        e.from_entity_id,
+                        e.relation,
+                        e.to_entity_id,
+                        ROUND(w.confidence * e.confidence, 4) AS confidence,
+                        e.kind,
+                        w.depth + 1,
+                        json_insert(w.path, '$[#]', e.to_entity_id)
+                    FROM ({edge_sql}) e
+                    JOIN walk w ON e.from_entity_id = w.to_entity_id
+                    WHERE w.depth < ?
+                      -- Cycle prevention: don't follow back to entities already in path
+                      AND e.to_entity_id NOT IN (
+                          SELECT json_extract(w.path, '$[' || idx || ']')
+                          FROM (SELECT 0 AS idx UNION ALL SELECT 1 UNION ALL SELECT 2 
+                                UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5)
+                          WHERE idx < json_array_length(w.path)
+                      )
+                )
+                SELECT DISTINCT
+                    ef.name AS from_name,
+                    w.relation,
+                    et.name AS to_name,
+                    w.depth,
+                    w.confidence,
+                    w.kind,
+                    w.path
+                FROM walk w
+                JOIN memory_entities ef ON ef.entity_id = w.from_entity_id
+                JOIN memory_entities et ON et.entity_id = w.to_entity_id
+                ORDER BY w.depth, w.confidence DESC
+            """, (root["entity_id"], max_hops)).fetchall()
+
+            # Build response
+            nodes_set: set[str] = {root["name"]}
+            edges_out: list[dict[str, Any]] = []
+            for row in rows:
+                nodes_set.add(row["from_name"])
+                nodes_set.add(row["to_name"])
+                edges_out.append({
+                    "from": row["from_name"],
+                    "relation": row["relation"],
+                    "to": row["to_name"],
+                    "depth": row["depth"],
+                    "confidence": round(row["confidence"], 4),
+                    "kind": row["kind"],
+                })
+
+            return {
+                "entity": root["name"],
+                "found": True,
+                "max_hops": max_hops,
+                "node_count": len(nodes_set),
+                "edge_count": len(edges_out),
+                "nodes": sorted(nodes_set),
+                "edges": edges_out,
+            }
 
     def _infer_transitive_edges_conn(
         self, conn: sqlite3.Connection, *, scope: str | None = None

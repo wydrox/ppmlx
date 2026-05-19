@@ -235,10 +235,15 @@ class DenseChunker:
         if not windows:
             return []
 
-        # Score each window
+        # Pre-compute embeddings for all windows (one call per window, but avoids
+        # redundant embedding in the scoring loop body).
+        window_texts = [w[0] for w in windows]
+        window_embeddings = [embed_fn(t) for t in window_texts]
+
+        # Score each window (use pre-computed embeddings for fact_signal)
         scores: list[tuple[int, float]] = []  # (window_index, density_score)
         for idx, (text, start, end) in enumerate(windows):
-            score = self._score_window(text, indicator_embeddings, embed_fn)
+            score = self._score_window(text, indicator_embeddings, window_embeddings[idx])
             scores.append((idx, score))
 
         # Select top K
@@ -285,12 +290,13 @@ class DenseChunker:
         self,
         text: str,
         indicator_embeddings: list[np.ndarray],
-        embed_fn: Callable[[str], np.ndarray],
+        precomputed_embedding: np.ndarray,
     ) -> float:
         """Compute information density score for a text window."""
         fact = 0.0
-        if indicator_embeddings:
-            fact = _fact_signal_score(text, indicator_embeddings, embed_fn)
+        if indicator_embeddings and precomputed_embedding is not None:
+            similarities = [float(np.dot(precomputed_embedding, iv)) for iv in indicator_embeddings]
+            fact = max(similarities) if similarities else 0.0
         
         entity = _entity_density(text)
         diversity = _lexical_diversity(text)
