@@ -916,37 +916,83 @@ def _embedding_rerank(
 ) -> list[dict[str, Any]]:
     """Re-rank candidates by embedding cosine similarity to the query.
     
-    Falls back to the original order if the embedding engine is unavailable
-    or if there are fewer rows than top_k.  Best-effort, never throws.
+    Only runs when there are more candidates than top_k AND an embedding
+    engine is available.  Falls back to the original order otherwise.
+    Best-effort, never throws.
     """
     if len(rows) <= top_k:
-        return rows
+        return rows  # nothing to re-rank
+    
+    # Try cached embeddings first (stored by contrastive retriever)
+    cached = _load_cached_embeddings(rows)
+    if cached is not None and len(cached) >= len(rows) * 0.8:
+        return _rerank_with_cache(rows, query, cached, top_k)
+    
+    # Fallback: truncate to top_k by original rank (FTS5 BM25)
+    return rows[:top_k]
+
+
+def _load_cached_embeddings(rows: list[dict[str, Any]]) -> dict[str, list[float]] | None:
+    """Try to load pre-computed embeddings from the entity_alias cache."""
+    try:
+        from ppmlx.memory_store import get_memory_store
+        store = get_memory_store()
+        candidate_ids = [r.get("candidate_id", "") for r in rows if r.get("candidate_id")]
+        if not candidate_ids:
+            return None
+        # Query embedding_cache aliases
+        aliases = store.query_entity_aliases(
+            type="embedding_cache", scope="system", active_only=True, limit=10000,
+        )
+        result: dict[str, list[float]] = {}
+        import json
+        for alias in aliases:
+            meta = alias.get("metadata", {})
+            if isinstance(meta, str):
+                meta = json.loads(meta)
+            cid = meta.get("candidate_id", "")
+            vec = meta.get("vector", [])
+            if cid and cid in candidate_ids and vec:
+                result[cid] = vec
+        return result if result else None
+    except Exception:
+        return None
+
+
+def _rerank_with_cache(
+    rows: list[dict[str, Any]],
+    query: str,
+    cached: dict[str, list[float]],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Re-rank using cached embeddings + query embedding."""
     try:
         import numpy as np
         from ppmlx.engine_embed import get_embed_engine
         
+        # Only embed the query (1 call, ~30ms)
         embed_engine = get_embed_engine()
-        # Build candidate texts for embedding
-        texts = [
-            f"{r.get('subject','')} {r.get('predicate','')} {r.get('object','')} {r.get('text','')}"
-            for r in rows
-        ]
-        # Batch-embed query + all candidates
-        all_texts = [query] + texts
-        vectors = embed_engine.encode(
-            "qwen3-embedding:0.6b-4bit-dwq", all_texts, normalize=True,
+        q_vecs = embed_engine.encode(
+            "qwen3-embedding:0.6b-4bit-dwq", [query[:200]], normalize=True,
         )
-        query_vec = np.array(vectors[0], dtype=np.float32)
-        candidate_vecs = np.array(vectors[1:], dtype=np.float32)
+        query_vec = np.array(q_vecs[0], dtype=np.float32)
         
-        # Cosine similarity (vectors are already normalized)
-        similarities = np.dot(candidate_vecs, query_vec)
+        # Score each row with cached vector
+        scored: list[tuple[float, dict]] = []
+        for r in rows:
+            cid = r.get("candidate_id", "")
+            vec = cached.get(cid)
+            if vec is not None:
+                sim = float(np.dot(query_vec, np.array(vec, dtype=np.float32)))
+                scored.append((sim, r))
         
-        # Sort by similarity descending, return top_k
-        indices = np.argsort(similarities)[::-1][:top_k]
-        return [rows[int(i)] for i in indices]
+        if not scored:
+            return rows[:top_k]
+        
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [r for _, r in scored[:top_k]]
     except Exception:
-        return rows[:top_k]  # fallback: truncate to top_k by original rank
+        return rows[:top_k]
 
 
 def _normalize_action_query(query: str) -> str:
