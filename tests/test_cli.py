@@ -268,7 +268,7 @@ def test_memory_config_command_sets_memory_flags(tmp_path):
         data = tomllib.load(f)
     assert data["memory"]["enabled"] is True
     assert data["memory"]["mode"] == "shadow"
-    assert data["memory"]["extractor"] == "model_memory_json"
+    assert data["memory"]["extractor"] == "hybrid"
     assert data["memory"]["extraction_model"] == "qwen3.5:0.8b"
     assert data["memory"]["max_candidates_per_event"] == 7
     assert data["memory"]["extraction_max_tokens"] == 900

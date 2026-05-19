@@ -435,13 +435,14 @@ def _normalize_memory_mode_cli(value) -> str:
 def _normalize_memory_extractor_cli(value) -> str:
     raw = str(value).strip().lower().replace("-", "_")
     aliases = {
-        "rule": "rule_based", "rules": "rule_based", "rule_based": "rule_based", "regex": "rule_based",
-        "model_memory_json": "model_memory_json", "memory_model_json": "model_memory_json",
-        "model_json_memory": "model_memory_json", "strict_json_memory": "model_memory_json",
-        "llm": "model_memory_json", "json": "model_memory_json", "json_llm": "model_memory_json",
-        "llm_json": "model_memory_json", "gemma_json": "model_memory_json",
+        "rule": "hybrid", "rules": "hybrid", "rule_based": "hybrid", "regex": "hybrid",
+        "hybrid": "hybrid", "hybrid_json": "hybrid",
+        "model_memory_json": "hybrid", "memory_model_json": "hybrid",
+        "model_json_memory": "hybrid", "strict_json_memory": "hybrid",
+        "llm": "hybrid", "json": "hybrid", "json_llm": "hybrid",
+        "llm_json": "hybrid", "gemma_json": "hybrid",
     }
-    return aliases.get(raw, "rule_based")
+    return aliases.get(raw, "hybrid")
 
 
 def _redact_config(value):
@@ -2008,8 +2009,8 @@ def graph_cmd(
 def memory_config_cmd(
     enabled: Optional[bool] = typer.Option(None, "--enabled/--disabled", help="Enable or disable the local memory feature."),
     mode: Optional[str] = typer.Option(None, "--mode", help="Memory mode: off, shadow, compact, or inject."),
-    extractor: Optional[str] = typer.Option(None, "--extractor", help="Extractor: rule_based or model_memory_json."),
-    model: Optional[str] = typer.Option(None, "--model", help="Local model used by model_memory_json extraction."),
+    extractor: Optional[str] = typer.Option(None, "--extractor", help="Legacy extractor setting; runtime uses hybrid rule-based + model JSON extraction."),
+    model: Optional[str] = typer.Option(None, "--model", help="Local model used by hybrid model JSON extraction."),
     max_candidates_per_event: Optional[int] = typer.Option(
         None,
         "--max-candidates-per-event",
@@ -2359,6 +2360,71 @@ def memory_worker_cmd(
     console.print(f"[dim]Processed {processed} job(s).[/dim]")
 
 
+@memory_app.command(name="ingest-bench")
+def memory_ingest_bench_cmd(
+    path: str = typer.Argument(..., help="Pi/Claude session JSONL path to replay for ingest benchmarking"),
+    source: str = typer.Option("auto", "--source", help="Session source: auto, pi, or claude"),
+    mode: str = typer.Option("rule", "--mode", help="Extraction mode: rule, hybrid, or async-hybrid"),
+    extraction_model: str = typer.Option("gemma-4-e2b", "--model", help="Local model used for model-backed extraction"),
+    max_events: int = typer.Option(10, "--max-events", "-n", help="Maximum grouped episodes/events to ingest"),
+    max_candidates: int = typer.Option(12, "--max-candidates", help="Maximum extractor candidates per event"),
+    output_limit: int = typer.Option(900, "--output-limit", help="Max output tokens for each extraction model call"),
+    input_limit: int = typer.Option(6000, "--input-limit", help="Approximate input-token budget per extraction chunk"),
+    overlap: int = typer.Option(600, "--overlap", help="Approximate token overlap between extraction chunks"),
+    max_chunks: int = typer.Option(32, "--max-chunks", help="Maximum extraction chunks/calls per event"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Save JSON report to this path"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Print JSON report"),
+):
+    """Benchmark memory ingest/extraction cost separately from retrieval latency."""
+    from rich.table import Table
+    from ppmlx.memory_ingest_bench import run_memory_ingest_bench
+
+    try:
+        report = run_memory_ingest_bench(
+            path=Path(path),
+            source=source,
+            mode=mode,
+            extraction_model=extraction_model,
+            max_events=max_events,
+            max_candidates=max_candidates,
+            extraction_max_tokens=output_limit,
+            extraction_input_tokens=input_limit,
+            extraction_overlap_tokens=overlap,
+            extraction_max_chunks_per_event=max_chunks,
+        )
+    except Exception as exc:
+        console.print(f"[red]Memory ingest bench failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    data = report.to_dict()
+    if output:
+        out = Path(output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        console.print(f"[green]Memory ingest bench report saved to {out}[/green]")
+    if json_output:
+        typer.echo(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+
+    summary = data["summary"]
+    table = Table(title="Memory Ingest Bench")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    table.add_row("Mode", str(summary["mode"]))
+    table.add_row("Events", str(summary["events"]))
+    table.add_row("Duration avg", f"{summary['duration_ms_avg']:.1f} ms")
+    table.add_row("Duration p95", f"{summary['duration_ms_p95']:.1f} ms")
+    table.add_row("Duration max", f"{summary['duration_ms_max']:.1f} ms")
+    table.add_row("Worker avg", f"{summary['worker_duration_ms_avg']:.1f} ms")
+    table.add_row("Chunks avg/max", f"{summary['chunks_avg']:.1f}/{summary['chunks_max']}")
+    table.add_row("Candidates", str(summary["candidates_total"]))
+    table.add_row("Active", str(summary["active_total"]))
+    table.add_row("Rejected", str(summary["rejected_total"]))
+    table.add_row("Disputed", str(summary["disputed_total"]))
+    table.add_row("Queued", str(summary["queued_total"]))
+    console.print(table)
+
+
 @memory_app.command(name="rebuild")
 def memory_rebuild_cmd(
     project_id: Optional[str] = typer.Option(None, "--project", help="Filter by project namespace"),
@@ -2555,13 +2621,25 @@ def quality_bench_cmd(
     probe_type: Optional[list[str]] = typer.Option(None, "--probe-type", help="Probe types to include; repeatable. Default: answerable_text"),
     timeout_sec: float = typer.Option(600.0, "--timeout", help="HTTP timeout per inference request"),
     include_content: bool = typer.Option(False, "--include-content", help="Include generated/expected answers in JSON output/report"),
+    preflight_only: bool = typer.Option(False, "--preflight-only", help="Only prepare probes and score context/oracle recoverability; do not call the model"),
+    min_context_fact_coverage: float = typer.Option(0.5, "--min-context-fact-coverage", help="Minimum average recoverable context-fact coverage required to pass"),
+    min_oracle_recoverable_rate: float = typer.Option(0.5, "--min-oracle-recoverable-rate", help="Minimum candidate-probe oracle recoverability rate required to pass"),
+    max_retrieval_p95_ms: float = typer.Option(100.0, "--max-retrieval-p95-ms", help="Maximum graph retrieval p95 latency for the context gate"),
+    compact_threshold_tokens: int = typer.Option(1500, "--compact-threshold-tokens", help="Quality-bench replay compaction threshold"),
+    hot_tail_tokens: int = typer.Option(1200, "--hot-tail-tokens", help="Quality-bench replay hot-tail token budget"),
+    session_context_tokens: int = typer.Option(4000, "--session-context-tokens", help="Quality-bench replay rendered memory context token budget"),
+    max_context_items: int = typer.Option(80, "--max-context-items", help="Quality-bench replay maximum retrieved memory items"),
+    extraction_model: str = typer.Option("gemma-4-e2b", "--extraction-model", help="Local model used for hybrid LLM memory extraction during replay"),
+    hybrid_extraction: bool = typer.Option(True, "--hybrid-extraction/--rule-only-extraction", help="Use rule-based plus LLM extraction during replay"),
+    workflow_score: bool = typer.Option(True, "--workflow-score/--no-workflow-score", help="Score skipped tool/code action turns separately for workflow continuity"),
+    extractive_fallback: bool = typer.Option(False, "--extractive-fallback/--no-extractive-fallback", help="If the model misses retrieved facts, fall back to a deterministic extractive answer"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Save JSON report to this path"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Print JSON report"),
     fail_on_threshold: bool = typer.Option(True, "--fail-on-threshold/--no-fail-on-threshold", help="Exit 1 when quality bench fails"),
 ):
     """Benchmark compact context on real transcripts using held-out suffix probes."""
     from rich.table import Table
-    from ppmlx.quality_bench import run_quality_bench
+    from ppmlx.quality_bench import QualityBenchThresholds, run_quality_bench
 
     try:
         report = run_quality_bench(
@@ -2575,6 +2653,20 @@ def quality_bench_cmd(
             include_probe_types=tuple(probe_type or ["answerable_text"]),
             timeout_sec=timeout_sec,
             include_content=include_content,
+            preflight_only=preflight_only,
+            thresholds=QualityBenchThresholds(
+                min_context_fact_coverage=min_context_fact_coverage,
+                min_oracle_recoverable_rate=min_oracle_recoverable_rate,
+                max_retrieval_p95_ms=max_retrieval_p95_ms,
+            ),
+            compact_threshold_tokens=compact_threshold_tokens,
+            hot_tail_tokens=hot_tail_tokens,
+            session_context_tokens=session_context_tokens,
+            max_context_items=max_context_items,
+            extraction_model=extraction_model,
+            hybrid_extraction=hybrid_extraction,
+            include_workflow_score=workflow_score,
+            extractive_fallback=extractive_fallback,
         )
     except Exception as exc:
         console.print(f"[red]Quality bench failed: {exc}[/red]")
@@ -2599,7 +2691,19 @@ def quality_bench_cmd(
     table.add_column("Metric", style="cyan")
     table.add_column("Value", justify="right")
     table.add_row("Probes", f"{summary['passed']}/{summary['probes']}")
+    preflight = data.get("preflight") or summary.get("preflight", {})
+    context_status = str(preflight.get("context_status") or ("pass" if data.get("context_passed") else "fail"))
+    table.add_row("Context gate", context_status.upper())
+    table.add_row("Answer gate", "SKIP" if data.get("preflight_only") else ("PASS" if data.get("answer_passed") else "FAIL"))
+    table.add_row("Oracle recoverable", f"{preflight.get('oracle_recoverable_probes', summary['probes'])}/{preflight.get('candidate_probes', summary['probes'])} ({preflight.get('oracle_recoverable_rate', 0.0) * 100:.1f}%)")
+    table.add_row("Retrieval p95", f"{preflight.get('retrieval_latency_ms_p95', 0.0):.2f} ms")
     table.add_row("Skipped", str(summary.get("skipped", 0)))
+    table.add_row("Context failure buckets", json.dumps(preflight.get("failure_buckets", {}), ensure_ascii=False))
+    workflow = summary.get("workflow_score", {})
+    table.add_row("Workflow/action", f"{workflow.get('passed', 0)}/{workflow.get('probes', 0)} ({workflow.get('avg_context_fact_coverage', 0.0) * 100:.1f}% ctx)")
+    fallback_used = sum(1 for probe in report.probes if getattr(probe, "used_extractive_fallback", False))
+    table.add_row("Extractive fallback", str(fallback_used))
+    table.add_row("Avg fact copy", f"{summary.get('avg_fact_copy_score', 0.0) * 100:.1f}%")
     table.add_row("Avg recall", f"{summary['avg_recall'] * 100:.1f}%")
     table.add_row("Wrong facts", str(summary["wrong_facts_total"]))
     table.add_row("Avg actionability", f"{summary['avg_actionability']:.2f}/5")

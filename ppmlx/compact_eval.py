@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ppmlx.context_reducer import ContextBudget, ContextReducer
+from ppmlx.context_reducer import ContextBudget, ContextReducer, group_messages_into_episodes
 from ppmlx.memory_engine import MemoryEngine
 from ppmlx.memory_store import MemoryStore
 
@@ -137,6 +137,7 @@ class CompactEvalRunner:
             store.init()
             engine = MemoryEngine(store=store)
             reducer = ContextReducer(self.budget, store=store, engine=engine)
+            self._preingest_case(case, reducer=reducer, engine=engine)
             result = reducer.reduce(
                 request_id=f"compact-eval-{case.id}",
                 model_alias="compact-eval-model",
@@ -187,6 +188,24 @@ class CompactEvalRunner:
             session_context_missed_terms=context_missed,
             session_context=session_context,
         )
+
+    @staticmethod
+    def _preingest_case(case: CompactEvalCase, *, reducer: ContextReducer, engine: MemoryEngine) -> None:
+        _, cold = reducer._select_hot_tail([message for message in case.messages if message.get("role") != "system"])  # noqa: SLF001
+        for episode in group_messages_into_episodes(cold):
+            if not episode.messages:
+                continue
+            engine.capture_chat(
+                request_id=f"compact-eval-{case.id}-preingest-e{episode.index}",
+                endpoint="/v1/chat/completions#preingest",
+                model_alias="compact-eval-model",
+                model_repo="compact-eval/model",
+                messages=episode.messages,
+                response_text=None,
+                project_id=case.project_id,
+                session_id=case.session_id,
+                metadata={"eval_case": case.id, "preingest": True},
+            )
 
 
 def builtin_cases() -> list[CompactEvalCase]:

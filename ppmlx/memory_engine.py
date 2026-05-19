@@ -37,6 +37,7 @@ ALLOWED_TYPES = {
     "entity_note",
     "instruction",
     "relationship",
+    "workflow_state",
 }
 
 SENSITIVE_PATTERNS = [
@@ -112,11 +113,10 @@ class RuleBasedMemoryExtractor:
 
     def extract(self, event: dict[str, Any]) -> list[ShadowMemoryCandidate]:
         source_text = event_source_text(event)
-        messages_text = "\n".join(_message_to_text(msg) for msg in event.get("messages", []))
         project_id = event.get("project_id")
         candidates: list[ShadowMemoryCandidate] = []
 
-        for text in _candidate_sources(messages_text):
+        for text in _candidate_sources(event.get("messages", []), response_text=event.get("response_text")):
             candidates.extend(self._extract_session_instruction(text))
             candidates.extend(self._extract_goals(text, project_id=project_id))
             candidates.extend(self._extract_preferences(text))
@@ -125,6 +125,12 @@ class RuleBasedMemoryExtractor:
             candidates.extend(self._extract_shortlist(text, project_id=project_id))
             candidates.extend(self._extract_rejections(text, project_id=project_id))
             candidates.extend(self._extract_todos(text, project_id=project_id))
+            candidates.extend(self._extract_workflow_state(text, project_id=project_id))
+            candidates.extend(self._extract_file_changes(text, project_id=project_id))
+            candidates.extend(self._extract_validation_results(text, project_id=project_id))
+            candidates.extend(self._extract_command_runs(text, project_id=project_id))
+            candidates.extend(self._extract_commit_state(text, project_id=project_id))
+            candidates.extend(self._extract_implementation_facts(text, project_id=project_id))
             candidates.extend(self._extract_remembered_facts(text, project_id=project_id))
 
         for message in event.get("messages", []):
@@ -145,7 +151,7 @@ class RuleBasedMemoryExtractor:
             )
             if key not in unique:
                 unique[key] = candidate
-        return sorted(unique.values(), key=lambda item: item.salience, reverse=True)[: self.max_candidates]
+        return _prioritize_extracted_candidates(list(unique.values()), limit=self.max_candidates)
 
     @staticmethod
     def _from_distilled(candidate: DistilledMemoryCandidate) -> ShadowMemoryCandidate:
@@ -349,21 +355,213 @@ class RuleBasedMemoryExtractor:
     @staticmethod
     def _extract_todos(text: str, *, project_id: str | None) -> list[ShadowMemoryCandidate]:
         out: list[ShadowMemoryCandidate] = []
-        for match in re.finditer(r"\b(?:todo|task):\s*(.+?)(?:\n|$)", text, re.IGNORECASE):
-            obj = _clean_phrase(match.group(1))
-            if obj:
-                subject = project_id or "user"
+        patterns = [
+            r"\b(?:todo|task|next):\s*(.+?)(?:\n|$)",
+            r"\bnext\s+(?:step\s+)?(?:is\s+to\s+|action\s+is\s+to\s+)?(.+?)(?:[.!?]|$)",
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                obj = _clean_phrase(match.group(1))
+                if obj:
+                    subject = project_id or "user"
+                    out.append(ShadowMemoryCandidate(
+                        type="todo",
+                        subject=subject,
+                        predicate="needs",
+                        object=obj,
+                        text=f"{subject} todo: {obj}.",
+                        scope="project" if project_id else "global",
+                        confidence=0.84,
+                        source_quote=match.group(0).strip(),
+                        salience=0.82,
+                    ))
+        return out
+
+    @staticmethod
+    def _extract_workflow_state(text: str, *, project_id: str | None) -> list[ShadowMemoryCandidate]:
+        out: list[ShadowMemoryCandidate] = []
+        subject = project_id or "session"
+        scope = "project" if project_id else "session"
+        patterns: list[tuple[str, str, str, float]] = [
+            (r"\b(?:current task|current work|working on|teraz robimy|aktualnie)\s*:?\s*(.+?)(?:\n|[.!?](?=\s|$)|$)", "current_task", "Current task", 0.94),
+            (r"\b(?:next action|next step|next|dalej|następnie|nastepnie)\s*:?\s*(.+?)(?:\n|[.!?](?=\s|$)|$)", "next_action", "Next action", 0.93),
+            (r"\b(?:blocker|blocked by|blocking issue|remaining issue|problem)\s*:?\s*(.+?)(?:\n|[.!?](?=\s|$)|$)", "blocker", "Blocker", 0.92),
+            (r"\b(?:I(?:'|’)?m|I am|I(?:'|’)?ll|I will)\s+((?:applying|fixing|running|rerunning|testing|checking|deploying|updating|patching|implementing)\b.+?)(?:\n|[.!?](?=\s|$)|$)", "next_action", "Next action", 0.9),
+        ]
+        for pattern, predicate, label, salience in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                obj = _clean_phrase(match.group(1))
+                if not obj or _looks_like_workflow_noise(obj):
+                    continue
                 out.append(ShadowMemoryCandidate(
-                    type="todo",
+                    type="workflow_state",
                     subject=subject,
-                    predicate="needs",
+                    predicate=predicate,
                     object=obj,
-                    text=f"{subject} todo: {obj}.",
-                    scope="project" if project_id else "global",
-                    confidence=0.84,
+                    text=f"{label}: {obj}.",
+                    scope=scope,
+                    confidence=0.86,
                     source_quote=match.group(0).strip(),
-                    salience=0.82,
+                    salience=salience,
                 ))
+        return out
+
+    @staticmethod
+    def _extract_command_runs(text: str, *, project_id: str | None) -> list[ShadowMemoryCandidate]:
+        out: list[ShadowMemoryCandidate] = []
+        subject = project_id or "session"
+        scope = "project" if project_id else "session"
+        command_patterns = [
+            r"\b(?:ran|run|running|reran|re-ran|odpal(?:iłem|ilem|am)?)\s+`([^`\n]{3,180})`",
+            r"`([^`\n]{0,160}(?:pnpm|npm|yarn|uv|pytest|ruff|eslint|build|test)[^`\n]{0,160})`",
+        ]
+        for pattern in command_patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                command = _clean_phrase(match.group(1))
+                if not command or _looks_like_validation_noise(command):
+                    continue
+                out.append(ShadowMemoryCandidate(
+                    type="workflow_state",
+                    subject=subject,
+                    predicate="command_run",
+                    object=command,
+                    text=f"Command run: `{command}`.",
+                    scope=scope,
+                    confidence=0.8,
+                    source_quote=match.group(0).strip(),
+                    salience=0.88,
+                ))
+        return out
+
+    @staticmethod
+    def _extract_file_changes(text: str, *, project_id: str | None) -> list[ShadowMemoryCandidate]:
+        out: list[ShadowMemoryCandidate] = []
+        subject = project_id or "session"
+        scope = "project" if project_id else "session"
+        patterns = [
+            r"\bfile\s+`?([A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|md|json|toml|ya?ml|swift|go|rs|sh|sql|css|html))`?\s+(?:changed|updated|modified|patched|created)",
+            r"\b(?:changed|updated|modified|patched|created)\s+(?:file\s+)?`?([A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|md|json|toml|ya?ml|swift|go|rs|sh|sql|css|html))`?",
+            r"`([A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|md|json|toml|ya?ml|swift|go|rs|sh|sql|css|html))`\s*(?:changed|updated|modified|patched|created|zmieniony|zaktualizowany)?",
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                path = _clean_phrase(match.group(1))
+                if path:
+                    out.append(ShadowMemoryCandidate(
+                        type="entity_note",
+                        subject=subject,
+                        predicate="file_changed",
+                        object=path,
+                        text=f"File changed: {path}.",
+                        scope=scope,
+                        confidence=0.78,
+                        source_quote=match.group(0).strip(),
+                        salience=0.82,
+                    ))
+        return out
+
+    @staticmethod
+    def _extract_validation_results(text: str, *, project_id: str | None) -> list[ShadowMemoryCandidate]:
+        out: list[ShadowMemoryCandidate] = []
+        subject = project_id or "session"
+        scope = "project" if project_id else "session"
+        patterns = [
+            r"`([^`\n]{0,160}(?:pnpm|npm|yarn|uv|pytest|ruff|eslint|build|test)[^`\n]{0,160})`\s*(✅|passed|pass|ok)?",
+            r"\b((?:pnpm|npm|yarn|uv)\s+[^\n`]{0,180}?(?:build|test|pytest|eslint)[^\n`]{0,80})\s*(✅|passed|pass|ok)?",
+            r"\b(\d+\s+passed|\d+\s+failed|all checks passed|tests? passed|tests? failed|ruff passed|pytest passed)\b",
+            r"\b(uv run pytest[^\n.]{0,120}\s+passed)\b",
+            r"`?(origin/[A-Za-z0-9_.-]+)`?\s+(zaktualizowany|updated|pushed)\b",
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                result = _clean_phrase(match.group(1))
+                if not result or _looks_like_validation_noise(result):
+                    continue
+                marker = " ✅" if "✅" in match.group(0) else ""
+                rendered = f"`{result}`{marker}" if _looks_like_command_or_ref(result) else result
+                out.append(ShadowMemoryCandidate(
+                    type="fact",
+                    subject=subject,
+                    predicate="validation",
+                    object=rendered,
+                    text=f"Validation result: {rendered}.",
+                    scope=scope,
+                    confidence=0.86,
+                    source_quote=match.group(0).strip(),
+                    salience=0.94,
+                ))
+        return out
+
+    @staticmethod
+    def _extract_commit_state(text: str, *, project_id: str | None) -> list[ShadowMemoryCandidate]:
+        out: list[ShadowMemoryCandidate] = []
+        subject = project_id or "session"
+        scope = "project" if project_id else "session"
+        commit_context = bool(re.search(r"\b(commit|push|pushed|origin/)\b", text, flags=re.IGNORECASE))
+        patterns = [
+            r"(?:commit\s*(?:\+\s*push)?|pushed|push)\s*:?\s*-?\s*`?([0-9a-f]{7,40})\s+([^`\n]{3,160})`?",
+            r"`([0-9a-f]{7,40})\s+([^`\n]{3,160})`",
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                if pattern.startswith("`") and not commit_context:
+                    continue
+                sha = match.group(1).strip()
+                title = _clean_phrase(match.group(2))
+                if not title:
+                    continue
+                obj = f"{sha} {title}"
+                out.append(ShadowMemoryCandidate(
+                    type="fact",
+                    subject=subject,
+                    predicate="commit_pushed" if commit_context else "commit",
+                    object=obj,
+                    text=f"Commit pushed: `{obj}`.",
+                    scope=scope,
+                    confidence=0.88,
+                    source_quote=match.group(0).strip(),
+                    salience=0.96,
+                ))
+        return out
+
+    @staticmethod
+    def _extract_implementation_facts(text: str, *, project_id: str | None) -> list[ShadowMemoryCandidate]:
+        out: list[ShadowMemoryCandidate] = []
+        subject = project_id or "session"
+        scope = "project" if project_id else "session"
+        for match in re.finditer(r"\b(?:globalnie\s+w|globally\s+in)\s+`?([^`\s]+)`?", text, re.IGNORECASE):
+            path = _clean_phrase(match.group(1))
+            if path:
+                out.append(ShadowMemoryCandidate(
+                    type="fact",
+                    subject=subject,
+                    predicate="global_fix",
+                    object=path,
+                    text=f"Global fix implemented in `{path}`.",
+                    scope=scope,
+                    confidence=0.88,
+                    source_quote=match.group(0).strip(),
+                    salience=0.95,
+                ))
+        auth_patterns = [
+            r"(`?ConvexProviderWithAuth`?[^\n.]{0,220}(?:token|WorkOS|Convex|isAuthenticated)[^\n.]{0,220})",
+            r"(query\s+`?api\.[^`\s]+`?[^\n.]{0,220}\bskip\b[^\n.]{0,220}(?:auth|token|gotowe|ready))",
+        ]
+        for pattern in auth_patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                fact = _clean_phrase(match.group(1))
+                if fact:
+                    out.append(ShadowMemoryCandidate(
+                        type="fact",
+                        subject=subject,
+                        predicate="auth_race_fix",
+                        object=fact,
+                        text=f"Auth-race fix: {fact}.",
+                        scope=scope,
+                        confidence=0.86,
+                        source_quote=match.group(0).strip(),
+                        salience=0.94,
+                    ))
         return out
 
     @staticmethod
@@ -385,6 +583,31 @@ class RuleBasedMemoryExtractor:
                     salience=0.78,
                 ))
         return out
+
+
+class HybridMemoryExtractor:
+    """Run rule-based anchors and model JSON extraction, then merge candidates.
+
+    Rule-based extraction gives deterministic high-precision candidates; model
+    extraction improves recall for less formulaic real-session language. The
+    MemoryEngine still performs final dedupe and validation for all candidates.
+    """
+
+    def __init__(self, *extractors: Any):
+        self.extractors = [extractor for extractor in extractors if extractor is not None]
+        self.max_candidates = sum(max(0, int(getattr(extractor, "max_candidates", 12))) for extractor in self.extractors)
+
+    def extract(self, event: dict[str, Any]) -> list[ShadowMemoryCandidate]:
+        candidates: list[ShadowMemoryCandidate] = []
+        for extractor in self.extractors:
+            try:
+                candidates.extend(extractor.extract(event))
+            except Exception:
+                # Hybrid extraction should degrade to the surviving extractor(s):
+                # a local model/JSON failure must not erase deterministic rule
+                # anchors such as todos, validations, and workflow state.
+                continue
+        return candidates
 
 
 class MemoryValidator:
@@ -434,11 +657,14 @@ class MemoryValidator:
         for active in active_slot:
             if _norm(active["object"]) == _norm(candidate.object):
                 return self._decision(STATUS_REJECTED, candidate, ["duplicate"])
+            if self._is_additive_slot(candidate):
+                continue
             if any(signal in source_text.lower() for signal in SUPERSEDE_SIGNALS):
                 invalidates.append(active["candidate_id"])
                 reasons.append("supersedes_prior")
             else:
                 return self._decision(STATUS_DISPUTED, candidate, ["contradiction"])
+
 
         return self._decision(STATUS_ACTIVE, candidate, reasons, invalidates=invalidates)
 
@@ -461,6 +687,27 @@ class MemoryValidator:
         }
 
     @staticmethod
+    def _is_additive_slot(candidate: ShadowMemoryCandidate) -> bool:
+        if candidate.type == "todo":
+            return True
+        if candidate.type == "constraint" and _norm(candidate.predicate) in {"requires", "required_feature"}:
+            return True
+        if candidate.type == "decision" and _norm(candidate.predicate) == "rejected":
+            return True
+        if candidate.type == "fact" and _norm(candidate.predicate) in {
+            "validation",
+            "commit",
+            "commit_pushed",
+            "global_fix",
+            "auth_race_fix",
+            "remembered",
+        }:
+            return True
+        if candidate.type in {"entity_note", "relationship", "workflow_state"}:
+            return True
+        return False
+
+    @staticmethod
     def _is_scope_leakage(event: dict[str, Any], candidate: ShadowMemoryCandidate) -> bool:
         source_lower = event_source_text(event).lower()
         if ("this session only" in source_lower or "for this session" in source_lower) and candidate.scope != "session":
@@ -478,6 +725,7 @@ class MemoryEngine:
         store: MemoryStore | None = None,
         extractor: Any | None = None,
         *,
+        sync_extractor: Any | None = None,
         extraction_workers: int = 1,
         parallel_extraction: bool = False,
         enqueue_extraction: bool = False,
@@ -488,6 +736,7 @@ class MemoryEngine:
     ):
         self.store = store or get_memory_store()
         self.extractor = extractor or RuleBasedMemoryExtractor()
+        self.sync_extractor = sync_extractor
         self.extraction_workers = max(1, int(extraction_workers))
         self.parallel_extraction = parallel_extraction and self.extraction_workers > 1
         self.enqueue_extraction = bool(enqueue_extraction)
@@ -527,15 +776,21 @@ class MemoryEngine:
         start = time.perf_counter()
         self.store.record_event(event)
         if self.enqueue_extraction:
+            sync_result = self._extract_validate_store(
+                event,
+                suppress_extraction_errors=True,
+                start=start,
+                extractor=self.sync_extractor,
+            ) if self.sync_extractor is not None else None
             self.store.enqueue_extraction_job(event, source_event_id=request_id)
             elapsed_ms = (time.perf_counter() - start) * 1000
             return {
                 "event_id": request_id,
-                "candidates": 0,
-                "active": 0,
-                "quarantined": 0,
-                "rejected": 0,
-                "disputed": 0,
+                "candidates": int((sync_result or {}).get("candidates") or 0),
+                "active": int((sync_result or {}).get("active") or 0),
+                "quarantined": int((sync_result or {}).get("quarantined") or 0),
+                "rejected": int((sync_result or {}).get("rejected") or 0),
+                "disputed": int((sync_result or {}).get("disputed") or 0),
                 "queued": 1,
                 "duration_ms": round(elapsed_ms, 3),
             }
@@ -620,12 +875,13 @@ class MemoryEngine:
         *,
         suppress_extraction_errors: bool,
         start: float | None = None,
+        extractor: Any | None = None,
     ) -> dict[str, Any]:
         start = time.perf_counter() if start is None else start
         event_id = str(event["event_id"])
         candidates = [
             candidate.with_event(event_id)
-            for candidate in self._extract_candidates(event, suppress_errors=suppress_extraction_errors)
+            for candidate in self._extract_candidates(event, suppress_errors=suppress_extraction_errors, extractor=extractor)
         ]
         validations: list[dict[str, Any]] = []
         for candidate in candidates:
@@ -647,7 +903,14 @@ class MemoryEngine:
             "duration_ms": round(elapsed_ms, 3),
         }
 
-    def _extract_candidates(self, event: dict[str, Any], *, suppress_errors: bool = True) -> list[ShadowMemoryCandidate]:
+    def _extract_candidates(
+        self,
+        event: dict[str, Any],
+        *,
+        suppress_errors: bool = True,
+        extractor: Any | None = None,
+    ) -> list[ShadowMemoryCandidate]:
+        active_extractor = extractor or self.extractor
         chunks = _event_extraction_chunks(
             event,
             max_input_tokens=self.extraction_input_tokens,
@@ -656,11 +919,11 @@ class MemoryEngine:
         )
         try:
             if len(chunks) <= 1:
-                candidates = self.extractor.extract(chunks[0])
-            elif self.parallel_extraction:
-                candidates = self._extract_candidates_parallel(chunks, suppress_errors=suppress_errors)
+                candidates = active_extractor.extract(chunks[0])
+            elif self.parallel_extraction and extractor is None:
+                candidates = self._extract_candidates_parallel(chunks, suppress_errors=suppress_errors, extractor=active_extractor)
             else:
-                candidates = self._extract_candidates_sequential(chunks, suppress_errors=suppress_errors)
+                candidates = self._extract_candidates_sequential(chunks, suppress_errors=suppress_errors, extractor=active_extractor)
         except Exception:
             if suppress_errors:
                 return []
@@ -672,11 +935,12 @@ class MemoryEngine:
         chunks: list[dict[str, Any]],
         *,
         suppress_errors: bool,
+        extractor: Any,
     ) -> list[ShadowMemoryCandidate]:
         merged: list[ShadowMemoryCandidate] = []
         for chunk in chunks:
             try:
-                merged.extend(self.extractor.extract(chunk))
+                merged.extend(extractor.extract(chunk))
             except Exception:
                 if not suppress_errors:
                     raise
@@ -687,10 +951,11 @@ class MemoryEngine:
         chunks: list[dict[str, Any]],
         *,
         suppress_errors: bool,
+        extractor: Any,
     ) -> list[ShadowMemoryCandidate]:
         chunk_results: list[list[ShadowMemoryCandidate]] = [[] for _ in chunks]
         with ThreadPoolExecutor(max_workers=self.extraction_workers) as executor:
-            futures = {executor.submit(self.extractor.extract, chunk): idx for idx, chunk in enumerate(chunks)}
+            futures = {executor.submit(extractor.extract, chunk): idx for idx, chunk in enumerate(chunks)}
             for future, idx in futures.items():
                 try:
                     chunk_results[idx] = future.result()
@@ -726,32 +991,27 @@ class MemoryEngine:
 def get_memory_engine(path: Path | None = None) -> MemoryEngine:
     store = get_memory_store(path) if path else get_memory_store()
     cfg = load_config()
-    extractor_name = cfg.memory.extractor.strip().lower().replace("-", "_")
     common_kwargs = {
         "extraction_input_tokens": cfg.memory.extraction_input_tokens,
         "extraction_overlap_tokens": cfg.memory.extraction_overlap_tokens,
         "extraction_max_chunks_per_event": cfg.memory.extraction_max_chunks_per_event,
         "extraction_timeout_seconds": cfg.memory.extraction_timeout_seconds,
     }
-    if extractor_name in {"model_memory_json", "memory_model_json", "model_json_memory", "strict_json_memory", "llm_json", "json_llm", "llm", "gemma_json"}:
-        from ppmlx.memory_extractors import ModelMemoryJsonExtractor
+    from ppmlx.memory_extractors import ModelMemoryJsonExtractor
 
-        extractor = ModelMemoryJsonExtractor(
-            model_name=cfg.memory.extraction_model,
-            max_candidates=cfg.memory.max_candidates_per_event,
-            max_tokens=cfg.memory.extraction_max_tokens,
-        )
-        return MemoryEngine(
-            store=store,
-            extractor=extractor,
-            extraction_workers=cfg.memory.extraction_workers,
-            parallel_extraction=cfg.memory.extraction_workers > 1,
-            enqueue_extraction=True,
-            **common_kwargs,
-        )
+    rule_extractor = RuleBasedMemoryExtractor(max_candidates=cfg.memory.max_candidates_per_event)
+    model_extractor = ModelMemoryJsonExtractor(
+        model_name=cfg.memory.extraction_model,
+        max_candidates=cfg.memory.max_candidates_per_event,
+        max_tokens=cfg.memory.extraction_max_tokens,
+    )
     return MemoryEngine(
         store=store,
-        extractor=RuleBasedMemoryExtractor(max_candidates=cfg.memory.max_candidates_per_event),
+        extractor=model_extractor,
+        sync_extractor=rule_extractor,
+        extraction_workers=cfg.memory.extraction_workers,
+        parallel_extraction=cfg.memory.extraction_workers > 1,
+        enqueue_extraction=True,
         **common_kwargs,
     )
 
@@ -916,9 +1176,23 @@ def _estimate_text_tokens(text: Any) -> int:
     return max(1, (len(str(text)) + 3) // 4)
 
 
-def _candidate_sources(messages_text: str) -> list[str]:
-    # Extract only from user/developer/system text, not assistant output.
-    return [line.split(": ", 1)[1] if ": " in line else line for line in messages_text.splitlines() if line.strip()]
+def _candidate_sources(messages: list[dict[str, Any]], *, response_text: str | None = None) -> list[str]:
+    # Extract durable facts from conversational text only. Raw tool/function
+    # output is handled by explicit distillers; running generic regex extractors
+    # over logs/search output turns unrelated fixture data into project memory.
+    out: list[str] = []
+    for message in messages:
+        role = str(message.get("role", "user")).lower()
+        if role in {"tool", "function"}:
+            continue
+        text = _message_to_text(message)
+        _, sep, content = text.partition(": ")
+        candidate = content if sep else text
+        if candidate.strip():
+            out.append(candidate)
+    if response_text and str(response_text).strip():
+        out.append(str(response_text).strip())
+    return out
 
 
 def _message_to_text(message: dict[str, Any]) -> str:
@@ -966,10 +1240,58 @@ def _candidate_id(event_id: str, type_: str, subject: str, predicate: str, objec
     return f"mem_{digest}"
 
 
+def _prioritize_extracted_candidates(candidates: list[ShadowMemoryCandidate], *, limit: int) -> list[ShadowMemoryCandidate]:
+    """Keep workflow/action anchors from being crowded out by generic facts."""
+    protected_predicates = {
+        "current_task",
+        "next_action",
+        "blocker",
+        "command_run",
+        "validation",
+        "file_changed",
+        "commit",
+        "commit_pushed",
+        "global_fix",
+        "auth_race_fix",
+    }
+
+    def rank(candidate: ShadowMemoryCandidate) -> tuple[int, float, float, str]:
+        protected = int(candidate.type == "workflow_state" or candidate.predicate in protected_predicates or candidate.type == "todo")
+        return (protected, float(candidate.salience), float(candidate.confidence), candidate.candidate_id)
+
+    return sorted(candidates, key=rank, reverse=True)[: max(0, limit)]
+
+
 def _clean_phrase(value: str) -> str:
     cleaned = " ".join(value.strip().strip("'\"").split())
     cleaned = re.sub(r"\s+(please|thanks)$", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip(" .;:-")
+
+
+def _looks_like_command_or_ref(value: str) -> bool:
+    lowered = value.lower()
+    return (
+        any(token in lowered for token in ("pnpm", "npm", "yarn", "uv ", "pytest", "ruff", "eslint", "build", "test"))
+        or lowered.startswith("origin/")
+    )
+
+
+def _looks_like_validation_noise(value: str) -> bool:
+    lowered = value.lower().strip()
+    if len(lowered) < 3:
+        return True
+    if lowered in {"build", "test", "tests", "passed", "failed"}:
+        return True
+    return False
+
+
+def _looks_like_workflow_noise(value: str) -> bool:
+    lowered = value.lower().strip()
+    if len(lowered) < 4:
+        return True
+    if lowered in {"it", "this", "that", "to", "dalej", "kontynuuj", "działaj", "dzialaj"}:
+        return True
+    return False
 
 
 def _norm(value: str) -> str:

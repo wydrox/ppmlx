@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ppmlx.context_reducer import ContextBudget, ContextReducer, estimate_messages_tokens
+from ppmlx.context_reducer import ContextBudget, ContextReducer, estimate_messages_tokens, group_messages_into_episodes
 from ppmlx.memory_engine import MemoryEngine
 from ppmlx.memory_store import MemoryStore, get_memory_store
 
@@ -49,6 +49,7 @@ class ReplayResult:
     cold_messages: int
     session_context_tokens: int
     latency_ms: float
+    retrieval_latency_ms: float = 0.0
     expected_terms: list[str] = field(default_factory=list)
     found_terms: list[str] = field(default_factory=list)
     missed_terms: list[str] = field(default_factory=list)
@@ -56,6 +57,7 @@ class ReplayResult:
     wrong_terms: list[str] = field(default_factory=list)
     session_context: str = ""
     reduced_context: str = ""
+    reduced_messages: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +72,7 @@ class ReplayResult:
             "cold_messages": self.cold_messages,
             "session_context_tokens": self.session_context_tokens,
             "latency_ms": self.latency_ms,
+            "retrieval_latency_ms": self.retrieval_latency_ms,
             "expected_terms": self.expected_terms,
             "found_terms": self.found_terms,
             "missed_terms": self.missed_terms,
@@ -77,6 +80,7 @@ class ReplayResult:
             "wrong_terms": self.wrong_terms,
             "session_context": self.session_context,
             "reduced_context": self.reduced_context,
+            "reduced_messages": self.reduced_messages,
         }
 
 
@@ -140,6 +144,7 @@ def compact_replay(
     expected_terms: list[str] | None = None,
     forbidden_terms: list[str] | None = None,
     budget: ContextBudget | None = None,
+    extractor: Any | None = None,
 ) -> ReplayResult:
     events = [event for event in trace.get("events", []) if isinstance(event, dict)]
     selected = _select_replay_event(events)
@@ -171,11 +176,18 @@ def compact_replay(
         session_context_tokens=2_000,
         max_context_items=40,
     )
+    replay_budget.extract_cold_messages = False
     with tempfile.TemporaryDirectory() as tmp:
         store = MemoryStore(Path(tmp) / "memory.db")
         store.init()
-        engine = MemoryEngine(store=store)
+        engine = MemoryEngine(store=store, extractor=extractor)
         reducer = ContextReducer(replay_budget, store=store, engine=engine)
+        _preingest_replay_memory(
+            messages=messages,
+            reducer=reducer,
+            engine=engine,
+            selected=selected,
+        )
         start = time.perf_counter()
         reduction = reducer.reduce(
             request_id=f"replay-{selected.get('event_id') or 'trace'}",
@@ -211,6 +223,7 @@ def compact_replay(
         cold_messages=reduction.cold_messages,
         session_context_tokens=reduction.session_context_tokens,
         latency_ms=round(latency_ms, 3),
+        retrieval_latency_ms=float(reduction.metadata.get("retrieval_latency_ms") or 0.0),
         expected_terms=expected_terms,
         found_terms=found,
         missed_terms=missed,
@@ -218,7 +231,61 @@ def compact_replay(
         wrong_terms=wrong,
         session_context=session_context,
         reduced_context=reduced_context,
+        reduced_messages=reduction.messages,
     )
+
+
+def _preingest_replay_memory(
+    *,
+    messages: list[dict[str, Any]],
+    reducer: ContextReducer,
+    engine: MemoryEngine,
+    selected: dict[str, Any],
+) -> None:
+    """Populate graph before timed retrieval; extraction is ingest, not query path."""
+    _, non_system = _split_system(messages)
+    hot, cold = reducer._select_hot_tail(non_system)  # noqa: SLF001 - replay helper mirrors reducer split
+    for episode in group_messages_into_episodes(cold):
+        if not episode.messages:
+            continue
+        engine.capture_chat(
+            request_id=f"preingest-{selected.get('event_id') or 'trace'}-e{episode.index}",
+            endpoint="/v1/chat/completions#preingest",
+            model_alias=str(selected.get("model_alias") or "trace-model"),
+            model_repo=str(selected.get("model_repo") or "trace/model"),
+            messages=episode.messages,
+            response_text=None,
+            app_id=selected.get("app_id"),
+            project_id=selected.get("project_id"),
+            session_id=selected.get("session_id"),
+            metadata={"trace_replay_preingest": True},
+        )
+    for idx, message in enumerate(hot):
+        if str(message.get("role") or "").lower() not in {"tool", "function"}:
+            continue
+        engine.capture_chat(
+            request_id=f"preingest-{selected.get('event_id') or 'trace'}-hot-tool-{idx}",
+            endpoint="/v1/chat/completions#preingest-hot-tool",
+            model_alias=str(selected.get("model_alias") or "trace-model"),
+            model_repo=str(selected.get("model_repo") or "trace/model"),
+            messages=[message],
+            response_text=None,
+            app_id=selected.get("app_id"),
+            project_id=selected.get("project_id"),
+            session_id=selected.get("session_id"),
+            metadata={"trace_replay_preingest": True, "hot_tool_distill": True},
+        )
+
+
+def _split_system(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    system_messages: list[dict[str, Any]] = []
+    non_system: list[dict[str, Any]] = []
+    for message in messages:
+        if message.get("role") == "system":
+            system_messages.append(message)
+        else:
+            non_system.append(message)
+    return system_messages, non_system
 
 
 def _select_replay_event(events: list[dict[str, Any]]) -> dict[str, Any] | None:

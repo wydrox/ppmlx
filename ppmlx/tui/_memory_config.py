@@ -24,7 +24,7 @@ def memory_config_menu() -> None:
 
     memory = data.get("memory", {})
     modes = ["off", "shadow", "compact", "inject"]
-    extractors = ["rule_based", "model_memory_json"]
+    extractors = ["hybrid"]
     enabled = bool(memory.get("enabled", True))
     mode = str(memory.get("mode", "off")).lower()
     if mode not in modes:
@@ -76,7 +76,7 @@ def memory_config_menu() -> None:
         fragments.append(("class:dim", f"  {cfg_path}\n\n"))
         _row(fragments, 0, "Memory", f"◀ {'Enabled' if state['enabled'] else 'Disabled'} ▶")
         _row(fragments, 1, "Mode", f"◀ {modes[state['mode_index']]} ▶")
-        _row(fragments, 2, "Extractor", f"◀ {extractors[state['extractor_index']]} ▶")
+        _row(fragments, 2, "Extractor", f"◀ {extractors[state['extractor_index']]} (rule + model) ▶")
         is_cursor = state["cursor"] == 3
         prefix = "  ▸ " if is_cursor else "    "
         style = "class:cursor" if is_cursor else ""
@@ -240,9 +240,13 @@ def memory_config_menu() -> None:
 
 def _normalize_extractor(value: object) -> str:
     raw = str(value).strip().lower().replace("-", "_")
-    if raw in {"model_memory_json", "memory_model_json", "model_json_memory", "strict_json_memory", "llm", "llm_json", "json_llm", "gemma_json"}:
-        return "model_memory_json"
-    return "rule_based"
+    if raw in {
+        "hybrid", "rule", "rules", "rule_based", "regex",
+        "model_memory_json", "memory_model_json", "model_json_memory", "strict_json_memory",
+        "llm", "llm_json", "json_llm", "gemma_json",
+    }:
+        return "hybrid"
+    return "hybrid"
 
 
 def _option_index(options: list, value: object) -> int:

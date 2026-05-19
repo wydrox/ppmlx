@@ -746,52 +746,44 @@ class MemoryStore:
 
     def upsert_memory_edge(self, candidate: dict[str, Any]) -> None:
         self.init()
-        subject_projection = canonicalize_graph_entity(candidate["subject"])
-        object_projection = canonicalize_graph_entity(candidate["object"])
-        if subject_projection is None or object_projection is None:
-            with self._lock, self._connect() as conn:
-                conn.execute("DELETE FROM memory_edges WHERE source_candidate_id = ?", (candidate["candidate_id"],))
-                for raw_name, projection in ((candidate["subject"], subject_projection), (candidate["object"], object_projection)):
-                    if projection is None:
-                        continue
-                    entity_id = self._entity_id(projection, "concept")
-                    self._upsert_entity_conn(conn, entity_id, projection, "concept")
-                    self._upsert_canonical_alias_conn(
-                        conn,
-                        entity_id=entity_id,
-                        raw_name=raw_name,
-                        canonical_name=projection,
-                        entity_type="concept",
-                        scope=str(candidate.get("scope") or "global"),
-                        candidate_id=str(candidate.get("candidate_id") or ""),
-                    )
-                conn.commit()
-            return
-
-        from_entity_id = self._entity_id(subject_projection, "concept")
-        to_entity_id = self._entity_id(object_projection, "concept")
         edge_id = self._edge_id(candidate["candidate_id"], candidate["predicate"])
         with self._lock, self._connect() as conn:
-            self._upsert_entity_conn(conn, from_entity_id, subject_projection, "concept")
-            self._upsert_entity_conn(conn, to_entity_id, object_projection, "concept")
-            self._upsert_canonical_alias_conn(
+            conn.row_factory = sqlite3.Row
+            namespace = self._candidate_namespace_conn(conn, candidate)
+            subject_projection = self._resolve_graph_entity_conn(
                 conn,
-                entity_id=from_entity_id,
-                raw_name=candidate["subject"],
-                canonical_name=subject_projection,
-                entity_type="concept",
-                scope=str(candidate.get("scope") or "global"),
-                candidate_id=str(candidate.get("candidate_id") or ""),
+                raw_name=str(candidate["subject"]),
+                candidate=candidate,
+                namespace=namespace,
+                side="subject",
             )
-            self._upsert_canonical_alias_conn(
+            object_projection = self._resolve_graph_entity_conn(
                 conn,
-                entity_id=to_entity_id,
-                raw_name=candidate["object"],
-                canonical_name=object_projection,
-                entity_type="concept",
-                scope=str(candidate.get("scope") or "global"),
-                candidate_id=str(candidate.get("candidate_id") or ""),
+                raw_name=str(candidate["object"]),
+                candidate=candidate,
+                namespace=namespace,
+                side="object",
             )
+            conn.execute("DELETE FROM memory_edges WHERE source_candidate_id = ?", (candidate["candidate_id"],))
+            for raw_name, projection in ((candidate["subject"], subject_projection), (candidate["object"], object_projection)):
+                if projection is None:
+                    continue
+                self._upsert_entity_conn(conn, projection["entity_id"], projection["name"], "concept")
+                self._upsert_canonical_alias_conn(
+                    conn,
+                    entity_id=projection["entity_id"],
+                    raw_name=str(raw_name),
+                    canonical_name=projection["name"],
+                    entity_type="concept",
+                    scope=str(candidate.get("scope") or "global"),
+                    candidate_id=str(candidate.get("candidate_id") or ""),
+                )
+            if subject_projection is None or object_projection is None:
+                conn.commit()
+                return
+
+            from_entity_id = subject_projection["entity_id"]
+            to_entity_id = object_projection["entity_id"]
             conn.execute(
                 """INSERT OR REPLACE INTO memory_edges (
                     edge_id, from_entity_id, relation, to_entity_id,
@@ -810,6 +802,128 @@ class MemoryStore:
                 ),
             )
             conn.commit()
+
+    def _candidate_namespace_conn(self, conn: sqlite3.Connection, candidate: dict[str, Any]) -> dict[str, str | None]:
+        row = conn.execute(
+            "SELECT app_id, project_id, session_id FROM memory_events WHERE event_id = ?",
+            (candidate.get("event_id"),),
+        ).fetchone()
+        if row is None:
+            return {"app_id": None, "project_id": None, "session_id": None}
+        return {
+            "app_id": row["app_id"],
+            "project_id": row["project_id"],
+            "session_id": row["session_id"],
+        }
+
+    def _resolve_graph_entity_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        raw_name: str,
+        candidate: dict[str, Any],
+        namespace: dict[str, str | None],
+        side: str,
+    ) -> dict[str, str] | None:
+        projection = self._project_anchor_projection(raw_name, candidate=candidate, namespace=namespace, side=side)
+        if projection is None:
+            projection = canonicalize_graph_entity(raw_name)
+        if projection is None:
+            return None
+
+        scoped_candidates = self._graph_resolution_candidates_conn(conn, namespace)
+        match = _select_graph_entity_match(raw_name, projection, scoped_candidates)
+        if match is not None:
+            return match
+
+        entity_id = self._entity_id(projection, "concept")
+        return {"entity_id": entity_id, "name": projection}
+
+    @staticmethod
+    def _project_anchor_projection(
+        raw_name: str,
+        *,
+        candidate: dict[str, Any],
+        namespace: dict[str, str | None],
+        side: str,
+    ) -> str | None:
+        if side != "subject":
+            return None
+        project_id = namespace.get("project_id")
+        if not project_id:
+            return None
+        scope = str(candidate.get("scope") or "").lower()
+        candidate_type = str(candidate.get("type") or "").lower()
+        predicate = str(candidate.get("predicate") or "").lower()
+        raw_norm = _norm(raw_name)
+        generic_subjects = {
+            "session",
+            "current session",
+            "current task",
+            "task",
+            "workflow",
+            "assistant",
+            "agent",
+            "quality-bench",
+            "shopping_session",
+        }
+        if raw_norm in generic_subjects and (scope == "project" or candidate_type in {"workflow_state", "todo"}):
+            return canonicalize_graph_entity(project_id)
+        if raw_norm == "user" and candidate_type in {"todo", "decision", "workflow_state", "entity_note"}:
+            return canonicalize_graph_entity(project_id)
+        if raw_norm == "session" and predicate in {"validation", "commit", "commit_pushed", "file_changed", "command_run"}:
+            return canonicalize_graph_entity(project_id)
+        return None
+
+    def _graph_resolution_candidates_conn(
+        self,
+        conn: sqlite3.Connection,
+        namespace: dict[str, str | None],
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = ["c.status = 'active'"]
+        params: list[Any] = []
+        # Project is the useful graph partition; session-only is a fallback for
+        # unprojected traces. Avoid global fuzzy linking when no namespace exists.
+        if namespace.get("project_id"):
+            clauses.append("ev.project_id = ?")
+            params.append(namespace["project_id"])
+        elif namespace.get("session_id"):
+            clauses.append("ev.session_id = ?")
+            params.append(namespace["session_id"])
+        elif namespace.get("app_id"):
+            clauses.append("ev.app_id = ?")
+            params.append(namespace["app_id"])
+        else:
+            return []
+        where = " AND ".join(clauses)
+        rows = conn.execute(
+            f"""SELECT DISTINCT ent.entity_id, ent.name
+                FROM memory_edges edge
+                JOIN memory_candidates c ON c.candidate_id = edge.source_candidate_id
+                JOIN memory_events ev ON ev.event_id = c.event_id
+                JOIN memory_entities ent ON ent.entity_id IN (edge.from_entity_id, edge.to_entity_id)
+                WHERE {where}""",
+            params,
+        ).fetchall()
+        candidates = [{"entity_id": row["entity_id"], "name": row["name"]} for row in rows]
+        if not candidates:
+            return []
+        entity_ids = {candidate["entity_id"] for candidate in candidates}
+        placeholders = ",".join("?" for _ in entity_ids)
+        alias_rows = conn.execute(
+            f"""SELECT entity_id, alias
+                FROM memory_entity_aliases
+                WHERE invalid_at IS NULL
+                  AND (expired_at IS NULL OR expired_at > strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+                  AND entity_id IN ({placeholders})""",
+            list(entity_ids),
+        ).fetchall()
+        aliases_by_entity: dict[str, list[str]] = {}
+        for row in alias_rows:
+            aliases_by_entity.setdefault(row["entity_id"], []).append(row["alias"])
+        for candidate in candidates:
+            candidate["aliases"] = aliases_by_entity.get(candidate["entity_id"], [])
+        return candidates
 
     def rebuild_graph_projection(
         self,
@@ -1275,12 +1389,19 @@ class MemoryStore:
                 except (TypeError, ValueError):
                     pass
 
+        edge_candidate_ids = {str(edge.get("source_candidate_id") or "") for edge in edges}
         for candidate in candidates:
+            # When an edge projection exists, use the resolved graph entity names
+            # from that edge instead of re-introducing raw extracted labels as
+            # disconnected nodes in the snapshot.
+            if str(candidate.get("candidate_id") or "") in edge_candidate_ids:
+                continue
             add(str(candidate.get("subject") or ""), role="subject", candidate=candidate)
             add(str(candidate.get("object") or ""), role="object", candidate=candidate)
         for edge in edges:
-            add(str(edge.get("from_name") or ""), role="edge_from")
-            add(str(edge.get("to_name") or ""), role="edge_to")
+            edge_candidate = {"salience": edge.get("salience")}
+            add(str(edge.get("from_name") or ""), role="edge_from", candidate=edge_candidate)
+            add(str(edge.get("to_name") or ""), role="edge_to", candidate=edge_candidate)
 
         for edge in edges:
             for node_id in (edge.get("source") or edge.get("from_entity_id"), edge.get("target") or edge.get("to_entity_id")):
@@ -1814,6 +1935,64 @@ def canonicalize_graph_entity(value: str) -> str | None:
     if not canonical or _looks_like_long_text_entity(canonical):
         return None
     return canonical
+
+
+def _select_graph_entity_match(raw_name: str, projection: str, candidates: list[dict[str, Any]]) -> dict[str, str] | None:
+    if not candidates:
+        return None
+    target_keys = {_entity_resolution_key(raw_name), _entity_resolution_key(projection), _norm(projection)}
+    target_keys = {key for key in target_keys if key}
+    best: tuple[float, str, str] | None = None
+    for candidate in candidates:
+        names = [str(candidate.get("name") or ""), *[str(alias) for alias in candidate.get("aliases", [])]]
+        name_keys = {_entity_resolution_key(name) for name in names}
+        name_keys.update(_norm(name) for name in names)
+        name_keys = {key for key in name_keys if key}
+        if target_keys & name_keys:
+            return {"entity_id": str(candidate["entity_id"]), "name": str(candidate["name"])}
+        score = max((_entity_resolution_similarity(target_key, name_key) for target_key in target_keys for name_key in name_keys), default=0.0)
+        if score >= 0.9:
+            contender = (score, str(candidate.get("name") or ""), str(candidate.get("entity_id") or ""))
+            if best is None or contender > best:
+                best = contender
+    if best is None:
+        return None
+    return {"entity_id": best[2], "name": best[1]}
+
+
+def _entity_resolution_key(value: str) -> str:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+    text = _clean_entity_label(text).lower()
+    for prefix in _SAFE_ENTITY_PREFIXES:
+        if text.startswith(prefix + " "):
+            text = text[len(prefix) + 1 :].strip()
+            break
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _entity_resolution_similarity(left: str, right: str) -> float:
+    if not left or not right or left == right:
+        return 1.0 if left and right else 0.0
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if len(left_tokens) < 2 or len(right_tokens) < 2:
+        return 0.0
+    token_score = len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+    if token_score < 0.8:
+        return token_score
+    left_chars = _char_shingles(left)
+    right_chars = _char_shingles(right)
+    if not left_chars or not right_chars:
+        return token_score
+    char_score = len(left_chars & right_chars) / len(left_chars | right_chars)
+    return max(token_score, char_score)
+
+
+def _char_shingles(value: str) -> set[str]:
+    cleaned = value.replace(" ", "")
+    if len(cleaned) < 3:
+        return {cleaned} if cleaned else set()
+    return {cleaned[idx : idx + 3] for idx in range(len(cleaned) - 2)}
 
 
 def _clean_entity_label(value: str) -> str:

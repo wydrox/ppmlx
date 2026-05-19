@@ -50,7 +50,7 @@ class TestDefaultValues:
         assert cfg.session_context_tokens == 2000
         assert cfg.compact_threshold_tokens == 12000
         assert cfg.max_context_items == 40
-        assert cfg.extractor == "rule_based"
+        assert cfg.extractor == "hybrid"
         assert cfg.extraction_model == "gemma-4-e2b"
         assert cfg.extraction_workers == 1
         assert cfg.extraction_max_tokens == 1200
@@ -173,7 +173,7 @@ respect_do_not_track = true
         assert cfg.memory.session_context_tokens == 1800
         assert cfg.memory.compact_threshold_tokens == 11000
         assert cfg.memory.max_context_items == 30
-        assert cfg.memory.extractor == "model_memory_json"
+        assert cfg.memory.extractor == "hybrid"
         assert cfg.memory.extraction_model == "qwen3.5:0.8b"
         assert cfg.memory.extraction_workers == 3
         assert cfg.memory.extraction_max_tokens == 900
@@ -316,7 +316,7 @@ class TestEnvVarOverrides:
         monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_MAX_CHUNKS", "16")
         monkeypatch.setenv("PPMLX_MEMORY_EXTRACTION_TIMEOUT", "30.5")
         cfg = load_config()
-        assert cfg.memory.extractor == "model_memory_json"
+        assert cfg.memory.extractor == "hybrid"
         assert cfg.memory.extraction_model == "llama3:8b"
         assert cfg.memory.extraction_workers == 4
         assert cfg.memory.extraction_max_tokens == 1000

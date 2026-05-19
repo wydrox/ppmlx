@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from ppmlx.memory_engine import HybridMemoryExtractor, ShadowMemoryCandidate
 from ppmlx.memory_extractors import (
     DEFAULT_GEMMA_MEMORY_MODEL,
     DEFAULT_MEMORY_EXTRACTION_MODEL,
@@ -23,6 +24,33 @@ def _event(content: str, **kwargs):
         "messages": [{"role": "user", "content": content}],
         "response_text": kwargs.get("response_text", "ok"),
     }
+
+
+def test_hybrid_memory_extractor_runs_all_extractors():
+    class StaticExtractor:
+        max_candidates = 1
+
+        def extract(self, event):
+            return [ShadowMemoryCandidate(
+                type="fact",
+                subject="user",
+                predicate="remembered",
+                object="model-only fact",
+                text="Remember that model-only fact.",
+                scope="global",
+                confidence=0.9,
+                source_quote="model-only fact",
+                salience=0.9,
+            )]
+
+    extractor = HybridMemoryExtractor(
+        ModelMemoryJsonExtractor(generation_fn=lambda *args: '{"candidates": []}'),
+        StaticExtractor(),
+    )
+    candidates = extractor.extract(_event("I prefer concise answers. model-only fact"))
+
+    assert extractor.max_candidates >= 2
+    assert any(candidate.object == "model-only fact" for candidate in candidates)
 
 
 def test_model_memory_json_extractor_builds_strict_json_prompt_and_uses_default_model():

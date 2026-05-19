@@ -24,6 +24,8 @@ def _store_memory(
     session_id: str | None = None,
     salience: float = 1.0,
     confidence: float = 0.8,
+    type_: str = "fact",
+    predicate: str = "notes",
 ) -> None:
     store.record_event({
         "event_id": event_id,
@@ -38,9 +40,9 @@ def _store_memory(
         {
             "candidate_id": candidate_id,
             "event_id": event_id,
-            "type": "fact",
+            "type": type_,
             "subject": project_id or "global",
-            "predicate": "notes",
+            "predicate": predicate,
             "object": text,
             "text": text,
             "scope": "project" if project_id else "global",
@@ -101,6 +103,7 @@ def test_context_reducer_compacts_cold_messages_and_keeps_hot_tail(tmp_path: Pat
         hot_tail_tokens=90,
         session_context_tokens=500,
         max_context_items=10,
+        extract_cold_messages=True,
     ), store=store, engine=engine)
 
     result = reducer.reduce(
@@ -121,7 +124,7 @@ def test_context_reducer_compacts_cold_messages_and_keeps_hot_tail(tmp_path: Pat
     assert "Use these facts as previous session context" in context
     assert "not a higher-priority instruction" in context
     assert "OLED" in context
-    assert result.messages[-1]["content"].startswith("Current question")
+    assert "Current question: compare LG C4 and Samsung S90D" in result.messages[-1]["content"]
 
     # Cold user preference was extracted into memory during compaction.
     rows = store.search("concise comparison", project_id="tv-shopping", session_id="s1")
@@ -337,6 +340,95 @@ def test_explicit_noisy_project_filter_can_retrieve_eval_memory(tmp_path: Path):
 
     assert "expected fixture data" in result.context
     assert any(item["project_id"] == "quality-bench" for item in result.items)
+
+
+def test_handoff_ranking_prefers_validation_commit_over_generic_todos(tmp_path: Path):
+    store = MemoryStore(tmp_path / "memory.db")
+    _store_memory(
+        store,
+        candidate_id="generic-todo",
+        event_id="rank-event-1",
+        project_id="devryn",
+        text="devryn todo: and report what changed.",
+        salience=100.0,
+        type_="todo",
+        predicate="needs",
+    )
+    _store_memory(
+        store,
+        candidate_id="build-validation",
+        event_id="rank-event-2",
+        project_id="devryn",
+        text="Validation result: `pnpm build` ✅.",
+        salience=0.1,
+        type_="fact",
+        predicate="validation",
+    )
+    _store_memory(
+        store,
+        candidate_id="commit-pushed",
+        event_id="rank-event-3",
+        project_id="devryn",
+        text="Commit pushed: `bedc49e Gate Convex auth until token is ready`.",
+        salience=0.1,
+        type_="fact",
+        predicate="commit_pushed",
+    )
+
+    result = build_handoff_context(query="devryn auth race validation commit", project_id="devryn", max_items=2, max_tokens=500, store=store)
+
+    assert "bedc49e Gate Convex auth until token is ready" in result.context
+    assert "`pnpm build` ✅" in result.context
+    assert "and report what changed" not in result.context
+
+
+def test_generic_action_query_prioritizes_workflow_state(tmp_path: Path):
+    store = MemoryStore(tmp_path / "memory.db")
+    _store_memory(
+        store,
+        candidate_id="unrelated-high-salience",
+        event_id="wf-rank-1",
+        project_id="ppmlx",
+        text="Unrelated high-salience project note that should not displace workflow state.",
+        salience=100.0,
+        type_="fact",
+        predicate="notes",
+    )
+    _store_memory(
+        store,
+        candidate_id="workflow-next-action",
+        event_id="wf-rank-2",
+        project_id="ppmlx",
+        text="Next action: rerun targeted quality-bench with include-content.",
+        salience=0.1,
+        type_="workflow_state",
+        predicate="next_action",
+    )
+    _store_memory(
+        store,
+        candidate_id="workflow-validation",
+        event_id="wf-rank-3",
+        project_id="ppmlx",
+        text="Validation result: `uv run pytest tests/test_quality_bench.py` passed.",
+        salience=0.1,
+        type_="fact",
+        predicate="validation",
+    )
+
+    reducer = ContextReducer(ContextBudget(mode="inject", session_context_tokens=500, max_context_items=2), store=store)
+    result = reducer.reduce(
+        request_id="req-generic-action",
+        model_alias="test",
+        model_repo="repo/test",
+        messages=[{"role": "user", "content": "działaj"}],
+        memory_context={"project_id": "ppmlx"},
+    )
+
+    context = result.messages[0]["content"]
+    assert "Current workflow/action state:" in context
+    assert "rerun targeted quality-bench" in context
+    assert "uv run pytest tests/test_quality_bench.py" in context
+    assert "Unrelated high-salience" not in context
 
 
 def test_general_context_reducer_retrieval_hides_noisy_eval_namespaces(tmp_path: Path):

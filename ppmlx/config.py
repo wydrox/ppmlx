@@ -49,7 +49,7 @@ class MemoryConfig:
     session_context_tokens: int = 2000
     compact_threshold_tokens: int = 12000
     max_context_items: int = 40
-    extractor: str = "rule_based"  # rule_based | model_memory_json; llm_json/gemma_json are legacy aliases
+    extractor: str = "hybrid"  # legacy setting; runtime uses rule_based + model_memory_json hybrid extraction
     extraction_model: str = "gemma-4-e2b"
     extraction_workers: int = 1
     extraction_max_tokens: int = 1200
@@ -142,19 +142,21 @@ def _normalize_refresh(value: Any) -> str:
 def _normalize_memory_extractor(value: Any) -> str:
     raw = str(value).strip().lower().replace("-", "_")
     aliases = {
-        "rule": "rule_based",
-        "rules": "rule_based",
-        "rule_based": "rule_based",
-        "regex": "rule_based",
-        "model_memory_json": "model_memory_json",
-        "memory_model_json": "model_memory_json",
-        "model_json_memory": "model_memory_json",
-        "strict_json_memory": "model_memory_json",
-        "llm": "model_memory_json",
-        "json": "model_memory_json",
-        "json_llm": "model_memory_json",
-        "llm_json": "model_memory_json",
-        "gemma_json": "model_memory_json",
+        "rule": "hybrid",
+        "rules": "hybrid",
+        "rule_based": "hybrid",
+        "regex": "hybrid",
+        "hybrid": "hybrid",
+        "hybrid_json": "hybrid",
+        "model_memory_json": "hybrid",
+        "memory_model_json": "hybrid",
+        "model_json_memory": "hybrid",
+        "strict_json_memory": "hybrid",
+        "llm": "hybrid",
+        "json": "hybrid",
+        "json_llm": "hybrid",
+        "llm_json": "hybrid",
+        "gemma_json": "hybrid",
     }
     return aliases.get(raw, "rule_based")
 
