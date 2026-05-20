@@ -2005,6 +2005,18 @@ def graph_cmd(
     typer.echo(json.dumps(snapshot, indent=2, ensure_ascii=False))
 
 
+@memory_app.command(name="walk")
+def memory_walk_cmd(
+    entity_name: str = typer.Argument(..., help="Starting entity name"),
+    max_hops: int = typer.Option(2, "--max-hops", "-n", help="Maximum traversal depth (1-5)"),
+    include_inferred: bool = typer.Option(True, "--inferred/--no-inferred", help="Include inferred edges"),
+):
+    """Multi-hop graph traversal from an entity."""
+    from ppmlx.memory_store import get_memory_store
+    result = get_memory_store().graph_walk(entity_name, max_hops=max_hops, include_inferred=include_inferred)
+    typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+
 @memory_app.command(name="config")
 def memory_config_cmd(
     enabled: Optional[bool] = typer.Option(None, "--enabled/--disabled", help="Enable or disable the local memory feature."),
@@ -2171,6 +2183,8 @@ def memory_search_cmd(
     scope: Optional[str] = typer.Option(None, "--scope", help="Filter by scope"),
     limit: int = typer.Option(20, "--limit", "-n", help="Maximum rows"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    deep: bool = typer.Option(False, "--deep", help="Full output with all fields and deep inferred edges"),
+    max_hops: int = typer.Option(3, "--max-hops", help="Max inferred edge traversal depth (deep mode only)"),
 ):
     """Search temporal memory candidates."""
     from rich.table import Table
@@ -2178,6 +2192,12 @@ def memory_search_cmd(
 
     status_filter = None if status == "all" else status
     rows = get_memory_store().search(query, status=status_filter, scope=scope, limit=limit)
+
+    if not deep:
+        # Light mode: keep only high-signal fields
+        light_fields = ["subject", "predicate", "object", "text", "scope", "type", "status", "confidence"]
+        rows = [{k: r[k] for k in light_fields if k in r} for r in rows]
+
     if json_output:
         typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
         return
@@ -2266,10 +2286,13 @@ def memory_handoff_cmd(
     max_items: int = typer.Option(40, "--max-items", help="Maximum graph items"),
     max_tokens: int = typer.Option(2000, "--max-tokens", help="Maximum rendered context tokens"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    deep: bool = typer.Option(False, "--deep", help="Full JSON output with all metadata (alias for --json)"),
 ):
     """Render the compacted handoff/session context for a namespace."""
     from rich.panel import Panel
     from ppmlx.context_reducer import build_handoff_context
+
+    show_json = json_output or deep
 
     result = build_handoff_context(
         query=query,
@@ -2279,7 +2302,7 @@ def memory_handoff_cmd(
         max_items=max_items,
         max_tokens=max_tokens,
     )
-    if json_output:
+    if show_json:
         typer.echo(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
         return
     if not result.context:
@@ -2517,6 +2540,197 @@ def memory_forget_cmd(
         console.print(f"[red]Memory candidate not found: {candidate_id}[/red]")
         raise typer.Exit(1)
     console.print(f"[green]Forgot memory candidate: {candidate_id}[/green]")
+
+
+def _memory_parse_json_value(raw: str, *, defaults: dict) -> list[dict]:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"Invalid JSON memory input: {exc}") from exc
+    rows = data if isinstance(data, list) else [data]
+    if not all(isinstance(row, dict) for row in rows):
+        raise typer.BadParameter("JSON memory input must be an object or an array of objects")
+    triples: list[dict] = []
+    for row in rows:
+        triple = {
+            "type": row.get("type", row.get("t", defaults.get("type"))),
+            "subject": row.get("subject", row.get("s")),
+            "predicate": row.get("predicate", row.get("p")),
+            "object": row.get("object", row.get("o")),
+            "text": row.get("text", row.get("x")),
+            "scope": row.get("scope", defaults.get("scope", "project")),
+            "confidence": float(row.get("confidence", row.get("c", defaults.get("confidence", 0.9)))),
+            "salience": float(row.get("salience", defaults.get("salience", 0.85))),
+            "source_quote": row.get("source_quote", row.get("q", row.get("text", row.get("x")))),
+            "valid_from": row.get("valid_from", defaults.get("valid_from")),
+            "valid_to": row.get("valid_to", defaults.get("valid_to")),
+        }
+        _memory_validate_triple(triple)
+        triples.append(triple)
+    return triples
+
+
+def _memory_parse_pipe_value(raw: str, *, defaults: dict) -> list[dict]:
+    triples: list[dict] = []
+    for line_no, line in enumerate(raw.splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [part.strip() for part in line.split("|", 8)]
+        if len(parts) < 5:
+            raise typer.BadParameter(f"Pipe memory input line {line_no} needs at least 5 fields: type|subject|predicate|object|text")
+        triple = {
+            "type": parts[0] or defaults.get("type"),
+            "subject": parts[1],
+            "predicate": parts[2],
+            "object": parts[3],
+            "text": parts[4],
+            "scope": parts[5] if len(parts) > 5 and parts[5] else defaults.get("scope", "project"),
+            "confidence": float(parts[6]) if len(parts) > 6 and parts[6] else float(defaults.get("confidence", 0.9)),
+            "salience": float(parts[7]) if len(parts) > 7 and parts[7] else float(defaults.get("salience", 0.85)),
+            "source_quote": parts[8] if len(parts) > 8 and parts[8] else parts[4],
+            "valid_from": defaults.get("valid_from"),
+            "valid_to": defaults.get("valid_to"),
+        }
+        _memory_validate_triple(triple)
+        triples.append(triple)
+    return triples
+
+
+def _memory_validate_triple(triple: dict) -> None:
+    missing = [key for key in ("type", "subject", "predicate", "object", "text") if not triple.get(key)]
+    if missing:
+        raise typer.BadParameter(f"Memory input missing required fields: {', '.join(missing)}")
+
+
+def _memory_parse_input(raw: str, *, defaults: dict) -> list[dict]:
+    raw = raw.strip()
+    if not raw:
+        return []
+    if raw[0] in "[{":
+        return _memory_parse_json_value(raw, defaults=defaults)
+    return _memory_parse_pipe_value(raw, defaults=defaults)
+
+
+@memory_app.command(name="add")
+def memory_add_cmd(
+    input_data: Optional[str] = typer.Argument(None, help="JSON/Pipe memory string or path to JSON/Pipe file"),
+    type_: Optional[str] = typer.Option(None, "--type", "-t", help="fact, preference, decision, todo, constraint, instruction, entity_note, relationship, workflow_state"),
+    subject: Optional[str] = typer.Option(None, "--subject", "-s", help="Short stable subject"),
+    predicate: Optional[str] = typer.Option(None, "--predicate", "-p", help="Relation or action"),
+    object_: Optional[str] = typer.Option(None, "--object", "-o", help="Object value"),
+    text: Optional[str] = typer.Option(None, "--text", "-x", help="One sentence describing the memory"),
+    scope: str = typer.Option("project", "--scope", help="global, project, or session"),
+    confidence: float = typer.Option(0.9, "--confidence", "-c", help="Confidence 0.0-1.0"),
+    project_id: Optional[str] = typer.Option(None, "--project-id", help="Project namespace"),
+    session_id: Optional[str] = typer.Option(None, "--session-id", help="Session namespace"),
+    valid_from: Optional[str] = typer.Option(None, "--valid-from", help="ISO timestamp when the memory became valid (e.g. 2026-05-20T10:00:00)"),
+    valid_to: Optional[str] = typer.Option(None, "--valid-to", help="ISO timestamp when the memory expires (e.g. 2026-05-27T10:00:00)"),
+    force: bool = typer.Option(False, "--force", help="Bypass SPO deduplication and always add a new candidate"),
+):
+    """Add one or more memory candidates (JSON/Pipe batch; legacy flags supported)."""
+    import uuid
+    from ppmlx.memory_store import get_memory_store
+    from ppmlx.memory_engine import ShadowMemoryCandidate
+
+    defaults = {"type": type_, "scope": scope, "confidence": confidence, "salience": 0.85, "valid_from": valid_from, "valid_to": valid_to}
+    if input_data:
+        path = Path(input_data).expanduser()
+        raw = path.read_text() if path.is_file() else input_data
+        triples = _memory_parse_input(raw, defaults=defaults)
+    else:
+        stdin_raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+        if stdin_raw.strip():
+            triples = _memory_parse_input(stdin_raw, defaults=defaults)
+        else:
+            triple = {
+                "type": type_, "subject": subject, "predicate": predicate, "object": object_, "text": text,
+                "scope": scope, "confidence": confidence, "salience": 0.85, "source_quote": text,
+                "valid_from": valid_from, "valid_to": valid_to,
+            }
+            _memory_validate_triple(triple)
+            triples = [triple]
+    if not triples:
+        raise typer.BadParameter("No memory input provided")
+
+    event_id = f"cli-add-{uuid.uuid4().hex[:12]}"
+    event = {
+        "event_id": event_id,
+        "endpoint": "/cli/add",
+        "app_id": None,
+        "project_id": project_id,
+        "session_id": session_id,
+        "model_alias": "cli",
+        "model_repo": "cli",
+        "request": {"count": len(triples), "force": force},
+        "response_text": "",
+        "metadata": {"source": "cli-add", "input": "batch" if len(triples) > 1 else "single"},
+    }
+    items = []
+    for triple in triples:
+        c = ShadowMemoryCandidate(
+            type=triple["type"], subject=triple["subject"], predicate=triple["predicate"], object=triple["object"],
+            text=triple["text"], scope=triple.get("scope") or scope, confidence=float(triple.get("confidence", confidence)),
+            source_quote=triple.get("source_quote") or triple["text"], salience=float(triple.get("salience", 0.85)),
+        ).with_event(event_id)
+        items.append((c.to_record(), {"status": "active", "reasons": [], "invalidates": [], "valid_from": triple.get("valid_from"), "valid_to": triple.get("valid_to")}))
+    store = get_memory_store()
+    results = store.store_candidates_batch(items, event=event, force=force, dedup=True)
+    store.run_inference()
+    for result in results:
+        if result["action"] == "updated":
+            superseded = ",".join(result.get("superseded_ids") or [result.get("superseded_id") or "?"])
+            console.print(f"[yellow]Updated (was {superseded}):[/yellow] scope={result['scope']} {result['type']}: {result['subject']} {result['predicate']} {result['object']}")
+        elif result["action"] == "forced":
+            console.print(f"[green]Force-added:[/green] scope={result['scope']} {result['type']}: {result['subject']} {result['predicate']} {result['object']}")
+        else:
+            console.print(f"[green]Added:[/green] scope={result['scope']} {result['type']}: {result['subject']} {result['predicate']} {result['object']}")
+
+
+@memory_app.command(name="dedup-scan")
+def memory_dedup_scan_cmd(
+    all_statuses: bool = typer.Option(False, "--all-statuses", help="Include superseded/disputed/rejected candidates, not only active ones"),
+    limit: int = typer.Option(1000, "--limit", help="Maximum duplicate groups to return"),
+):
+    """Dry-run scan for existing subject/predicate/object duplicate groups."""
+    from ppmlx.memory_store import get_memory_store
+
+    groups = get_memory_store().dedup_scan(active_only=not all_statuses, limit=limit)
+    console.print_json(data=groups)
+
+
+@memory_app.command(name="view")
+def memory_view_cmd(
+    port: int = typer.Option(6768, "--port", "-p", help="Port to run the visualizer on"),
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Host address to bind to"),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Automatically open visualizer in browser"),
+):
+    """Launch the interactive memory graph visualizer in your browser."""
+    import threading
+    import webbrowser
+    import time
+    from ppmlx.memory_viewer import start_viewer
+
+    url = f"http://{host}:{port}"
+    console.print(Panel(
+        f"[bold teal]ppmlx Memory Visualizer[/bold teal]\n\n"
+        f"Serving visualizer app at: [bold link={url}]{url}[/bold link]\n"
+        f"SQLite database: [dim]~/.ppmlx/ppmlx.db[/dim]\n\n"
+        f"Press [bold]CTRL+C[/bold] to quit.",
+        title="[bold accent]ppmlx memory view[/bold accent]",
+        border_style="cyan",
+    ))
+    
+    if open_browser:
+        def open_tab():
+            time.sleep(1.0)
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        threading.Thread(target=open_tab, daemon=True).start()
+        
+    start_viewer(port=port, host=host)
 
 
 @trace_app.command(name="export")

@@ -252,25 +252,29 @@ class MemoryStore:
     def record_event(self, event: dict[str, Any]) -> None:
         self.init()
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO memory_events (
-                    event_id, endpoint, app_id, project_id, session_id,
-                    model_alias, model_repo, request_json, response_text, metadata_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    event["event_id"],
-                    event.get("endpoint"),
-                    event.get("app_id"),
-                    event.get("project_id"),
-                    event.get("session_id"),
-                    event.get("model_alias"),
-                    event.get("model_repo"),
-                    json.dumps(event.get("request", {}), ensure_ascii=False),
-                    event.get("response_text"),
-                    json.dumps(event.get("metadata", {}), ensure_ascii=False),
-                ),
-            )
+            self._record_event_conn(conn, event)
             conn.commit()
+
+    @staticmethod
+    def _record_event_conn(conn: sqlite3.Connection, event: dict[str, Any]) -> None:
+        conn.execute(
+            """INSERT OR REPLACE INTO memory_events (
+                event_id, endpoint, app_id, project_id, session_id,
+                model_alias, model_repo, request_json, response_text, metadata_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                event["event_id"],
+                event.get("endpoint"),
+                event.get("app_id"),
+                event.get("project_id"),
+                event.get("session_id"),
+                event.get("model_alias"),
+                event.get("model_repo"),
+                json.dumps(event.get("request", {}), ensure_ascii=False),
+                event.get("response_text"),
+                json.dumps(event.get("metadata", {}), ensure_ascii=False),
+            ),
+        )
 
     def enqueue_extraction_job(
         self,
@@ -717,34 +721,139 @@ class MemoryStore:
     def store_candidate(self, candidate: dict[str, Any], validation: dict[str, Any]) -> None:
         self.init()
         with self._lock, self._connect() as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO memory_candidates (
-                    candidate_id, event_id, type, subject, predicate, object, text, scope,
-                    confidence, source_quote, salience, status, reasons_json,
-                    invalidates_json, valid_from, valid_to, metadata_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    candidate["candidate_id"],
-                    candidate["event_id"],
-                    candidate["type"],
-                    candidate["subject"],
-                    candidate["predicate"],
-                    candidate["object"],
-                    candidate["text"],
-                    candidate["scope"],
-                    float(candidate.get("confidence", 0.0)),
-                    candidate.get("source_quote"),
-                    float(candidate.get("salience", 1.0)),
-                    validation.get("status", "rejected"),
-                    json.dumps(validation.get("reasons", []), ensure_ascii=False),
-                    json.dumps(validation.get("invalidates", []), ensure_ascii=False),
-                    validation.get("valid_from"),
-                    validation.get("valid_to"),
-                    json.dumps(candidate.get("metadata", {}), ensure_ascii=False),
-                ),
-            )
-            self._upsert_fts(conn, candidate)
+            self._store_candidate_conn(conn, candidate, validation)
             conn.commit()
+
+    def _store_candidate_conn(self, conn: sqlite3.Connection, candidate: dict[str, Any], validation: dict[str, Any]) -> None:
+        conn.execute(
+            """INSERT OR REPLACE INTO memory_candidates (
+                candidate_id, event_id, type, subject, predicate, object, text, scope,
+                confidence, source_quote, salience, status, reasons_json,
+                invalidates_json, valid_from, valid_to, metadata_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                candidate["candidate_id"],
+                candidate["event_id"],
+                candidate["type"],
+                candidate["subject"],
+                candidate["predicate"],
+                candidate["object"],
+                candidate["text"],
+                candidate["scope"],
+                float(candidate.get("confidence", 0.0)),
+                candidate.get("source_quote"),
+                float(candidate.get("salience", 1.0)),
+                validation.get("status", "rejected"),
+                json.dumps(validation.get("reasons", []), ensure_ascii=False),
+                json.dumps(validation.get("invalidates", []), ensure_ascii=False),
+                validation.get("valid_from"),
+                validation.get("valid_to"),
+                json.dumps(candidate.get("metadata", {}), ensure_ascii=False),
+            ),
+        )
+        self._upsert_fts(conn, candidate)
+
+    def store_candidates_batch(
+        self,
+        items: list[tuple[dict[str, Any], dict[str, Any]]],
+        *,
+        event: dict[str, Any] | None = None,
+        force: bool = False,
+        dedup: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Store multiple candidates in one transaction, with optional global SPO dedup."""
+        self.init()
+        results: list[dict[str, Any]] = []
+        with self._lock, self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            if event is not None:
+                self._record_event_conn(conn, event)
+            for candidate, validation in items:
+                action = "added"
+                superseded_ids: list[str] = []
+                if dedup and not force:
+                    existing_rows = conn.execute(
+                        """SELECT * FROM memory_candidates
+                           WHERE subject = ? AND predicate = ? AND object = ? AND status = 'active'
+                           ORDER BY created_at DESC""",
+                        (candidate["subject"], candidate["predicate"], candidate["object"]),
+                    ).fetchall()
+                    if existing_rows:
+                        now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now')").fetchone()[0]
+                        superseded_ids = [row["candidate_id"] for row in existing_rows]
+                        old_confidence_sum = sum(float(row["confidence"] or 0.0) for row in existing_rows)
+                        new_confidence = float(candidate.get("confidence", 0.0))
+                        candidate["confidence"] = (old_confidence_sum + new_confidence) / (len(existing_rows) + 1)
+                        validation = {**validation, "valid_from": validation.get("valid_from") or now}
+                        for superseded_id in superseded_ids:
+                            conn.execute(
+                                """UPDATE memory_candidates
+                                   SET status = 'superseded', valid_to = ?
+                                   WHERE candidate_id = ? AND status = 'active'""",
+                                (now, superseded_id),
+                            )
+                            conn.execute(
+                                """UPDATE memory_edges
+                                   SET status = 'superseded', valid_to = ?
+                                   WHERE source_candidate_id = ? AND status = 'active'""",
+                                (now, superseded_id),
+                            )
+                        action = "updated"
+                candidate_for_edge = dict(candidate)
+                candidate_for_edge["valid_from"] = validation.get("valid_from")
+                candidate_for_edge["valid_to"] = validation.get("valid_to")
+                self._store_candidate_conn(conn, candidate, validation)
+                self._upsert_memory_edge_conn(conn, candidate_for_edge)
+                results.append({
+                    "action": "forced" if force else action,
+                    "candidate_id": candidate["candidate_id"],
+                    "superseded_id": superseded_ids[0] if superseded_ids else None,
+                    "superseded_ids": superseded_ids,
+                    "type": candidate.get("type"),
+                    "subject": candidate.get("subject"),
+                    "predicate": candidate.get("predicate"),
+                    "object": candidate.get("object"),
+                    "scope": candidate.get("scope"),
+                    "confidence": candidate.get("confidence"),
+                    "valid_from": validation.get("valid_from"),
+                    "valid_to": validation.get("valid_to"),
+                })
+            conn.commit()
+        return results
+
+    def dedup_scan(self, *, active_only: bool = True, limit: int = 1000) -> list[dict[str, Any]]:
+        """Return candidate groups that share the same subject/predicate/object."""
+        self.init()
+        where = "WHERE status = 'active'" if active_only else ""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            groups = conn.execute(
+                f"""SELECT subject, predicate, object, COUNT(*) AS count
+                    FROM memory_candidates
+                    {where}
+                    GROUP BY subject, predicate, object
+                    HAVING COUNT(*) > 1
+                    ORDER BY count DESC, subject ASC
+                    LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            out: list[dict[str, Any]] = []
+            for group in groups:
+                candidates = conn.execute(
+                    """SELECT candidate_id, type, scope, confidence, status, created_at, valid_from, valid_to
+                       FROM memory_candidates
+                       WHERE subject = ? AND predicate = ? AND object = ?
+                       ORDER BY created_at DESC""",
+                    (group["subject"], group["predicate"], group["object"]),
+                ).fetchall()
+                out.append({
+                    "subject": group["subject"],
+                    "predicate": group["predicate"],
+                    "object": group["object"],
+                    "count": group["count"],
+                    "candidates": [dict(row) for row in candidates],
+                })
+        return out
 
     def mark_invalidated(self, candidate_ids: list[str], *, invalidated_by: str) -> None:
         if not candidate_ids:
@@ -768,62 +877,64 @@ class MemoryStore:
 
     def upsert_memory_edge(self, candidate: dict[str, Any]) -> None:
         self.init()
-        edge_id = self._edge_id(candidate["candidate_id"], candidate["predicate"])
         with self._lock, self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            namespace = self._candidate_namespace_conn(conn, candidate)
-            subject_projection = self._resolve_graph_entity_conn(
-                conn,
-                raw_name=str(candidate["subject"]),
-                candidate=candidate,
-                namespace=namespace,
-                side="subject",
-            )
-            object_projection = self._resolve_graph_entity_conn(
-                conn,
-                raw_name=str(candidate["object"]),
-                candidate=candidate,
-                namespace=namespace,
-                side="object",
-            )
-            conn.execute("DELETE FROM memory_edges WHERE source_candidate_id = ?", (candidate["candidate_id"],))
-            for raw_name, projection in ((candidate["subject"], subject_projection), (candidate["object"], object_projection)):
-                if projection is None:
-                    continue
-                self._upsert_entity_conn(conn, projection["entity_id"], projection["name"], "concept")
-                self._upsert_canonical_alias_conn(
-                    conn,
-                    entity_id=projection["entity_id"],
-                    raw_name=str(raw_name),
-                    canonical_name=projection["name"],
-                    entity_type="concept",
-                    scope=str(candidate.get("scope") or "global"),
-                    candidate_id=str(candidate.get("candidate_id") or ""),
-                )
-            if subject_projection is None or object_projection is None:
-                conn.commit()
-                return
-
-            from_entity_id = subject_projection["entity_id"]
-            to_entity_id = object_projection["entity_id"]
-            conn.execute(
-                """INSERT OR REPLACE INTO memory_edges (
-                    edge_id, from_entity_id, relation, to_entity_id,
-                    source_candidate_id, confidence, status, valid_from, valid_to
-                ) VALUES (?,?,?,?,?,?,?,?,?)""",
-                (
-                    edge_id,
-                    from_entity_id,
-                    candidate["predicate"],
-                    to_entity_id,
-                    candidate["candidate_id"],
-                    float(candidate.get("confidence", 0.0)),
-                    "active",
-                    candidate.get("valid_from"),
-                    None,
-                ),
-            )
+            self._upsert_memory_edge_conn(conn, candidate)
             conn.commit()
+
+    def _upsert_memory_edge_conn(self, conn: sqlite3.Connection, candidate: dict[str, Any]) -> None:
+        edge_id = self._edge_id(candidate["candidate_id"], candidate["predicate"])
+        namespace = self._candidate_namespace_conn(conn, candidate)
+        subject_projection = self._resolve_graph_entity_conn(
+            conn,
+            raw_name=str(candidate["subject"]),
+            candidate=candidate,
+            namespace=namespace,
+            side="subject",
+        )
+        object_projection = self._resolve_graph_entity_conn(
+            conn,
+            raw_name=str(candidate["object"]),
+            candidate=candidate,
+            namespace=namespace,
+            side="object",
+        )
+        conn.execute("DELETE FROM memory_edges WHERE source_candidate_id = ?", (candidate["candidate_id"],))
+        for raw_name, projection in ((candidate["subject"], subject_projection), (candidate["object"], object_projection)):
+            if projection is None:
+                continue
+            self._upsert_entity_conn(conn, projection["entity_id"], projection["name"], "concept")
+            self._upsert_canonical_alias_conn(
+                conn,
+                entity_id=projection["entity_id"],
+                raw_name=str(raw_name),
+                canonical_name=projection["name"],
+                entity_type="concept",
+                scope=str(candidate.get("scope") or "global"),
+                candidate_id=str(candidate.get("candidate_id") or ""),
+            )
+        if subject_projection is None or object_projection is None:
+            return
+
+        from_entity_id = subject_projection["entity_id"]
+        to_entity_id = object_projection["entity_id"]
+        conn.execute(
+            """INSERT OR REPLACE INTO memory_edges (
+                edge_id, from_entity_id, relation, to_entity_id,
+                source_candidate_id, confidence, status, valid_from, valid_to
+            ) VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                edge_id,
+                from_entity_id,
+                candidate["predicate"],
+                to_entity_id,
+                candidate["candidate_id"],
+                float(candidate.get("confidence", 0.0)),
+                "active",
+                candidate.get("valid_from"),
+                candidate.get("valid_to"),
+            ),
+        )
 
     def _candidate_namespace_conn(self, conn: sqlite3.Connection, candidate: dict[str, Any]) -> dict[str, str | None]:
         row = conn.execute(
@@ -1191,6 +1302,21 @@ class MemoryStore:
                    WHERE type = ? AND subject = ? AND predicate = ? AND scope = ? AND status = 'active'
                    ORDER BY created_at DESC""",
                 (type, subject, predicate, scope),
+            ).fetchall()
+        return [self._row_to_candidate(row) for row in rows]
+
+    def find_active_spo(
+        self, *, subject: str, predicate: str, object_: str
+    ) -> list[dict[str, Any]]:
+        """Find active candidate(s) matching exact SPO."""
+        self.init()
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT * FROM memory_candidates
+                   WHERE subject = ? AND predicate = ? AND object = ? AND status = 'active'
+                   ORDER BY created_at DESC""",
+                (subject, predicate, object_),
             ).fetchall()
         return [self._row_to_candidate(row) for row in rows]
 
@@ -2295,6 +2421,28 @@ class MemoryStore:
                 json.dumps({"source": "canonical_graph_projection", "candidate_id": candidate_id}, ensure_ascii=False),
             ),
         )
+
+    def get_namespaces(self) -> dict[str, list[str]]:
+        """Return distinct app_ids, project_ids, session_ids, and scopes in the memory database."""
+        self.init()
+        res = {"app_ids": [], "project_ids": [], "session_ids": [], "scopes": []}
+        with self._connect() as conn:
+            # Get distinct app_ids
+            rows = conn.execute("SELECT DISTINCT app_id FROM memory_events WHERE app_id IS NOT NULL AND app_id != ''").fetchall()
+            res["app_ids"] = sorted([r[0] for r in rows if r[0]])
+            
+            # Get distinct project_ids
+            rows = conn.execute("SELECT DISTINCT project_id FROM memory_events WHERE project_id IS NOT NULL AND project_id != ''").fetchall()
+            res["project_ids"] = sorted([r[0] for r in rows if r[0]])
+            
+            # Get distinct session_ids
+            rows = conn.execute("SELECT DISTINCT session_id FROM memory_events WHERE session_id IS NOT NULL AND session_id != ''").fetchall()
+            res["session_ids"] = sorted([r[0] for r in rows if r[0]])
+            
+            # Get distinct scopes
+            rows = conn.execute("SELECT DISTINCT scope FROM memory_candidates WHERE scope IS NOT NULL AND scope != ''").fetchall()
+            res["scopes"] = sorted([r[0] for r in rows if r[0]])
+        return res
 
 
 _store_instance: MemoryStore | None = None
