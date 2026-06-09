@@ -2542,14 +2542,102 @@ def memory_forget_cmd(
     console.print(f"[green]Forgot memory candidate: {candidate_id}[/green]")
 
 
+
+@memory_app.command(name="set-fact")
+def memory_set_fact_cmd(
+    type_: str = typer.Option("fact", "--type", "-t", help="fact, preference, decision, todo, constraint, instruction, entity_note, relationship, workflow_state"),
+    subject: str = typer.Option(..., "--subject", "-s", help="Temporal fact subject"),
+    predicate: str = typer.Option(..., "--predicate", "-p", help="Temporal fact predicate/slot"),
+    object_: str = typer.Option(..., "--object", "-o", help="New active object value"),
+    text: str = typer.Option(..., "--text", "-x", help="One sentence describing the active fact"),
+    scope: str = typer.Option("project", "--scope", help="global, project, or session"),
+    confidence: float = typer.Option(0.9, "--confidence", "-c", help="Confidence 0.0-1.0"),
+    project_id: Optional[str] = typer.Option(None, "--project-id", help="Project namespace"),
+    session_id: Optional[str] = typer.Option(None, "--session-id", help="Session namespace"),
+    valid_from: Optional[str] = typer.Option(None, "--valid-from", help="ISO timestamp when the new value became valid"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Set one active temporal fact for subject+predicate+scope, superseding prior values."""
+    from ppmlx.memory_store import get_memory_store
+
+    result = get_memory_store().set_fact(
+        type=type_,
+        subject=subject,
+        predicate=predicate,
+        object=object_,
+        text=text,
+        scope=scope,
+        confidence=confidence,
+        valid_from=valid_from,
+        project_id=project_id,
+        session_id=session_id,
+    )
+    get_memory_store().run_inference()
+    if json_output:
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    if result["action"] == "unchanged":
+        console.print(f"[green]Unchanged:[/green] scope={scope} {type_}: {subject} {predicate} {object_}")
+    elif result["action"] == "deduped":
+        console.print(f"[yellow]Deduped active slot:[/yellow] kept={result['candidate_id']} superseded={','.join(result.get('superseded_ids') or [])}")
+    elif result["action"] == "updated":
+        console.print(f"[yellow]Updated:[/yellow] scope={scope} {type_}: {subject} {predicate} {object_}")
+        console.print(f"[dim]Superseded: {','.join(result.get('superseded_ids') or [])}[/dim]")
+    else:
+        console.print(f"[green]Added:[/green] scope={scope} {type_}: {subject} {predicate} {object_}")
+
+
+@memory_app.command(name="fact-history")
+def memory_fact_history_cmd(
+    subject: str = typer.Option(..., "--subject", "-s", help="Temporal fact subject"),
+    predicate: str = typer.Option(..., "--predicate", "-p", help="Temporal fact predicate/slot"),
+    scope: Optional[str] = typer.Option(None, "--scope", help="Filter by scope"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Maximum rows"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Show temporal history for a subject+predicate slot."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    rows = get_memory_store().fact_history(subject=subject, predicate=predicate, scope=scope, limit=limit)
+    if json_output:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+    if not rows:
+        console.print("[yellow]No temporal fact history found.[/yellow]")
+        return
+    table = Table(title=f"Fact History: {subject} / {predicate}")
+    table.add_column("ID", style="dim")
+    table.add_column("Status")
+    table.add_column("Scope")
+    table.add_column("Object")
+    table.add_column("Valid from")
+    table.add_column("Valid to")
+    table.add_column("Text")
+    for row in rows:
+        table.add_row(
+            row["candidate_id"],
+            row["status"],
+            row["scope"],
+            row["object"],
+            str(row.get("valid_from") or ""),
+            str(row.get("valid_to") or ""),
+            row["text"][:100],
+        )
+    console.print(table)
+
+
 def _memory_parse_json_value(raw: str, *, defaults: dict) -> list[dict]:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise typer.BadParameter(f"Invalid JSON memory input: {exc}") from exc
-    rows = data if isinstance(data, list) else [data]
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
+        rows = data["items"]
+    else:
+        rows = data if isinstance(data, list) else [data]
     if not all(isinstance(row, dict) for row in rows):
-        raise typer.BadParameter("JSON memory input must be an object or an array of objects")
+        raise typer.BadParameter("JSON memory input must be an object, an array of objects, or an object with an items array")
     triples: list[dict] = []
     for row in rows:
         triple = {
@@ -2685,6 +2773,60 @@ def memory_add_cmd(
             console.print(f"[green]Force-added:[/green] scope={result['scope']} {result['type']}: {result['subject']} {result['predicate']} {result['object']}")
         else:
             console.print(f"[green]Added:[/green] scope={result['scope']} {result['type']}: {result['subject']} {result['predicate']} {result['object']}")
+
+
+
+@memory_app.command(name="temporal-conflicts")
+def memory_temporal_conflicts_cmd(
+    scope: Optional[str] = typer.Option(None, "--scope", help="Filter by scope"),
+    limit: int = typer.Option(1000, "--limit", help="Maximum conflict groups"),
+    json_output: bool = typer.Option(True, "--json/--table", "-j", help="Output JSON by default"),
+):
+    """List active subject+predicate+scope slots with multiple object values."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    groups = get_memory_store().temporal_conflicts(scope=scope, limit=limit)
+    if json_output:
+        typer.echo(json.dumps(groups, indent=2, ensure_ascii=False))
+        return
+    if not groups:
+        console.print("[green]No temporal conflicts found.[/green]")
+        return
+    table = Table(title="Temporal Fact Conflicts")
+    table.add_column("Subject")
+    table.add_column("Predicate")
+    table.add_column("Scope")
+    table.add_column("Objects", justify="right")
+    table.add_column("Candidates", justify="right")
+    for group in groups:
+        table.add_row(group["subject"], group["predicate"], group["scope"], str(group["object_count"]), str(group["count"]))
+    console.print(table)
+
+
+@memory_app.command(name="migrate-temporal-conflicts")
+def memory_migrate_temporal_conflicts_cmd(
+    scope: Optional[str] = typer.Option(None, "--scope", help="Filter by scope"),
+    limit: int = typer.Option(1000, "--limit", help="Maximum conflict groups"),
+    dry_run: bool = typer.Option(True, "--dry-run/--confirm", help="Preview by default; use --confirm to supersede older active values"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Supersede older active values in temporal fact conflict slots."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    result = get_memory_store().migrate_temporal_conflicts(scope=scope, dry_run=dry_run, limit=limit)
+    if json_output:
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    table = Table(title="Temporal Conflict Migration Preview" if dry_run else "Temporal Conflict Migration")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    for key in ("dry_run", "conflict_groups", "would_supersede", "superseded"):
+        table.add_row(key, str(result[key]))
+    console.print(table)
+    if dry_run:
+        console.print("[yellow]Dry run only. Re-run with --confirm to supersede older active values.[/yellow]")
 
 
 @memory_app.command(name="dedup-scan")
