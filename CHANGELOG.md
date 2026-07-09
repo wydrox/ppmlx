@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-07-09
+
+### Changed
+- Move repository metadata and install links from `the-focus-company/ppmlx` to `wydrox/ppmlx` after the GitHub transfer.
+
 ## [0.5.6] - 2026-05-18
 
 ### Added

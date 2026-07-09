@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ppmlx installer — CLI for Apple Silicon LLMs via MLX
-# Usage: curl -fsSL https://raw.githubusercontent.com/the-focus-company/ppmlx/main/scripts/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/wydrox/ppmlx/main/scripts/install.sh | sh
 set -euo pipefail
 
 # ── colours ──────────────────────────────────────────────────────────────────

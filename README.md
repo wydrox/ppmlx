@@ -2,7 +2,7 @@
 
 **Run LLMs on your Mac.** OpenAI-compatible API powered by Apple Silicon.
 
-[![CI](https://github.com/the-focus-company/ppmlx/actions/workflows/tests.yml/badge.svg)](https://github.com/the-focus-company/ppmlx/actions)
+[![CI](https://github.com/wydrox/ppmlx/actions/workflows/tests.yml/badge.svg)](https://github.com/wydrox/ppmlx/actions)
 [![PyPI](https://img.shields.io/pypi/v/ppmlx)](https://pypi.org/project/ppmlx/)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Apple%20Silicon-lightgrey)
@@ -29,13 +29,13 @@ ppmlx serve                 # start API server on :6767
 ### curl | sh (one-liner)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/the-focus-company/ppmlx/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/wydrox/ppmlx/main/scripts/install.sh | sh
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/the-focus-company/ppmlx
+git clone https://github.com/wydrox/ppmlx
 cd ppmlx
 uv tool install .
 ```

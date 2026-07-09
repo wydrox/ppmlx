@@ -56,5 +56,5 @@ jobs:
           gh pr create \
             --repo "$TAP_REPO" \
             --title "ppmlx ${VERSION}" \
-            --body "Automated update from [ppmlx v${VERSION}](https://github.com/the-focus-company/ppmlx/releases/tag/v${VERSION})." \
+            --body "Automated update from [ppmlx v${VERSION}](https://github.com/wydrox/ppmlx/releases/tag/v${VERSION})." \
             --head "$BRANCH"

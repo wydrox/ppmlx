@@ -1,6 +1,6 @@
 [project]
 name = "ppmlx"
-version = "0.5.6"
+version = "0.5.7"
 description = "CLI for running LLMs on Apple Silicon via MLX"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -53,9 +53,9 @@ all = [
 
 [project.urls]
 Homepage = "https://ppmlx.dev"
-Repository = "https://github.com/the-focus-company/ppmlx"
-Issues = "https://github.com/the-focus-company/ppmlx/issues"
-Documentation = "https://github.com/the-focus-company/ppmlx#readme"
+Repository = "https://github.com/wydrox/ppmlx"
+Issues = "https://github.com/wydrox/ppmlx/issues"
+Documentation = "https://github.com/wydrox/ppmlx#readme"
 
 [project.scripts]
 ppmlx = "ppmlx.cli:main_entry"

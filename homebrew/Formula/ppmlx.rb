@@ -6,7 +6,7 @@ class Ppmlx < Formula
   url "https://files.pythonhosted.org/packages/ee/0a/433431922f521f2bab089399880f59768cc3b1ecc4d53848be287bfdb26b/ppmlx-0.1.0.tar.gz"
   sha256 "22f94d51c01930f8f2dd865bca022cbdb7711afc70fdc87e663b61121edbecff"
   license "MIT"
-  head "https://github.com/the-focus-company/ppmlx.git", branch: "main"
+  head "https://github.com/wydrox/ppmlx.git", branch: "main"
 
   depends_on "python@3.11"
   depends_on :macos
