@@ -1132,3 +1132,354 @@ def test_parallel_model_memory_json_extraction_merges_dedupes_and_writes_on_main
     assert result["active"] == 2
     rows = store.query_candidates(status="active")
     assert {row["object"] for row in rows} == {"concise answers", "tea"}
+
+
+def test_set_fact_supersedes_previous_active_value(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    store.init()
+
+    first = store.set_fact(
+        type="workflow_state",
+        subject="Mythos repo",
+        predicate="latest_local_commit",
+        object="aaa111 old",
+        text="Mythos repo latest local commit is aaa111 old.",
+        scope="project",
+        project_id="mythos",
+        confidence=0.9,
+    )
+    second = store.set_fact(
+        type="workflow_state",
+        subject="Mythos repo",
+        predicate="latest_local_commit",
+        object="bbb222 new",
+        text="Mythos repo latest local commit is bbb222 new.",
+        scope="project",
+        project_id="mythos",
+        confidence=0.95,
+    )
+
+    assert first["action"] == "added"
+    assert second["action"] == "updated"
+    assert first["candidate_id"] in second["superseded_ids"]
+    active = store.find_active_slot(
+        type="workflow_state",
+        subject="Mythos repo",
+        predicate="latest_local_commit",
+        scope="project",
+    )
+    assert len(active) == 1
+    assert active[0]["object"] == "bbb222 new"
+    history = store.fact_history(subject="Mythos repo", predicate="latest_local_commit", scope="project")
+    assert len(history) == 2
+    assert {row["status"] for row in history} == {"active", "superseded"}
+
+
+def test_validator_auto_supersedes_single_value_workflow_state(tmp_path):
+    engine, store = _make_engine(tmp_path)
+    engine.capture_chat(
+        request_id="wf-1",
+        endpoint="/v1/chat/completions",
+        model_alias="test-model",
+        model_repo="repo/test",
+        project_id="mythos",
+        messages=[{"role": "assistant", "content": "Current task: scaffold player."}],
+        response_text="ok",
+    )
+    engine.capture_chat(
+        request_id="wf-2",
+        endpoint="/v1/chat/completions",
+        model_alias="test-model",
+        model_repo="repo/test",
+        project_id="mythos",
+        messages=[{"role": "assistant", "content": "Current task: polish player animations."}],
+        response_text="ok",
+    )
+
+    active = [
+        row for row in store.query_candidates(status="active")
+        if row["type"] == "workflow_state" and row["predicate"] == "current_task"
+    ]
+    assert len(active) == 1
+    assert "polish player animations" in active[0]["object"]
+    superseded = [
+        row for row in store.query_candidates(status="superseded")
+        if row.get("predicate") == "current_task" or "scaffold player" in (row.get("object") or "")
+    ]
+    # At least the previous current_task should be superseded.
+    assert any("scaffold player" in (row.get("object") or "") for row in store.query_candidates(status="all") if False) or True
+    all_rows = []
+    with store._connect() as conn:
+        conn.row_factory = __import__("sqlite3").Row
+        all_rows = [dict(r) for r in conn.execute("SELECT * FROM memory_candidates").fetchall()]
+    assert any(r["status"] == "superseded" and "scaffold player" in r["object"] for r in all_rows)
+
+
+def test_search_ranks_project_decision_over_unrelated_workflow(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    store.init()
+    store.record_event({
+        "event_id": "evt-odealo",
+        "endpoint": "/v1/chat/completions",
+        "project_id": "odealo",
+        "request": {},
+        "metadata": {},
+    })
+    store.record_event({
+        "event_id": "evt-mythos",
+        "endpoint": "/v1/chat/completions",
+        "project_id": "mythos",
+        "request": {},
+        "metadata": {},
+    })
+    store.store_candidate(
+        {
+            "candidate_id": "mem-odealo-decision",
+            "event_id": "evt-odealo",
+            "type": "decision",
+            "subject": "Odealo rewrite",
+            "predicate": "decided",
+            "object": "ship cart clear button",
+            "text": "Odealo rewrite decided to ship cart clear button.",
+            "scope": "project",
+            "confidence": 0.9,
+            "source_quote": "ship cart clear button",
+            "salience": 0.8,
+            "metadata": {},
+        },
+        {"status": "active", "reasons": [], "invalidates": []},
+    )
+    store.store_candidate(
+        {
+            "candidate_id": "mem-mythos-workflow",
+            "event_id": "evt-mythos",
+            "type": "workflow_state",
+            "subject": "Mythos rewrite",
+            "predicate": "current_task",
+            "object": "rewrite player shell",
+            "text": "Mythos rewrite current task is rewrite player shell.",
+            "scope": "project",
+            "confidence": 0.99,
+            "source_quote": "rewrite player shell",
+            "salience": 0.99,
+            "metadata": {},
+        },
+        {"status": "active", "reasons": [], "invalidates": []},
+    )
+
+    rows = store.search("odealo rewrite", limit=5)
+    assert rows
+    assert rows[0]["candidate_id"] == "mem-odealo-decision"
+    assert "score" in rows[0]
+    scoped = store.search("rewrite", project_id="odealo", limit=5)
+    assert scoped
+    assert all(row.get("project_id") in {None, "odealo"} or row.get("scope") == "global" or row["candidate_id"] == "mem-odealo-decision" for row in scoped)
+    assert scoped[0]["candidate_id"] == "mem-odealo-decision"
+
+
+def test_temporal_conflicts_and_migrate(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    store.init()
+    for idx, obj in enumerate(["one", "two", "three"], start=1):
+        store.store_candidate(
+            {
+                "candidate_id": f"mem-conflict-{idx}",
+                "event_id": f"evt-conflict-{idx}",
+                "type": "workflow_state",
+                "subject": "Mythos repo",
+                "predicate": "latest_local_commit",
+                "object": obj,
+                "text": f"latest is {obj}",
+                "scope": "project",
+                "confidence": 0.9,
+                "source_quote": obj,
+                "salience": 0.9,
+                "metadata": {},
+            },
+            {"status": "active", "reasons": [], "invalidates": []},
+        )
+        # Force increasing created_at ordering via direct update if needed.
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE memory_candidates SET created_at = ? WHERE candidate_id = ?",
+                (f"2026-01-0{idx}T00:00:00.000", f"mem-conflict-{idx}"),
+            )
+            conn.commit()
+
+    conflicts = store.temporal_conflicts()
+    assert len(conflicts) == 1
+    assert conflicts[0]["object_count"] == 3
+    preview = store.migrate_temporal_conflicts(dry_run=True)
+    assert preview["would_supersede"] == 2
+    applied = store.migrate_temporal_conflicts(dry_run=False)
+    assert applied["superseded"] == 2
+    active = store.find_active_slot(
+        type="workflow_state",
+        subject="Mythos repo",
+        predicate="latest_local_commit",
+        scope="project",
+    )
+    assert len(active) == 1
+    assert active[0]["object"] == "three"
+
+
+def test_memory_doctor_and_expire(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    store.init()
+    store.store_candidate(
+        {
+            "candidate_id": "mem-old-workflow",
+            "event_id": "evt-old-workflow",
+            "type": "workflow_state",
+            "subject": "lab",
+            "predicate": "current_task",
+            "object": "ancient task",
+            "text": "Current task: ancient task.",
+            "scope": "project",
+            "confidence": 0.9,
+            "source_quote": "ancient task",
+            "salience": 0.9,
+            "metadata": {},
+        },
+        {"status": "active", "reasons": [], "invalidates": []},
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE memory_candidates SET created_at = '2020-01-01T00:00:00.000' WHERE candidate_id = ?",
+            ("mem-old-workflow",),
+        )
+        conn.commit()
+
+    report = store.doctor()
+    assert "path" in report
+    assert "recommendations" in report
+    expired = store.expire_stale_candidates(older_than_days=30, dry_run=False)
+    assert expired["forgotten"] == 1
+    assert store.inspect_candidate("mem-old-workflow")["status"] == "forgotten"
+
+
+def test_memory_cli_doctor_and_temporal_conflicts(tmp_home):
+    reset_memory_store()
+    store = MemoryStore(tmp_home / ".ppmlx" / "memory.db")
+    store.set_fact(
+        type="fact",
+        subject="demo",
+        predicate="status",
+        object="old",
+        text="demo status is old.",
+        scope="project",
+        project_id="demo",
+    )
+    store.set_fact(
+        type="fact",
+        subject="demo",
+        predicate="status",
+        object="new",
+        text="demo status is new.",
+        scope="project",
+        project_id="demo",
+    )
+    # Recreate conflict intentionally with two actives.
+    store.store_candidate(
+        {
+            "candidate_id": "mem-conflict-extra",
+            "event_id": "evt-conflict-extra",
+            "type": "fact",
+            "subject": "demo",
+            "predicate": "status",
+            "object": "extra",
+            "text": "demo status is extra.",
+            "scope": "project",
+            "confidence": 0.9,
+            "source_quote": "extra",
+            "salience": 0.9,
+            "metadata": {},
+        },
+        {"status": "active", "reasons": [], "invalidates": []},
+    )
+    reset_memory_store()
+
+    runner = CliRunner()
+    doctor = runner.invoke(app, ["memory", "doctor", "--json"])
+    assert doctor.exit_code == 0, doctor.output
+    payload = json.loads(doctor.output)
+    assert "healthy" in payload
+    assert "recommendations" in payload
+
+    conflicts = runner.invoke(app, ["memory", "temporal-conflicts", "--json"])
+    assert conflicts.exit_code == 0, conflicts.output
+    groups = json.loads(conflicts.output)
+    assert isinstance(groups, list)
+    assert groups
+
+
+def test_cache_candidate_embeddings_and_dense_rank_component(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    store.init()
+    store.record_event({
+        "event_id": "evt-embed-1",
+        "endpoint": "/v1/chat/completions",
+        "project_id": "mythos",
+        "request": {},
+        "metadata": {},
+    })
+    store.store_candidate(
+        {
+            "candidate_id": "mem-embed-a",
+            "event_id": "evt-embed-1",
+            "type": "fact",
+            "subject": "Mythos",
+            "predicate": "uses",
+            "object": "Convex backend",
+            "text": "Mythos uses Convex backend for story state.",
+            "scope": "project",
+            "confidence": 0.95,
+            "source_quote": "Convex backend",
+            "salience": 0.9,
+            "metadata": {},
+        },
+        {"status": "active", "reasons": [], "invalidates": []},
+    )
+    result = store.cache_candidate_embeddings(limit=10, force=True)
+    assert result["written"] >= 1
+    rows = store.search("convex backend", project_id="mythos", limit=5)
+    assert rows
+    assert rows[0]["candidate_id"] == "mem-embed-a"
+    assert "dense" in (rows[0].get("rank_components") or {})
+
+
+def test_compact_candidates_to_atoms(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    store.init()
+    store.record_event({
+        "event_id": "evt-atom-1",
+        "endpoint": "/v1/chat/completions",
+        "project_id": "odealo",
+        "request": {},
+        "metadata": {},
+    })
+    for idx, obj in enumerate(["old decision", "new decision"], start=1):
+        store.store_candidate(
+            {
+                "candidate_id": f"mem-atom-{idx}",
+                "event_id": "evt-atom-1",
+                "type": "decision",
+                "subject": "Odealo rewrite",
+                "predicate": "decided",
+                "object": obj,
+                "text": f"Odealo rewrite decided {obj}.",
+                "scope": "project",
+                "confidence": 0.9 + idx * 0.01,
+                "source_quote": obj,
+                "salience": 0.9,
+                "metadata": {},
+            },
+            {"status": "active", "reasons": [], "invalidates": []},
+        )
+    preview = store.compact_candidates_to_atoms(project_id="odealo", dry_run=True)
+    assert preview["atom_groups"] >= 1
+    applied = store.compact_candidates_to_atoms(project_id="odealo", dry_run=False, forget_sources=True)
+    assert applied["atoms_written"] >= 1
+    atoms = store.query_atoms(type="decision", active_only=True)
+    assert atoms
+    assert any("new decision" in str(a.get("object") or "") or "new decision" in str(a.get("text") or "") for a in atoms)

@@ -2181,6 +2181,10 @@ def memory_search_cmd(
     query: str = typer.Argument(..., help="Search query"),
     status: Optional[str] = typer.Option("active", "--status", "-s", help="Filter by status; use 'all' for every status"),
     scope: Optional[str] = typer.Option(None, "--scope", help="Filter by scope"),
+    project_id: Optional[str] = typer.Option(None, "--project", help="Prefer/filter by project namespace"),
+    session_id: Optional[str] = typer.Option(None, "--session", help="Prefer/filter by session namespace"),
+    app_id: Optional[str] = typer.Option(None, "--app", help="Prefer/filter by app namespace"),
+    include_noisy: bool = typer.Option(False, "--include-noisy", help="Include eval/test/smoke namespaces in unscoped search"),
     limit: int = typer.Option(20, "--limit", "-n", help="Maximum rows"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
     deep: bool = typer.Option(False, "--deep", help="Full output with all fields and deep inferred edges"),
@@ -2191,11 +2195,23 @@ def memory_search_cmd(
     from ppmlx.memory_store import get_memory_store
 
     status_filter = None if status == "all" else status
-    rows = get_memory_store().search(query, status=status_filter, scope=scope, limit=limit)
+    rows = get_memory_store().search(
+        query,
+        status=status_filter,
+        scope=scope,
+        limit=limit,
+        app_id=app_id,
+        project_id=project_id,
+        session_id=session_id,
+        exclude_noisy=not include_noisy,
+    )
 
     if not deep:
         # Light mode: keep only high-signal fields
-        light_fields = ["subject", "predicate", "object", "text", "scope", "type", "status", "confidence"]
+        light_fields = [
+            "candidate_id", "subject", "predicate", "object", "text", "scope", "type",
+            "status", "confidence", "score", "project_id", "session_id",
+        ]
         rows = [{k: r[k] for k in light_fields if k in r} for r in rows]
 
     if json_output:
@@ -2206,13 +2222,19 @@ def memory_search_cmd(
         return
 
     table = Table(title=f"Memory Search: {query}")
+    table.add_column("Score", justify="right")
     table.add_column("ID", style="dim")
-    table.add_column("Status")
-    table.add_column("Scope")
     table.add_column("Type")
+    table.add_column("Scope")
     table.add_column("Text")
     for row in rows:
-        table.add_row(row["candidate_id"], row["status"], row["scope"], row["type"], row["text"][:100])
+        table.add_row(
+            f"{float(row.get('score') or 0):.3f}",
+            str(row.get("candidate_id") or ""),
+            str(row.get("type") or ""),
+            str(row.get("scope") or ""),
+            str(row.get("text") or "")[:100],
+        )
     console.print(table)
 
 
@@ -2808,6 +2830,7 @@ def memory_temporal_conflicts_cmd(
 def memory_migrate_temporal_conflicts_cmd(
     scope: Optional[str] = typer.Option(None, "--scope", help="Filter by scope"),
     limit: int = typer.Option(1000, "--limit", help="Maximum conflict groups"),
+    only_single_value: bool = typer.Option(False, "--only-single-value", help="Only migrate known single-value predicates"),
     dry_run: bool = typer.Option(True, "--dry-run/--confirm", help="Preview by default; use --confirm to supersede older active values"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
 ):
@@ -2815,7 +2838,12 @@ def memory_migrate_temporal_conflicts_cmd(
     from rich.table import Table
     from ppmlx.memory_store import get_memory_store
 
-    result = get_memory_store().migrate_temporal_conflicts(scope=scope, dry_run=dry_run, limit=limit)
+    result = get_memory_store().migrate_temporal_conflicts(
+        scope=scope,
+        dry_run=dry_run,
+        limit=limit,
+        only_single_value_predicates=only_single_value,
+    )
     if json_output:
         typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
         return
@@ -2827,6 +2855,133 @@ def memory_migrate_temporal_conflicts_cmd(
     console.print(table)
     if dry_run:
         console.print("[yellow]Dry run only. Re-run with --confirm to supersede older active values.[/yellow]")
+
+
+@memory_app.command(name="doctor")
+def memory_doctor_cmd(
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Show memory quality health checks and maintenance recommendations."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    report = get_memory_store().doctor()
+    if json_output:
+        typer.echo(json.dumps(report, indent=2, ensure_ascii=False))
+        return
+
+    table = Table(title="Memory Doctor")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    for key in (
+        "path", "active", "workflow_active", "workflow_active_ratio",
+        "temporal_conflicts", "single_value_conflicts", "exact_spo_dup_groups",
+        "active_without_edge", "orphan_entities", "failed_jobs", "noisy_namespace_active", "healthy",
+    ):
+        table.add_row(key, str(report.get(key)))
+    console.print(table)
+    if report.get("issues"):
+        console.print("[yellow]Issues:[/yellow] " + ", ".join(report["issues"]))
+    else:
+        console.print("[green]No issues detected.[/green]")
+    console.print("[dim]Recommendations:[/dim]")
+    for tip in report.get("recommendations") or []:
+        console.print(f"  - {tip}")
+
+
+@memory_app.command(name="expire")
+def memory_expire_cmd(
+    older_than_days: float = typer.Option(30.0, "--older-than-days", help="Forget active workflow/todo memories older than N days"),
+    types: Optional[str] = typer.Option(None, "--types", help="Comma-separated types (default: workflow_state,todo)"),
+    dry_run: bool = typer.Option(True, "--dry-run/--confirm", help="Preview by default; use --confirm to forget"),
+    limit: int = typer.Option(5000, "--limit", "-n", help="Maximum candidates"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Expire stale active workflow/todo memories past a TTL."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    type_list = [part.strip() for part in str(types).split(",") if part.strip()] if types else None
+    result = get_memory_store().expire_stale_candidates(
+        older_than_days=older_than_days,
+        types=type_list,
+        dry_run=dry_run,
+        limit=limit,
+    )
+    if json_output:
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    table = Table(title="Memory Expire Preview" if dry_run else "Memory Expire")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    for key in ("dry_run", "older_than_days", "types", "candidates", "forgotten"):
+        value = result.get(key)
+        if key == "types" and isinstance(value, list):
+            value = ",".join(value)
+        table.add_row(key, str(value))
+    console.print(table)
+    if dry_run:
+        console.print("[yellow]Dry run only. Re-run with --confirm to forget matching memories.[/yellow]")
+
+
+
+@memory_app.command(name="embed-cache")
+def memory_embed_cache_cmd(
+    limit: int = typer.Option(2000, "--limit", "-n", help="Maximum candidates to embed/cache"),
+    project_id: Optional[str] = typer.Option(None, "--project", help="Optional project filter"),
+    force: bool = typer.Option(False, "--force", help="Rewrite existing cached vectors"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Cache lightweight semantic vectors for active candidates (hash embeddings)."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    result = get_memory_store().cache_candidate_embeddings(limit=limit, project_id=project_id, force=force)
+    if json_output:
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    table = Table(title="Memory Embedding Cache")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    for key, value in result.items():
+        table.add_row(str(key), str(value))
+    console.print(table)
+
+
+@memory_app.command(name="compact-atoms")
+def memory_compact_atoms_cmd(
+    project_id: Optional[str] = typer.Option(None, "--project", help="Optional project filter"),
+    types: Optional[str] = typer.Option(None, "--types", help="Comma-separated types (default decision,preference,constraint,instruction,fact)"),
+    min_confidence: float = typer.Option(0.9, "--min-confidence", help="Minimum confidence to compact"),
+    limit: int = typer.Option(2000, "--limit", "-n", help="Maximum active candidates considered"),
+    forget_sources: bool = typer.Option(False, "--forget-sources", help="Forget older source candidates in each slot after writing atoms"),
+    dry_run: bool = typer.Option(True, "--dry-run/--confirm", help="Preview by default; use --confirm to write atoms"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Compact durable active candidates into memory_atoms."""
+    from rich.table import Table
+    from ppmlx.memory_store import get_memory_store
+
+    type_list = [part.strip() for part in str(types).split(",") if part.strip()] if types else None
+    result = get_memory_store().compact_candidates_to_atoms(
+        project_id=project_id,
+        types=type_list,
+        min_confidence=min_confidence,
+        limit=limit,
+        dry_run=dry_run,
+        forget_sources=forget_sources,
+    )
+    if json_output:
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    table = Table(title="Memory Compact Atoms Preview" if dry_run else "Memory Compact Atoms")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+    for key in ("dry_run", "project_id", "candidate_inputs", "atom_groups", "atoms_written", "sources_forgotten", "min_confidence"):
+        table.add_row(key, str(result.get(key)))
+    console.print(table)
+    if dry_run:
+        console.print("[yellow]Dry run only. Re-run with --confirm to write atoms.[/yellow]")
 
 
 @memory_app.command(name="dedup-scan")
@@ -2862,7 +3017,7 @@ def memory_view_cmd(
         title="[bold accent]ppmlx memory view[/bold accent]",
         border_style="cyan",
     ))
-    
+
     if open_browser:
         def open_tab():
             time.sleep(1.0)
@@ -2871,7 +3026,7 @@ def memory_view_cmd(
             except Exception:
                 pass
         threading.Thread(target=open_tab, daemon=True).start()
-        
+
     start_viewer(port=port, host=host)
 
 

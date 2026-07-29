@@ -24,6 +24,68 @@ _SAFE_ENTITY_PREFIXES = (
     "workspace",
 )
 
+# Retrieval ranking: higher is better. workflow_state is intentionally low so
+# durable decisions/preferences win over transient task chatter.
+_TYPE_RANK_BOOST = {
+    "preference": 1.25,
+    "constraint": 1.2,
+    "decision": 1.15,
+    "instruction": 1.1,
+    "fact": 1.0,
+    "entity_note": 0.95,
+    "relationship": 0.9,
+    "blocker": 0.85,
+    "risk": 0.85,
+    "todo": 0.7,
+    "workflow_state": 0.45,
+}
+
+# Predicates that represent a single current value for subject+scope.
+# Newer values should supersede older active ones instead of stacking.
+SINGLE_VALUE_PREDICATES = {
+    "current_task",
+    "next_action",
+    "blocker",
+    "status",
+    "core_status",
+    "current_phase",
+    "latest_commit",
+    "latest_local_commit",
+    "latest_pushed_commit",
+    "latest pushed commit",
+    "pushed_commit",
+    "is",
+    "equals",
+    "uses",
+    "use",
+    "supports_engine",
+    "configuration",
+    "prefers",
+    "prefer",
+    "decided",
+    "decided_as",
+    "goal",
+    "mode",
+    "default_model",
+    "release_target",
+    "platform_strategy",
+    "visual_direction",
+}
+
+# workflow_state predicates that remain append-only history.
+ADDITIVE_WORKFLOW_PREDICATES = {
+    "command_run",
+    "file_changed",
+    "file_updated",
+    "patched_issue",
+    "rebuilt_after",
+    "updated_from",
+    "implemented",
+    "validation",
+    "commit",
+    "commit_pushed",
+}
+
 
 def _default_memory_db_path() -> Path:
     try:
@@ -771,7 +833,9 @@ class MemoryStore:
             for candidate, validation in items:
                 action = "added"
                 superseded_ids: list[str] = []
+                now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now')").fetchone()[0]
                 if dedup and not force:
+                    # 1) Exact SPO dedup across scopes.
                     existing_rows = conn.execute(
                         """SELECT * FROM memory_candidates
                            WHERE subject = ? AND predicate = ? AND object = ? AND status = 'active'
@@ -779,26 +843,38 @@ class MemoryStore:
                         (candidate["subject"], candidate["predicate"], candidate["object"]),
                     ).fetchall()
                     if existing_rows:
-                        now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now')").fetchone()[0]
                         superseded_ids = [row["candidate_id"] for row in existing_rows]
                         old_confidence_sum = sum(float(row["confidence"] or 0.0) for row in existing_rows)
                         new_confidence = float(candidate.get("confidence", 0.0))
                         candidate["confidence"] = (old_confidence_sum + new_confidence) / (len(existing_rows) + 1)
                         validation = {**validation, "valid_from": validation.get("valid_from") or now}
                         for superseded_id in superseded_ids:
-                            conn.execute(
-                                """UPDATE memory_candidates
-                                   SET status = 'superseded', valid_to = ?
-                                   WHERE candidate_id = ? AND status = 'active'""",
-                                (now, superseded_id),
-                            )
-                            conn.execute(
-                                """UPDATE memory_edges
-                                   SET status = 'superseded', valid_to = ?
-                                   WHERE source_candidate_id = ? AND status = 'active'""",
-                                (now, superseded_id),
-                            )
+                            self._supersede_candidate_conn(conn, superseded_id, valid_to=now)
                         action = "updated"
+                    # 2) Single-value temporal slot collapse (different object).
+                    elif _is_single_value_predicate(str(candidate.get("type") or ""), str(candidate.get("predicate") or "")):
+                        slot_rows = conn.execute(
+                            """SELECT * FROM memory_candidates
+                               WHERE type = ? AND subject = ? AND predicate = ? AND scope = ? AND status = 'active'
+                               ORDER BY created_at DESC""",
+                            (
+                                candidate.get("type"),
+                                candidate.get("subject"),
+                                candidate.get("predicate"),
+                                candidate.get("scope"),
+                            ),
+                        ).fetchall()
+                        if slot_rows:
+                            superseded_ids = [row["candidate_id"] for row in slot_rows]
+                            validation = {
+                                **validation,
+                                "valid_from": validation.get("valid_from") or now,
+                                "reasons": list(validation.get("reasons") or []) + ["supersedes_prior"],
+                                "invalidates": list(validation.get("invalidates") or []) + superseded_ids,
+                            }
+                            for superseded_id in superseded_ids:
+                                self._supersede_candidate_conn(conn, superseded_id, valid_to=now)
+                            action = "updated"
                 candidate_for_edge = dict(candidate)
                 candidate_for_edge["valid_from"] = validation.get("valid_from")
                 candidate_for_edge["valid_to"] = validation.get("valid_to")
@@ -860,20 +936,25 @@ class MemoryStore:
             return
         self.init()
         with self._lock, self._connect() as conn:
+            now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now')").fetchone()[0]
             for candidate_id in candidate_ids:
-                conn.execute(
-                    """UPDATE memory_candidates
-                       SET status = 'superseded', valid_to = strftime('%Y-%m-%dT%H:%M:%f', 'now')
-                       WHERE candidate_id = ? AND status = 'active'""",
-                    (candidate_id,),
-                )
-                conn.execute(
-                    """UPDATE memory_edges
-                       SET status = 'superseded', valid_to = strftime('%Y-%m-%dT%H:%M:%f', 'now')
-                       WHERE source_candidate_id = ? AND status = 'active'""",
-                    (candidate_id,),
-                )
+                self._supersede_candidate_conn(conn, candidate_id, valid_to=now)
             conn.commit()
+
+    @staticmethod
+    def _supersede_candidate_conn(conn: sqlite3.Connection, candidate_id: str, *, valid_to: str) -> None:
+        conn.execute(
+            """UPDATE memory_candidates
+               SET status = 'superseded', valid_to = ?
+               WHERE candidate_id = ? AND status = 'active'""",
+            (valid_to, candidate_id),
+        )
+        conn.execute(
+            """UPDATE memory_edges
+               SET status = 'superseded', valid_to = ?
+               WHERE source_candidate_id = ? AND status = 'active'""",
+            (valid_to, candidate_id),
+        )
 
     def upsert_memory_edge(self, candidate: dict[str, Any]) -> None:
         self.init()
@@ -1330,23 +1411,439 @@ class MemoryStore:
         app_id: str | None = None,
         project_id: str | None = None,
         session_id: str | None = None,
+        exclude_noisy: bool = True,
     ) -> list[dict[str, Any]]:
+        """Search candidates with hybrid lexical ranking.
+
+        Ranking blends FTS/LIKE match strength, type prior, recency, confidence,
+        salience, and optional project affinity. Returns a ``score`` field on each
+        row so callers stop mistaking confidence for relevance.
+        """
         self.init()
         terms = _search_terms(query)
         if not terms:
             return []
+        # Over-fetch then rerank so durable facts can outrank high-confidence noise.
+        fetch_limit = max(limit * 8, 40)
+        rows: list[dict[str, Any]] = []
         if self._fts_available is not False:
             try:
-                return self._search_fts(
-                    terms, status=status, scope=scope, limit=limit,
+                rows = self._search_fts(
+                    terms, status=status, scope=scope, limit=fetch_limit,
                     app_id=app_id, project_id=project_id, session_id=session_id,
                 )
             except sqlite3.Error:
                 self._fts_available = False
-        return self._search_like(
-            terms, status=status, scope=scope, limit=limit,
-            app_id=app_id, project_id=project_id, session_id=session_id,
+                rows = []
+        if not rows:
+            rows = self._search_like(
+                terms, status=status, scope=scope, limit=fetch_limit,
+                app_id=app_id, project_id=project_id, session_id=session_id,
+            )
+        if exclude_noisy and not (app_id or project_id or session_id):
+            from ppmlx.context_reducer import is_noisy_context_namespace
+
+            rows = [row for row in rows if not is_noisy_context_namespace(row)]
+        dense_vectors = self._load_candidate_embedding_vectors(
+            [str(row.get("candidate_id") or "") for row in rows if row.get("candidate_id")]
         )
+        ranked = _rank_search_results(
+            rows,
+            query=query,
+            terms=terms,
+            project_id=project_id,
+            session_id=session_id,
+            app_id=app_id,
+            dense_vectors=dense_vectors,
+        )
+        return ranked[: max(1, int(limit))]
+
+    def set_fact(
+        self,
+        *,
+        type: str = "fact",
+        subject: str,
+        predicate: str,
+        object: str,
+        text: str,
+        scope: str = "project",
+        confidence: float = 0.9,
+        salience: float = 0.9,
+        valid_from: str | None = None,
+        project_id: str | None = None,
+        session_id: str | None = None,
+        app_id: str | None = None,
+        source_quote: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Set one active temporal value for subject+predicate+scope.
+
+        Same object => unchanged/deduped. Different object => supersede prior actives.
+        """
+        self.init()
+        subject_n = str(subject).strip()
+        predicate_n = str(predicate).strip()
+        object_n = str(object).strip()
+        text_n = str(text).strip()
+        scope_n = str(scope or "project").strip() or "project"
+        type_n = str(type or "fact").strip() or "fact"
+        if not subject_n or not predicate_n or not object_n or not text_n:
+            raise ValueError("set_fact requires subject, predicate, object, and text")
+
+        event_id = f"set-fact-{sha1(f'{type_n}:{subject_n}:{predicate_n}:{scope_n}:{object_n}'.encode()).hexdigest()[:12]}"
+        candidate_id = f"mem_{sha1(f'{event_id}:{type_n}:{_norm(subject_n)}:{_norm(predicate_n)}:{_norm(object_n)}:{scope_n}'.encode()).hexdigest()[:16]}"
+        event = {
+            "event_id": event_id,
+            "endpoint": "/cli/set-fact",
+            "app_id": app_id,
+            "project_id": project_id,
+            "session_id": session_id,
+            "model_alias": "cli",
+            "model_repo": "cli",
+            "request": {"source": "set_fact"},
+            "response_text": "",
+            "metadata": {"source": "set_fact"},
+        }
+        candidate = {
+            "candidate_id": candidate_id,
+            "event_id": event_id,
+            "type": type_n,
+            "subject": subject_n,
+            "predicate": predicate_n,
+            "object": object_n,
+            "text": text_n,
+            "scope": scope_n,
+            "confidence": float(confidence),
+            "source_quote": source_quote or text_n,
+            "salience": float(salience),
+            "metadata": dict(metadata or {}),
+        }
+
+        with self._lock, self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            self._record_event_conn(conn, event)
+            now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now')").fetchone()[0]
+            valid_from_n = valid_from or now
+            active_rows = conn.execute(
+                """SELECT * FROM memory_candidates
+                   WHERE type = ? AND subject = ? AND predicate = ? AND scope = ? AND status = 'active'
+                   ORDER BY created_at DESC, id DESC""",
+                (type_n, subject_n, predicate_n, scope_n),
+            ).fetchall()
+
+            same = [row for row in active_rows if _norm(row["object"]) == _norm(object_n)]
+            others = [row for row in active_rows if _norm(row["object"]) != _norm(object_n)]
+
+            if same and not others:
+                kept = same[0]
+                extra = same[1:]
+                superseded_ids = [row["candidate_id"] for row in extra]
+                for row in extra:
+                    self._supersede_candidate_conn(conn, row["candidate_id"], valid_to=now)
+                conn.commit()
+                return {
+                    "action": "unchanged" if not superseded_ids else "deduped",
+                    "candidate_id": kept["candidate_id"],
+                    "superseded_ids": superseded_ids,
+                    "type": type_n,
+                    "subject": subject_n,
+                    "predicate": predicate_n,
+                    "object": object_n,
+                    "scope": scope_n,
+                }
+
+            superseded_ids = [row["candidate_id"] for row in active_rows]
+            for row in active_rows:
+                self._supersede_candidate_conn(conn, row["candidate_id"], valid_to=now)
+            validation = {
+                "status": "active",
+                "reasons": ["set_fact"],
+                "invalidates": superseded_ids,
+                "valid_from": valid_from_n,
+                "valid_to": None,
+            }
+            self._store_candidate_conn(conn, candidate, validation)
+            edge_candidate = dict(candidate)
+            edge_candidate["valid_from"] = valid_from_n
+            edge_candidate["valid_to"] = None
+            self._upsert_memory_edge_conn(conn, edge_candidate)
+            conn.commit()
+
+        return {
+            "action": "updated" if superseded_ids else "added",
+            "candidate_id": candidate_id,
+            "superseded_ids": superseded_ids,
+            "type": type_n,
+            "subject": subject_n,
+            "predicate": predicate_n,
+            "object": object_n,
+            "scope": scope_n,
+        }
+
+    def fact_history(
+        self,
+        *,
+        subject: str,
+        predicate: str,
+        scope: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return temporal history for one subject+predicate slot."""
+        self.init()
+        conditions = ["subject = ?", "predicate = ?"]
+        params: list[Any] = [subject, predicate]
+        if scope:
+            conditions.append("scope = ?")
+            params.append(scope)
+        params.append(max(1, int(limit)))
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"""SELECT * FROM memory_candidates
+                   WHERE {' AND '.join(conditions)}
+                   ORDER BY COALESCE(valid_from, created_at) DESC, created_at DESC, id DESC
+                   LIMIT ?""",
+                params,
+            ).fetchall()
+        return [self._row_to_candidate(row) for row in rows]
+
+    def temporal_conflicts(
+        self,
+        *,
+        scope: str | None = None,
+        limit: int = 1000,
+        type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List active subject+predicate+scope slots with multiple object values."""
+        self.init()
+        conditions = ["status = 'active'"]
+        params: list[Any] = []
+        if scope:
+            conditions.append("scope = ?")
+            params.append(scope)
+        if type:
+            conditions.append("type = ?")
+            params.append(type)
+        params.append(max(1, int(limit)))
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            groups = conn.execute(
+                f"""SELECT subject, predicate, scope, type,
+                          COUNT(DISTINCT object) AS object_count,
+                          COUNT(*) AS count
+                   FROM memory_candidates
+                   WHERE {' AND '.join(conditions)}
+                   GROUP BY subject, predicate, scope, type
+                   HAVING COUNT(DISTINCT object) > 1
+                   ORDER BY object_count DESC, count DESC, subject ASC
+                   LIMIT ?""",
+                params,
+            ).fetchall()
+            out: list[dict[str, Any]] = []
+            for group in groups:
+                candidates = conn.execute(
+                    """SELECT candidate_id, object, confidence, salience, created_at, valid_from, valid_to, text
+                       FROM memory_candidates
+                       WHERE status = 'active' AND subject = ? AND predicate = ? AND scope = ? AND type = ?
+                       ORDER BY COALESCE(valid_from, created_at) DESC, created_at DESC, id DESC""",
+                    (group["subject"], group["predicate"], group["scope"], group["type"]),
+                ).fetchall()
+                out.append({
+                    "subject": group["subject"],
+                    "predicate": group["predicate"],
+                    "scope": group["scope"],
+                    "type": group["type"],
+                    "object_count": int(group["object_count"]),
+                    "count": int(group["count"]),
+                    "objects": [row["object"] for row in candidates],
+                    "candidates": [dict(row) for row in candidates],
+                })
+        return out
+
+    def migrate_temporal_conflicts(
+        self,
+        *,
+        scope: str | None = None,
+        limit: int = 1000,
+        dry_run: bool = True,
+        only_single_value_predicates: bool = False,
+    ) -> dict[str, Any]:
+        """Keep newest active value per conflict slot; supersede older actives."""
+        groups = self.temporal_conflicts(scope=scope, limit=limit)
+        if only_single_value_predicates:
+            groups = [
+                group for group in groups
+                if _is_single_value_predicate(str(group.get("type") or ""), str(group.get("predicate") or ""))
+            ]
+        would_supersede = 0
+        plan: list[dict[str, Any]] = []
+        for group in groups:
+            candidates = list(group.get("candidates") or [])
+            if len(candidates) < 2:
+                continue
+            keep = candidates[0]["candidate_id"]
+            drop = [row["candidate_id"] for row in candidates[1:]]
+            would_supersede += len(drop)
+            plan.append({
+                "subject": group["subject"],
+                "predicate": group["predicate"],
+                "scope": group["scope"],
+                "type": group["type"],
+                "keep": keep,
+                "supersede": drop,
+            })
+        result: dict[str, Any] = {
+            "dry_run": bool(dry_run),
+            "conflict_groups": len(plan),
+            "would_supersede": would_supersede,
+            "superseded": 0,
+            "groups": plan,
+        }
+        if dry_run or not plan:
+            return result
+
+        superseded = 0
+        with self._lock, self._connect() as conn:
+            now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now')").fetchone()[0]
+            for group in plan:
+                for candidate_id in group["supersede"]:
+                    self._supersede_candidate_conn(conn, candidate_id, valid_to=now)
+                    superseded += 1
+            conn.commit()
+        result["superseded"] = superseded
+        return result
+
+    def expire_stale_candidates(
+        self,
+        *,
+        older_than_days: float = 30.0,
+        types: list[str] | None = None,
+        dry_run: bool = True,
+        limit: int = 5000,
+    ) -> dict[str, Any]:
+        """Forget stale active workflow/todo style memories past a TTL."""
+        self.init()
+        selected_types = types or ["workflow_state", "todo"]
+        days = max(0.0, float(older_than_days))
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            placeholders = ",".join("?" for _ in selected_types)
+            rows = conn.execute(
+                f"""SELECT candidate_id, type, subject, predicate, object, created_at, valid_from
+                   FROM memory_candidates
+                   WHERE status = 'active'
+                     AND type IN ({placeholders})
+                     AND COALESCE(valid_from, created_at) < strftime('%Y-%m-%dT%H:%M:%f', 'now', ?)
+                   ORDER BY COALESCE(valid_from, created_at) ASC
+                   LIMIT ?""",
+                (*selected_types, f"-{days} days", max(1, int(limit))),
+            ).fetchall()
+        candidate_ids = [row["candidate_id"] for row in rows]
+        result = {
+            "dry_run": bool(dry_run),
+            "older_than_days": days,
+            "types": selected_types,
+            "candidates": len(candidate_ids),
+            "candidate_ids": candidate_ids,
+            "forgotten": 0,
+        }
+        if dry_run:
+            return result
+        forgotten = 0
+        for candidate_id in candidate_ids:
+            if self.forget_candidate(candidate_id):
+                forgotten += 1
+        result["forgotten"] = forgotten
+        return result
+
+    def doctor(self) -> dict[str, Any]:
+        """Operational health snapshot for memory quality maintenance."""
+        self.init()
+        stats = self.stats()
+        conflicts = self.temporal_conflicts(limit=5000)
+        dups = self.dedup_scan(active_only=True, limit=5000)
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            active = int(conn.execute("SELECT COUNT(*) FROM memory_candidates WHERE status = 'active'").fetchone()[0])
+            workflow_active = int(conn.execute(
+                "SELECT COUNT(*) FROM memory_candidates WHERE status = 'active' AND type = 'workflow_state'"
+            ).fetchone()[0])
+            missing_edge_rows = conn.execute(
+                """SELECT c.candidate_id, c.subject, c.object
+                   FROM memory_candidates c
+                   WHERE c.status = 'active'
+                     AND NOT EXISTS (
+                        SELECT 1 FROM memory_edges e WHERE e.source_candidate_id = c.candidate_id
+                     )"""
+            ).fetchall()
+            active_no_edge = 0
+            for row in missing_edge_rows:
+                if canonicalize_graph_entity(str(row["subject"] or "")) is None:
+                    continue
+                if canonicalize_graph_entity(str(row["object"] or "")) is None:
+                    continue
+                active_no_edge += 1
+            orphan_entities = int(conn.execute(
+                """SELECT COUNT(*) FROM memory_entities ent
+                   WHERE NOT EXISTS (
+                        SELECT 1 FROM memory_edges e
+                        WHERE e.from_entity_id = ent.entity_id OR e.to_entity_id = ent.entity_id
+                   )
+                   AND NOT EXISTS (
+                        SELECT 1 FROM memory_inferred i
+                        WHERE i.from_entity_id = ent.entity_id OR i.to_entity_id = ent.entity_id
+                   )"""
+            ).fetchone()[0])
+            failed_jobs = int(conn.execute(
+                "SELECT COUNT(*) FROM memory_extraction_jobs WHERE status = 'failed'"
+            ).fetchone()[0])
+            noisy_candidates = self._noisy_namespace_candidates(project_id=None, session_id=None)
+
+        single_value_conflicts = [
+            g for g in conflicts
+            if _is_single_value_predicate(str(g.get("type") or ""), str(g.get("predicate") or ""))
+        ]
+        issues: list[str] = []
+        if conflicts:
+            issues.append(f"temporal_conflicts={len(conflicts)}")
+        if single_value_conflicts:
+            issues.append(f"single_value_conflicts={len(single_value_conflicts)}")
+        if dups:
+            issues.append(f"exact_spo_dup_groups={len(dups)}")
+        if active and workflow_active / active > 0.25:
+            issues.append(f"workflow_state_ratio={workflow_active / active:.2f}")
+        if active_no_edge:
+            issues.append(f"active_without_edge={active_no_edge}")
+        if orphan_entities:
+            issues.append(f"orphan_entities={orphan_entities}")
+        if failed_jobs:
+            issues.append(f"failed_jobs={failed_jobs}")
+        if noisy_candidates:
+            issues.append(f"noisy_namespace_active={len(noisy_candidates)}")
+
+        return {
+            **stats,
+            "active": active,
+            "workflow_active": workflow_active,
+            "workflow_active_ratio": round((workflow_active / active), 4) if active else 0.0,
+            "temporal_conflicts": len(conflicts),
+            "single_value_conflicts": len(single_value_conflicts),
+            "exact_spo_dup_groups": len(dups),
+            "active_without_edge": active_no_edge,
+            "orphan_entities": orphan_entities,
+            "failed_jobs": failed_jobs,
+            "noisy_namespace_active": len(noisy_candidates),
+            "issues": issues,
+            "healthy": not issues,
+            "recommendations": _doctor_recommendations(
+                conflicts=len(conflicts),
+                single_value_conflicts=len(single_value_conflicts),
+                dups=len(dups),
+                active_no_edge=active_no_edge,
+                noisy=len(noisy_candidates),
+                failed_jobs=failed_jobs,
+            ),
+        }
 
     def inspect_candidate(self, candidate_id: str) -> dict[str, Any] | None:
         self.init()
@@ -1946,7 +2443,7 @@ class MemoryStore:
                       -- Cycle prevention: don't follow back to entities already in path
                       AND e.to_entity_id NOT IN (
                           SELECT json_extract(w.path, '$[' || idx || ']')
-                          FROM (SELECT 0 AS idx UNION ALL SELECT 1 UNION ALL SELECT 2 
+                          FROM (SELECT 0 AS idx UNION ALL SELECT 1 UNION ALL SELECT 2
                                 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5)
                           WHERE idx < json_array_length(w.path)
                       )
@@ -2422,6 +2919,192 @@ class MemoryStore:
             ),
         )
 
+
+    def _load_candidate_embedding_vectors(self, candidate_ids: list[str]) -> dict[str, dict[int, float]]:
+        """Load cached candidate vectors (hash or model) keyed by candidate_id."""
+        ids = [cid for cid in candidate_ids if cid]
+        if not ids:
+            return {}
+        try:
+            aliases = self.query_entity_aliases(type="embedding_cache", scope="system", active_only=True, limit=10000)
+        except Exception:
+            return {}
+        wanted = set(ids)
+        out: dict[str, dict[int, float]] = {}
+        for alias in aliases:
+            meta = alias.get("metadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except json.JSONDecodeError:
+                    continue
+            cid = str(meta.get("candidate_id") or "")
+            if cid not in wanted:
+                continue
+            vec = meta.get("sparse") or meta.get("vector")
+            parsed = _coerce_vector(vec)
+            if parsed:
+                out[cid] = parsed
+        return out
+
+    def cache_candidate_embeddings(
+        self,
+        *,
+        status: str = "active",
+        limit: int = 2000,
+        force: bool = False,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Cache lightweight semantic vectors for active candidates.
+
+        Uses a deterministic hashed bag-of-words embedding so search can fuse a
+        dense-like signal without requiring a local embedding model download.
+        """
+        self.init()
+        rows = self.query_candidates(status=status, limit=max(1, int(limit)), project_id=project_id)
+        existing = set() if force else set(self._load_candidate_embedding_vectors(
+            [str(r.get("candidate_id") or "") for r in rows]
+        ))
+        written = 0
+        skipped = 0
+        for row in rows:
+            cid = str(row.get("candidate_id") or "")
+            if not cid:
+                continue
+            if cid in existing and not force:
+                skipped += 1
+                continue
+            text = " ".join(
+                str(row.get(key) or "")
+                for key in ("type", "subject", "predicate", "object", "text")
+            )
+            sparse = _hash_embed(text)
+            self.store_entity_alias({
+                "entity_id": f"embedding:{cid}",
+                "alias": "embedding_vector",
+                "type": "embedding_cache",
+                "scope": "system",
+                "confidence": 1.0,
+                "metadata": {
+                    "candidate_id": cid,
+                    "model": "hash-bow-v1",
+                    "dims": HASH_EMBED_DIMS,
+                    "sparse": {str(k): v for k, v in sparse.items()},
+                },
+            })
+            written += 1
+        return {
+            "candidates": len(rows),
+            "written": written,
+            "skipped": skipped,
+            "force": bool(force),
+            "model": "hash-bow-v1",
+        }
+
+    def compact_candidates_to_atoms(
+        self,
+        *,
+        project_id: str | None = None,
+        types: list[str] | None = None,
+        min_confidence: float = 0.9,
+        limit: int = 2000,
+        dry_run: bool = True,
+        forget_sources: bool = False,
+    ) -> dict[str, Any]:
+        """Compact durable active candidates into memory_atoms summaries.
+
+        Groups by type+subject+predicate+scope and keeps the newest/highest
+        confidence value as an atom. Optional forget_sources archives the raw
+        candidates after successful atom writes.
+        """
+        self.init()
+        selected_types = types or ["decision", "preference", "constraint", "instruction", "fact"]
+        rows = self.query_candidates(status="active", limit=max(1, int(limit)), project_id=project_id)
+        durable = [
+            row for row in rows
+            if str(row.get("type") or "") in selected_types
+            and float(row.get("confidence") or 0.0) >= float(min_confidence)
+            and str(row.get("scope") or "") in {"global", "project"}
+        ]
+        groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+        for row in durable:
+            key = (
+                str(row.get("type") or ""),
+                str(row.get("subject") or ""),
+                str(row.get("predicate") or ""),
+                str(row.get("scope") or "project"),
+            )
+            groups.setdefault(key, []).append(row)
+
+        planned: list[dict[str, Any]] = []
+        for key, items in groups.items():
+            items_sorted = sorted(
+                items,
+                key=lambda r: (
+                    float(r.get("confidence") or 0.0),
+                    str(r.get("valid_from") or r.get("created_at") or ""),
+                ),
+                reverse=True,
+            )
+            keep = items_sorted[0]
+            planned.append({
+                "type": key[0],
+                "subject": key[1],
+                "predicate": key[2],
+                "scope": key[3],
+                "object": keep.get("object"),
+                "text": keep.get("text"),
+                "confidence": keep.get("confidence"),
+                "source_candidate_id": keep.get("candidate_id"),
+                "source_count": len(items_sorted),
+                "source_candidate_ids": [str(i.get("candidate_id")) for i in items_sorted],
+            })
+
+        result: dict[str, Any] = {
+            "dry_run": bool(dry_run),
+            "project_id": project_id,
+            "types": selected_types,
+            "min_confidence": float(min_confidence),
+            "candidate_inputs": len(durable),
+            "atom_groups": len(planned),
+            "atoms_written": 0,
+            "sources_forgotten": 0,
+            "groups": planned[:50],
+        }
+        if dry_run or not planned:
+            return result
+
+        atoms_written = 0
+        forgotten = 0
+        for item in planned:
+            atom = {
+                "type": item["type"],
+                "subject": item["subject"],
+                "predicate": item["predicate"],
+                "object": item["object"],
+                "text": item["text"],
+                "scope": item["scope"],
+                "confidence": float(item.get("confidence") or 0.0),
+                "source_event_id": None,
+                "metadata": {
+                    "source": "compact_candidates_to_atoms",
+                    "source_candidate_id": item.get("source_candidate_id"),
+                    "source_candidate_ids": item.get("source_candidate_ids"),
+                    "project_id": project_id,
+                    "supersedes_prior": True,
+                },
+            }
+            self.store_atom(atom)
+            atoms_written += 1
+            if forget_sources:
+                # Keep the canonical newest candidate; forget older duplicates in the slot.
+                for cid in list(item.get("source_candidate_ids") or [])[1:]:
+                    if self.forget_candidate(str(cid)):
+                        forgotten += 1
+        result["atoms_written"] = atoms_written
+        result["sources_forgotten"] = forgotten
+        return result
+
     def get_namespaces(self) -> dict[str, list[str]]:
         """Return distinct app_ids, project_ids, session_ids, and scopes in the memory database."""
         self.init()
@@ -2430,15 +3113,15 @@ class MemoryStore:
             # Get distinct app_ids
             rows = conn.execute("SELECT DISTINCT app_id FROM memory_events WHERE app_id IS NOT NULL AND app_id != ''").fetchall()
             res["app_ids"] = sorted([r[0] for r in rows if r[0]])
-            
+
             # Get distinct project_ids
             rows = conn.execute("SELECT DISTINCT project_id FROM memory_events WHERE project_id IS NOT NULL AND project_id != ''").fetchall()
             res["project_ids"] = sorted([r[0] for r in rows if r[0]])
-            
+
             # Get distinct session_ids
             rows = conn.execute("SELECT DISTINCT session_id FROM memory_events WHERE session_id IS NOT NULL AND session_id != ''").fetchall()
             res["session_ids"] = sorted([r[0] for r in rows if r[0]])
-            
+
             # Get distinct scopes
             rows = conn.execute("SELECT DISTINCT scope FROM memory_candidates WHERE scope IS NOT NULL AND scope != ''").fetchall()
             res["scopes"] = sorted([r[0] for r in rows if r[0]])
@@ -2591,8 +3274,265 @@ def _looks_like_long_text_entity(value: str) -> bool:
     return False
 
 
+
+HASH_EMBED_DIMS = 256
+
+
+def _hash_embed(text: str, *, dims: int = HASH_EMBED_DIMS) -> dict[int, float]:
+    """Deterministic hashed bag-of-words embedding (sparse)."""
+    tokens = re.findall(r"[a-z0-9_]{2,}", (text or "").lower())
+    if not tokens:
+        return {}
+    vec: dict[int, float] = {}
+    for token in tokens:
+        digest = sha1(token.encode("utf-8")).hexdigest()
+        idx = int(digest[:8], 16) % dims
+        sign = 1.0 if int(digest[8:10], 16) % 2 == 0 else -1.0
+        vec[idx] = vec.get(idx, 0.0) + sign
+    # L2 normalize sparse
+    norm = sum(v * v for v in vec.values()) ** 0.5
+    if norm <= 0:
+        return {}
+    return {k: (v / norm) for k, v in vec.items()}
+
+
+def _cosine_sparse(a: dict[int, float], b: dict[int, float]) -> float:
+    if not a or not b:
+        return 0.0
+    if len(a) > len(b):
+        a, b = b, a
+    dot = 0.0
+    for k, v in a.items():
+        if k in b:
+            dot += v * b[k]
+    return max(0.0, min(1.0, float(dot)))
+
+
+def _coerce_vector(value: Any) -> dict[int, float] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        out: dict[int, float] = {}
+        for k, v in value.items():
+            try:
+                out[int(k)] = float(v)
+            except Exception:
+                continue
+        return out or None
+    if isinstance(value, list):
+        # Dense list -> sparse nonzero map
+        out = {i: float(v) for i, v in enumerate(value) if abs(float(v)) > 1e-12}
+        return out or None
+    return None
+
+
+def _semantic_similarity(query: str, document: str) -> float:
+    """Cheap semantic-ish similarity via token + char-ngram overlap."""
+    q = (query or "").lower().strip()
+    d = (document or "").lower().strip()
+    if not q or not d:
+        return 0.0
+    q_tokens = set(re.findall(r"[a-z0-9_]{2,}", q))
+    d_tokens = set(re.findall(r"[a-z0-9_]{2,}", d))
+    token_score = 0.0
+    if q_tokens and d_tokens:
+        token_score = len(q_tokens & d_tokens) / max(len(q_tokens), 1)
+    q_ng = _char_shingles(q)
+    d_ng = _char_shingles(d)
+    ngram_score = 0.0
+    if q_ng and d_ng:
+        ngram_score = len(q_ng & d_ng) / max(len(q_ng | d_ng), 1)
+    # Soft synonym-ish bridges for common infra/product terms.
+    bridges = {
+        ("cpu", "governor"), ("governor", "powersave"), ("cart", "checkout"),
+        ("rewrite", "refactor"), ("commit", "pushed"), ("convex", "backend"),
+    }
+    bridge_hits = 0
+    blob = f"{q} {d}"
+    for a, b in bridges:
+        if a in q_tokens and b in d_tokens:
+            bridge_hits += 1
+        elif b in q_tokens and a in d_tokens:
+            bridge_hits += 1
+        elif a in q and b in blob:
+            bridge_hits += 0.5
+    bridge_score = min(0.4, bridge_hits * 0.15)
+    return max(0.0, min(1.0, 0.55 * token_score + 0.30 * ngram_score + bridge_score))
+
+
 def _search_terms(query: str) -> list[str]:
     return [term for term in re.findall(r"[A-Za-z0-9_]+", query.lower()) if len(term) >= 2][:12]
+
+
+def _is_single_value_predicate(type_: str, predicate: str) -> bool:
+    pred = _norm(predicate)
+    if not pred:
+        return False
+    if pred in {_norm(item) for item in SINGLE_VALUE_PREDICATES}:
+        return True
+    # Common mutable "current X" slots, including commit/status history noise.
+    if re.search(r"\b(latest|current|active|default)\b", pred):
+        return True
+    if pred.endswith("_status") or pred.endswith(" status"):
+        return True
+    if "commit" in pred and any(token in pred for token in ("latest", "pushed", "local", "head")):
+        return True
+    if type_ == "workflow_state" and pred not in {_norm(item) for item in ADDITIVE_WORKFLOW_PREDICATES}:
+        # Default workflow slots are single-value unless explicitly additive.
+        return pred in {_norm(item) for item in ("current_task", "next_action", "blocker", "status", "core_status", "current_phase")}
+    if type_ in {"preference", "decision", "constraint"} and pred in {
+        "prefers", "prefer", "decided", "decided_as", "requires", "mode", "uses", "use"
+    }:
+        return True
+    return False
+
+
+def _rank_search_results(
+    rows: list[dict[str, Any]],
+    *,
+    query: str,
+    terms: list[str],
+    project_id: str | None = None,
+    session_id: str | None = None,
+    app_id: str | None = None,
+    dense_vectors: dict[str, dict[int, float]] | None = None,
+) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    query_l = (query or "").lower()
+    term_set = set(terms)
+    query_vec = _hash_embed(query_l)
+    dense_vectors = dense_vectors or {}
+    for idx, row in enumerate(rows):
+        subject = str(row.get("subject") or "")
+        predicate = str(row.get("predicate") or "")
+        obj = str(row.get("object") or "")
+        text = str(row.get("text") or "")
+        hay = f"{subject} {predicate} {obj} {text}".lower()
+        tokens = set(re.findall(r"[a-z0-9_]+", hay))
+
+        overlap = len(term_set & tokens) / max(len(term_set), 1)
+        phrase = 1.0 if query_l and query_l in hay else 0.0
+        field_hits = 0.0
+        for term in terms:
+            if term in subject.lower():
+                field_hits += 0.35
+            if term in predicate.lower():
+                field_hits += 0.2
+            if term in obj.lower():
+                field_hits += 0.25
+            if term in text.lower():
+                field_hits += 0.1
+        lexical = min(1.5, overlap + phrase + min(field_hits, 1.0))
+        semantic = _semantic_similarity(query_l, hay)
+
+        type_boost = float(_TYPE_RANK_BOOST.get(str(row.get("type") or ""), 0.8))
+        confidence = float(row.get("confidence") or 0.0)
+        salience = float(row.get("salience") or 0.0)
+
+        # Recency: ~1.0 for now, decays toward 0.55 over ~90 days.
+        age_days = _age_days(str(row.get("valid_from") or row.get("created_at") or ""))
+        recency = max(0.55, 1.0 - min(age_days, 90.0) / 180.0)
+
+        ns_boost = 1.0
+        if project_id and str(row.get("project_id") or "") == str(project_id):
+            ns_boost += 0.25
+        if session_id and str(row.get("session_id") or "") == str(session_id):
+            ns_boost += 0.15
+        if app_id and str(row.get("app_id") or "") == str(app_id):
+            ns_boost += 0.1
+        if project_id and str(row.get("project_id") or "") and str(row.get("project_id") or "") != str(project_id):
+            if str(row.get("scope") or "") == "project":
+                ns_boost -= 0.35
+
+        dense = 0.0
+        cid = str(row.get("candidate_id") or "")
+        if dense_vectors and cid in dense_vectors:
+            dense = _cosine_sparse(query_vec, dense_vectors[cid])
+
+        score = (
+            0.40 * lexical
+            + 0.16 * semantic
+            + 0.12 * dense
+            + 0.14 * type_boost
+            + 0.10 * recency
+            + 0.08 * confidence
+            + 0.06 * min(max(salience, 0.0), 1.5)
+        ) * max(ns_boost, 0.4)
+        # Stable tie-break: original retrieval order.
+        score -= idx * 1e-6
+
+        out = dict(row)
+        out["score"] = round(score, 6)
+        out["rank_components"] = {
+            "lexical": round(lexical, 4),
+            "semantic": round(semantic, 4),
+            "dense": round(dense, 4),
+            "type_boost": round(type_boost, 4),
+            "recency": round(recency, 4),
+            "confidence": round(confidence, 4),
+            "salience": round(salience, 4),
+            "namespace_boost": round(ns_boost, 4),
+        }
+        ranked.append(out)
+    ranked.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+    return ranked
+
+
+def _age_days(ts: str) -> float:
+    if not ts:
+        return 30.0
+    try:
+        # Accept both YYYY-MM-DDTHH:MM:SS(.fff) and date-only.
+        raw = ts.strip().replace("Z", "")
+        if "T" in raw:
+            date_part, time_part = raw.split("T", 1)
+            year, month, day = [int(x) for x in date_part.split("-")[:3]]
+            hour = minute = second = 0
+            if time_part:
+                hm = time_part.split(":")
+                hour = int(hm[0]) if len(hm) > 0 and hm[0] else 0
+                minute = int(hm[1]) if len(hm) > 1 and hm[1] else 0
+                second = int(float(hm[2])) if len(hm) > 2 and hm[2] else 0
+            from datetime import datetime, timezone
+
+            then = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            return max(0.0, (now - then).total_seconds() / 86400.0)
+        year, month, day = [int(x) for x in raw.split("-")[:3]]
+        from datetime import datetime, timezone
+
+        then = datetime(year, month, day, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return max(0.0, (now - then).total_seconds() / 86400.0)
+    except Exception:
+        return 30.0
+
+
+def _doctor_recommendations(
+    *,
+    conflicts: int,
+    single_value_conflicts: int,
+    dups: int,
+    active_no_edge: int,
+    noisy: int,
+    failed_jobs: int,
+) -> list[str]:
+    tips: list[str] = []
+    if single_value_conflicts:
+        tips.append("ppmlx memory migrate-temporal-conflicts --confirm")
+    elif conflicts:
+        tips.append("ppmlx memory temporal-conflicts  # review multi-object slots")
+    if dups:
+        tips.append("ppmlx memory dedup-scan")
+    if noisy:
+        tips.append("ppmlx memory prune --confirm")
+    if active_no_edge:
+        tips.append("ppmlx memory rebuild --confirm")
+    if failed_jobs:
+        tips.append("ppmlx memory jobs --status failed")
+    if not tips:
+        tips.append("No maintenance actions required")
+    return tips
 
 
 def _compression_ratio(original_tokens: int, reduced_tokens: int) -> float:

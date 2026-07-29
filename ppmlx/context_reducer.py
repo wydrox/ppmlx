@@ -288,13 +288,37 @@ class ContextReducer:
             if query and not workflow_intent:
                 fallback = _filter_relevant_context_rows(fallback, intent_query)
             rows.extend(fallback)
-        
-        # Embedding re-rank: when an embedding engine is available, re-rank the
-        # top results by semantic similarity to the intent query.  This catches
-        # matches like "dense chunker" ↔ "sliding window embedder" that FTS5 misses.
+
+        # Prefer durable compacted atoms when available.
+        try:
+            atoms = store.query_atoms(active_only=True, limit=max(20, self.budget.max_context_items))
+            atom_rows = []
+            for atom in atoms:
+                atom_rows.append({
+                    "candidate_id": f"atom:{atom.get('atom_id')}",
+                    "type": atom.get("type"),
+                    "subject": atom.get("subject"),
+                    "predicate": atom.get("predicate"),
+                    "object": atom.get("object"),
+                    "text": atom.get("text"),
+                    "scope": atom.get("scope") or "project",
+                    "confidence": atom.get("confidence") or 0.0,
+                    "salience": 1.05,
+                    "status": "active",
+                    "project_id": (atom.get("metadata") or {}).get("project_id") if isinstance(atom.get("metadata"), dict) else None,
+                    "source": "atom",
+                })
+            if query and not workflow_intent:
+                atom_rows = _filter_relevant_context_rows(atom_rows, intent_query)
+            # Atoms first for durable recall.
+            rows = [*atom_rows, *rows]
+        except Exception:
+            pass
+
+        # Embedding/hash re-rank for semantic near-misses.
         if rows and intent_query and not workflow_intent:
             rows = _embedding_rerank(rows, intent_query, top_k=self.budget.max_context_items * 2)
-        
+
         return _curate_context_rows(
             rows,
             query=intent_query or query,
@@ -369,20 +393,20 @@ def build_handoff_context(
 def render_session_context(items: list[dict[str, Any]], *, max_tokens: int, store=None) -> str:
     if not items or max_tokens <= 0:
         return ""
-    
+
     # Enrich with inferred edges: for each retrieved candidate, check if it
     # has inferred connections.  These are tagged [inferred] so the model knows
     # they haven't been directly verified.
     enriched_items: list[dict[str, Any]] = []
     inferred_bullets: list[str] = []
     candidate_ids_seen: set[str] = set()
-    
+
     for item in items:
         enriched_items.append(item)
         cid = str(item.get("candidate_id", ""))
         if cid and cid not in candidate_ids_seen:
             candidate_ids_seen.add(cid)
-    
+
     # Fetch inferred edges for these candidates (best-effort)
     if store is not None and candidate_ids_seen:
         try:
@@ -398,7 +422,7 @@ def render_session_context(items: list[dict[str, Any]], *, max_tokens: int, stor
                     JOIN memory_entities ef ON ef.entity_id = inf.from_entity_id
                     JOIN memory_entities et ON et.entity_id = inf.to_entity_id
                     JOIN memory_edges ed ON (
-                        ed.from_entity_id = inf.from_entity_id 
+                        ed.from_entity_id = inf.from_entity_id
                         OR ed.to_entity_id = inf.to_entity_id
                         OR ed.from_entity_id = inf.to_entity_id
                     )
@@ -416,7 +440,7 @@ def render_session_context(items: list[dict[str, Any]], *, max_tokens: int, stor
             db.close()
         except Exception:
             pass  # inferred enrichment is best-effort
-    
+
     grouped: dict[str, list[str]] = {}
     for item in enriched_items:
         label = _context_label(item)
@@ -449,7 +473,7 @@ def render_session_context(items: list[dict[str, Any]], *, max_tokens: int, stor
             if estimate_text_tokens("\n".join(candidate)) > max_tokens:
                 return "\n".join(lines)
             lines.append(f"- {bullet}")
-    
+
     # Append inferred edges if they fit in budget
     if inferred_bullets:
         lines.append("Inferred connections (lower confidence, not directly verified):")
@@ -458,7 +482,7 @@ def render_session_context(items: list[dict[str, Any]], *, max_tokens: int, stor
             if estimate_text_tokens("\n".join(candidate)) > max_tokens:
                 break
             lines.append(f"- {bullet}")
-    
+
     return "\n".join(lines) if len(lines) > 4 else ""
 
 
@@ -519,7 +543,7 @@ def build_retrieval_query(
     project_id: str | None = None,
 ) -> str:
     """Build retrieval query from user messages, expanded with recent active facts.
-    
+
     Query expansion makes generic queries like "działaj" or "continue" match
     the current workflow state by appending terms from the 5 most recent active
     facts in this project.
@@ -531,7 +555,7 @@ def build_retrieval_query(
             parts.append(_content_to_text(message.get("content", "")))
         if estimate_text_tokens("\n".join(parts)) >= 600:
             break
-    
+
     # Query expansion: append recent fact text for better lexical overlap.
     if store is not None and project_id:
         try:
@@ -546,7 +570,7 @@ def build_retrieval_query(
                 parts.append(fact_terms)
         except Exception:
             pass  # query expansion is best-effort
-    
+
     return "\n".join(reversed(parts))[:3000]
 
 
@@ -745,9 +769,17 @@ def is_noisy_context_namespace(row: dict[str, Any]) -> bool:
         "dogfood",
         "eval",
         "test",
+        "smoke",
+        "ppmlx-json-test",
+        "ppmlx-e2e",
+        "ralph-memory-smoke",
+        "ralph-lock-smoke",
     )
     parts = set(normalized.split("-"))
-    return any(phrase in normalized for phrase in noisy_phrases[:4]) or bool(parts & {"eval", "test"})
+    return (
+        any(phrase in normalized for phrase in noisy_phrases)
+        or bool(parts & {"eval", "test", "smoke"})
+    )
 
 
 def _has_explicit_matching_namespace(row: dict[str, Any], scoped: dict[str, Any]) -> bool:
@@ -914,22 +946,35 @@ def _embedding_rerank(
     *,
     top_k: int = 40,
 ) -> list[dict[str, Any]]:
-    """Re-rank candidates by embedding cosine similarity to the query.
-    
-    Only runs when there are more candidates than top_k AND an embedding
-    engine is available.  Falls back to the original order otherwise.
-    Best-effort, never throws.
+    """Re-rank candidates by semantic similarity to the query.
+
+    Prefer cached vectors; otherwise use deterministic hash embeddings so
+    rerank works offline without downloading a model. Best-effort.
     """
-    if len(rows) <= top_k:
-        return rows  # nothing to re-rank
-    
-    # Try cached embeddings first (stored by contrastive retriever)
+    if len(rows) <= 1:
+        return rows
+
     cached = _load_cached_embeddings(rows)
-    if cached is not None and len(cached) >= len(rows) * 0.8:
-        return _rerank_with_cache(rows, query, cached, top_k)
-    
-    # Fallback: truncate to top_k by original rank (FTS5 BM25)
-    return rows[:top_k]
+    if cached:
+        reranked = _rerank_with_cache(rows, query, cached, top_k)
+        if reranked:
+            return reranked
+
+    # Hash-embedding fallback (always available).
+    try:
+        from ppmlx.memory_store import _cosine_sparse, _hash_embed
+
+        q = _hash_embed(query)
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for row in rows:
+            text = " ".join(str(row.get(k) or "") for k in ("type", "subject", "predicate", "object", "text"))
+            sim = _cosine_sparse(q, _hash_embed(text))
+            base = float(row.get("score") or row.get("confidence") or 0.0)
+            scored.append((0.7 * sim + 0.3 * base, row))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [row for _, row in scored[:top_k]]
+    except Exception:
+        return rows[:top_k]
 
 
 def _load_cached_embeddings(rows: list[dict[str, Any]]) -> dict[str, list[float]] | None:
@@ -944,15 +989,16 @@ def _load_cached_embeddings(rows: list[dict[str, Any]]) -> dict[str, list[float]
         aliases = store.query_entity_aliases(
             type="embedding_cache", scope="system", active_only=True, limit=10000,
         )
-        result: dict[str, list[float]] = {}
+        result: dict[str, Any] = {}
         import json
+        wanted = set(candidate_ids)
         for alias in aliases:
             meta = alias.get("metadata", {})
             if isinstance(meta, str):
                 meta = json.loads(meta)
             cid = meta.get("candidate_id", "")
-            vec = meta.get("vector", [])
-            if cid and cid in candidate_ids and vec:
+            vec = meta.get("sparse") or meta.get("vector")
+            if cid and cid in wanted and vec:
                 result[cid] = vec
         return result if result else None
     except Exception:
@@ -962,37 +1008,59 @@ def _load_cached_embeddings(rows: list[dict[str, Any]]) -> dict[str, list[float]
 def _rerank_with_cache(
     rows: list[dict[str, Any]],
     query: str,
-    cached: dict[str, list[float]],
+    cached: dict[str, Any],
     top_k: int,
 ) -> list[dict[str, Any]]:
-    """Re-rank using cached embeddings + query embedding."""
+    """Re-rank using cached embeddings + query embedding/hash."""
     try:
+        from ppmlx.memory_store import _coerce_vector, _cosine_sparse, _hash_embed
         import numpy as np
-        from ppmlx.engine_embed import get_embed_engine
-        
-        # Only embed the query (1 call, ~30ms)
-        embed_engine = get_embed_engine()
-        q_vecs = embed_engine.encode(
-            "qwen3-embedding:0.6b-4bit-dwq", [query[:200]], normalize=True,
-        )
-        query_vec = np.array(q_vecs[0], dtype=np.float32)
-        
-        # Score each row with cached vector
+
+        # Prefer hash query against sparse/hash cache (offline-safe).
+        query_sparse = _hash_embed(query)
         scored: list[tuple[float, dict]] = []
+        dense_cache: dict[str, list[float]] = {}
         for r in rows:
-            cid = r.get("candidate_id", "")
-            vec = cached.get(cid)
-            if vec is not None:
-                sim = float(np.dot(query_vec, np.array(vec, dtype=np.float32)))
+            cid = str(r.get("candidate_id") or "")
+            raw = cached.get(cid)
+            if raw is None:
+                continue
+            sparse = _coerce_vector(raw)
+            if sparse is not None and isinstance(raw, dict):
+                sim = _cosine_sparse(query_sparse, sparse)
                 scored.append((sim, r))
-        
-        if not scored:
-            return rows[:top_k]
-        
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [r for _, r in scored[:top_k]]
+            elif isinstance(raw, list):
+                dense_cache[cid] = raw
+
+        if scored:
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return [r for _, r in scored[:top_k]]
+
+        # Optional dense model path if cache holds dense vectors.
+        if dense_cache:
+            try:
+                from ppmlx.engine_embed import get_embed_engine
+                embed_engine = get_embed_engine()
+                q_vecs = embed_engine.encode(
+                    "qwen3-embedding:0.6b-4bit-dwq", [query[:200]], normalize=True,
+                )
+                query_vec = np.array(q_vecs[0], dtype=np.float32)
+                dense_scored: list[tuple[float, dict]] = []
+                for r in rows:
+                    cid = str(r.get("candidate_id") or "")
+                    vec = dense_cache.get(cid)
+                    if vec is None:
+                        continue
+                    sim = float(np.dot(query_vec, np.array(vec, dtype=np.float32)))
+                    dense_scored.append((sim, r))
+                if dense_scored:
+                    dense_scored.sort(key=lambda x: x[0], reverse=True)
+                    return [r for _, r in dense_scored[:top_k]]
+            except Exception:
+                pass
+        return []
     except Exception:
-        return rows[:top_k]
+        return []
 
 
 def _normalize_action_query(query: str) -> str:

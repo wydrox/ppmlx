@@ -19,7 +19,12 @@ from typing import Any
 
 from ppmlx.config import load_config
 
-from ppmlx.memory_store import MemoryStore, get_memory_store
+from ppmlx.memory_store import (
+    ADDITIVE_WORKFLOW_PREDICATES,
+    MemoryStore,
+    _is_single_value_predicate,
+    get_memory_store,
+)
 from ppmlx.tool_distillers import CodingToolDistiller, DistilledMemoryCandidate, GenericJsonToolDistiller, ToolDistiller
 
 
@@ -654,9 +659,16 @@ class MemoryValidator:
             predicate=candidate.predicate,
             scope=candidate.scope,
         )
+        single_value = _is_single_value_predicate(candidate.type, candidate.predicate)
         for active in active_slot:
             if _norm(active["object"]) == _norm(candidate.object):
                 return self._decision(STATUS_REJECTED, candidate, ["duplicate"])
+            if single_value:
+                # Mutable state slots always collapse to one active object.
+                invalidates.append(active["candidate_id"])
+                if "supersedes_prior" not in reasons:
+                    reasons.append("supersedes_prior")
+                continue
             if self._is_additive_slot(candidate):
                 continue
             if any(signal in source_text.lower() for signal in SUPERSEDE_SIGNALS):
@@ -664,7 +676,6 @@ class MemoryValidator:
                 reasons.append("supersedes_prior")
             else:
                 return self._decision(STATUS_DISPUTED, candidate, ["contradiction"])
-
 
         return self._decision(STATUS_ACTIVE, candidate, reasons, invalidates=invalidates)
 
@@ -688,6 +699,9 @@ class MemoryValidator:
 
     @staticmethod
     def _is_additive_slot(candidate: ShadowMemoryCandidate) -> bool:
+        # Single-value temporal slots are never additive.
+        if _is_single_value_predicate(candidate.type, candidate.predicate):
+            return False
         if candidate.type == "todo":
             return True
         if candidate.type == "constraint" and _norm(candidate.predicate) in {"requires", "required_feature"}:
@@ -701,10 +715,17 @@ class MemoryValidator:
             "global_fix",
             "auth_race_fix",
             "remembered",
+            "patched_issue",
+            "implemented",
+            "rebuilt_after",
+            "updated_from",
         }:
             return True
-        if candidate.type in {"entity_note", "relationship", "workflow_state"}:
+        if candidate.type in {"entity_note", "relationship"}:
             return True
+        if candidate.type == "workflow_state":
+            pred = _norm(candidate.predicate)
+            return pred in {_norm(item) for item in ADDITIVE_WORKFLOW_PREDICATES}
         return False
 
     @staticmethod

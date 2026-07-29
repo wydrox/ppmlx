@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-07-29
+
+### Added
+- Hybrid memory search ranking with lexical, semantic, dense/hash, type, recency, and namespace signals plus explicit  output.
+- Temporal single-value supersede policy for mutable state slots (, latest commits/status, preferences/decisions).
+- Memory maintenance APIs/CLI: , , , , , , , .
+- Deterministic offline hash embedding cache for candidate re-ranking without downloading an embedding model.
+- Durable  compaction from high-confidence active candidates, with handoff/context preference for atoms.
+
+### Changed
+- Workflow-state write path is no longer fully additive; only explicit history predicates remain append-only.
+- Noisy namespace detection now also covers smoke/e2e test namespaces.
+- Memory search supports , excludes noisy namespaces by default, and surfaces rank components in deep mode.
+
+### Fixed
+- CLI  /  no longer crash due to missing store methods.
+
 ## [0.5.7] - 2026-07-09
 
 ### Changed
