@@ -174,8 +174,8 @@ EVIDENCE
         if scope not in _ALLOWED_SCOPES:
             return None
 
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        metadata = dict(metadata)
+        raw_metadata = item.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
         metadata["extraction_model"] = self.model_name
 
         return ShadowMemoryCandidate(

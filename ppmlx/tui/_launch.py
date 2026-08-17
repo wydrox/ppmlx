@@ -125,7 +125,7 @@ def _show_action_menu(*, command_str: str = "ppmlx launch") -> str | None:
         always_hide_cursor=True,
     )
 
-    app = Application(
+    app: Application[str | None] = Application(
         layout=Layout(body),
         key_bindings=kb,
         style=get_style(),

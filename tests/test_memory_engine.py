@@ -1380,6 +1380,14 @@ def test_memory_cli_doctor_and_temporal_conflicts(tmp_home):
         project_id="demo",
     )
     # Recreate conflict intentionally with two actives.
+    store.record_event({
+        "event_id": "evt-conflict-extra",
+        "endpoint": "/test",
+        "project_id": "demo",
+        "request": {},
+        "response_text": "",
+        "metadata": {},
+    })
     store.store_candidate(
         {
             "candidate_id": "mem-conflict-extra",

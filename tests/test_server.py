@@ -88,6 +88,29 @@ def test_health_returns_200(client):
     assert data["status"] == "ok"
 
 
+def test_responses_websocket_rejects_embedding_model(client, monkeypatch):
+    monkeypatch.setattr(
+        sys.modules["ppmlx.models"],
+        "is_embed_model",
+        MagicMock(return_value=True),
+    )
+
+    with client.websocket_connect("/v1/responses") as websocket:
+        websocket.send_json({
+            "type": "response.create",
+            "response": {"model": "embed-model", "input": "Hello"},
+        })
+        event = websocket.receive_json()
+
+    assert event == {
+        "type": "error",
+        "error": {
+            "type": "invalid_request",
+            "message": "Embedding models are not supported by /v1/responses",
+        },
+    }
+
+
 def test_health_has_required_fields(client):
     response = client.get("/health")
     assert response.status_code == 200
@@ -476,6 +499,128 @@ def test_responses_with_tool_calls(client):
     assert '"cmd"' in fc_items[0]["arguments"]
 
 
+def _configure_vision_engine(monkeypatch, text="A cat sits on a chair."):
+    vision_engine = MagicMock()
+    vision_engine.generate.return_value = (text, 11, 6)
+    vision_engine.get_tokenizer.return_value = SimpleNamespace(has_tool_calling=False)
+    monkeypatch.setattr(
+        sys.modules["ppmlx.models"],
+        "is_vision_model",
+        MagicMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        sys.modules["ppmlx.engine_vlm"],
+        "get_vision_engine",
+        MagicMock(return_value=vision_engine),
+    )
+    return vision_engine
+
+
+def _chat_image_messages():
+    return [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "What is in this image?"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "https://example.com/cat.jpg"},
+            },
+        ],
+    }]
+
+
+def _responses_image_input():
+    return [{
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "What is in this image?"},
+            {
+                "type": "input_image",
+                "image_url": "https://example.com/cat.jpg",
+            },
+        ],
+    }]
+
+
+def test_responses_input_preserves_images():
+    from ppmlx.server import _responses_input_to_messages
+
+    messages = _responses_input_to_messages(_responses_image_input())
+
+    assert messages == _chat_image_messages()
+
+
+def test_chat_completion_nonstreaming_uses_vision_engine(client, monkeypatch):
+    vision_engine = _configure_vision_engine(monkeypatch)
+
+    response = client.post("/v1/chat/completions", json={
+        "model": "test-vision-model",
+        "messages": _chat_image_messages(),
+        "stream": False,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "A cat sits on a chair."
+    vision_engine.get_tokenizer.assert_called_once_with("test-vision-model")
+    vision_engine.generate.assert_called_once()
+
+
+def test_chat_completion_streaming_uses_vision_engine(client, monkeypatch):
+    vision_engine = _configure_vision_engine(monkeypatch)
+
+    response = client.post("/v1/chat/completions", json={
+        "model": "test-vision-model",
+        "messages": _chat_image_messages(),
+        "stream": True,
+    })
+
+    assert response.status_code == 200
+    chunks = _parse_sse_chunks(response.text)
+    content = "".join(
+        chunk["choices"][0].get("delta", {}).get("content", "")
+        for chunk in chunks if "choices" in chunk
+    )
+    assert content == "A cat sits on a chair."
+    vision_engine.get_tokenizer.assert_called_once_with("test-vision-model")
+
+
+def test_responses_nonstreaming_uses_vision_engine(client, monkeypatch):
+    vision_engine = _configure_vision_engine(monkeypatch)
+
+    response = client.post("/v1/responses", json={
+        "model": "test-vision-model",
+        "input": _responses_image_input(),
+        "stream": False,
+    })
+
+    assert response.status_code == 200
+    output = response.json()["output"]
+    assert output[0]["content"][0]["text"] == "A cat sits on a chair."
+    vision_engine.get_tokenizer.assert_called_once_with("test-vision-model")
+
+
+def test_responses_streaming_emits_one_ordered_vision_delta(client, monkeypatch):
+    _configure_vision_engine(monkeypatch)
+
+    response = client.post("/v1/responses", json={
+        "model": "test-vision-model",
+        "input": _responses_image_input(),
+        "stream": True,
+    })
+
+    assert response.status_code == 200
+    events = _parse_sse_chunks(response.text)
+    event_types = [event["type"] for event in events]
+    deltas = [
+        event["delta"] for event in events
+        if event["type"] == "response.output_text.delta"
+    ]
+    assert deltas == ["A cat sits on a chair."]
+    assert event_types.index("response.output_item.added") < event_types.index(
+        "response.output_text.delta"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Thinking model support (non-streaming)
 # ---------------------------------------------------------------------------
@@ -758,6 +903,33 @@ def test_anthropic_stream_with_tools_disables_thinking(client):
     assert response.status_code == 200
     assert '"type": "text_delta"' in response.text
     assert mock_engine.stream_generate.call_args.kwargs["enable_thinking"] is False
+
+
+def test_anthropic_stream_logs_request(client, monkeypatch):
+    from ppmlx import server as server_module
+
+    captured = []
+
+    def fake_log_request(request, **kwargs):
+        captured.append((request, kwargs))
+
+    mock_engine.stream_generate = MagicMock(return_value=iter(["Hello"]))
+    mock_engine.get_tokenizer.return_value = mock_tokenizer
+    sys.modules["ppmlx.engine"].get_engine = MagicMock(return_value=mock_engine)
+    monkeypatch.setattr(server_module, "_log_request", fake_log_request)
+
+    response = client.post("/v1/messages", json={
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "Hi"}],
+    })
+
+    assert response.status_code == 200
+    assert captured
+    request, fields = captured[-1]
+    assert request is None
+    assert fields["endpoint"] == "/v1/messages"
+    assert fields["stream"] is True
 
 
 @pytest.mark.asyncio

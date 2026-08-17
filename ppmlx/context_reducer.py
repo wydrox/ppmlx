@@ -277,7 +277,14 @@ class ContextReducer:
         fetch_limit = max(self.budget.max_context_items * 4, self.budget.max_context_items + 20)
         workflow_intent = is_generic_workflow_action_query(intent_query)
         if query and not workflow_intent:
-            rows.extend(store.search(query, status="active", limit=fetch_limit, **scoped))
+            rows.extend(store.search(
+                query,
+                status="active",
+                limit=fetch_limit,
+                app_id=scoped["app_id"],
+                project_id=scoped["project_id"],
+                session_id=scoped["session_id"],
+            ))
             rows = _filter_relevant_context_rows(rows, intent_query)
         if len(rows) < fetch_limit:
             fallback = store.query_candidates(
@@ -291,7 +298,11 @@ class ContextReducer:
 
         # Prefer durable compacted atoms when available.
         try:
-            atoms = store.query_atoms(active_only=True, limit=max(20, self.budget.max_context_items))
+            atoms = store.query_atoms(
+                active_only=True,
+                limit=max(20, self.budget.max_context_items),
+                **scoped,
+            )
             atom_rows = []
             for atom in atoms:
                 atom_rows.append({
@@ -305,7 +316,9 @@ class ContextReducer:
                     "confidence": atom.get("confidence") or 0.0,
                     "salience": 1.05,
                     "status": "active",
+                    "app_id": (atom.get("metadata") or {}).get("app_id") if isinstance(atom.get("metadata"), dict) else None,
                     "project_id": (atom.get("metadata") or {}).get("project_id") if isinstance(atom.get("metadata"), dict) else None,
+                    "session_id": (atom.get("metadata") or {}).get("session_id") if isinstance(atom.get("metadata"), dict) else None,
                     "source": "atom",
                 })
             if query and not workflow_intent:
@@ -369,7 +382,14 @@ def build_handoff_context(
     rows: list[dict[str, Any]] = []
     fetch_limit = max(max_items * 4, max_items + 20)
     if query:
-        rows.extend(memory_store.search(query, status="active", limit=fetch_limit, **scoped))
+        rows.extend(memory_store.search(
+            query,
+            status="active",
+            limit=fetch_limit,
+            app_id=app_id,
+            project_id=project_id,
+            session_id=session_id,
+        ))
     if len(rows) < fetch_limit:
         rows.extend(memory_store.query_candidates(status="active", limit=fetch_limit, **scoped))
     items = _curate_context_rows(
@@ -672,14 +692,15 @@ def _split_oversized_message_tail(message: dict[str, Any], token_budget: int) ->
     tail = content[split_at:].lstrip()
     hot = dict(message)
     hot["content"] = tail
+    message_metadata = message.get("metadata")
     hot["metadata"] = {
-        **(message.get("metadata") if isinstance(message.get("metadata"), dict) else {}),
+        **(message_metadata if isinstance(message_metadata, dict) else {}),
         "context_tail_trim": {"part": "tail", "omitted_chars": len(head)},
     }
     cold = dict(message)
     cold["content"] = head
     cold["metadata"] = {
-        **(message.get("metadata") if isinstance(message.get("metadata"), dict) else {}),
+        **(message_metadata if isinstance(message_metadata, dict) else {}),
         "context_tail_trim": {"part": "head", "kept_tail_chars": len(tail)},
     }
     return hot, cold if head else None

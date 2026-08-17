@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Literal, Optional, cast
 
 import typer
 from rich.console import Console
@@ -911,7 +911,7 @@ def serve(
     from ppmlx.config import load_config
     from ppmlx import __version__
 
-    overrides = {}
+    overrides: dict[str, object] = {}
     if host: overrides["host"] = host
     if port: overrides["port"] = port
     if no_cors: overrides["cors"] = False
@@ -996,7 +996,7 @@ def run(
     """Start an interactive chat REPL with a model."""
     _track_usage("repl_started", {"interactive_model_pick": model is None})
     if not model:
-        model = _pick_model()
+        model = cast(str, _pick_model())
     _set_process_title(f"ppmlx run {model}")
     from ppmlx.models import get_model_path, download_model, resolve_alias, ModelNotFoundError
     from ppmlx.engine import get_engine
@@ -1025,7 +1025,7 @@ def run(
         console.print(f"[yellow]{warning}[/yellow]")
 
     engine = get_engine()
-    messages = []
+    messages: list[dict[str, Any]] = []
     if system:
         messages.append({"role": "system", "content": system})
 
@@ -1361,7 +1361,7 @@ def run(
 
             # Build user content: structured if images present, plain string otherwise
             if image_paths:
-                user_content: object = [{"type": "text", "text": text_input}] + [
+                user_content: str | list[dict[str, Any]] = [{"type": "text", "text": text_input}] + [
                     {"type": "image_url", "image_url": {"url": p}} for p in image_paths
                 ]
             else:
@@ -1410,7 +1410,7 @@ def run(
                 elif verbose:
                     import time as _time
                     t0 = _time.monotonic()
-                    text, reasoning, prompt_toks, completion_toks = engine.generate(
+                    text, reasoning, prompt_toks, completion_toks, _ = engine.generate(
                         repo_id, send_msgs,
                         temperature=temperature or 0.7,
                         max_tokens=max_tokens or 2048,
@@ -1521,7 +1521,10 @@ def _do_pull(
         console.print(
             f"[blue]Quantizing [bold]{model}[/bold] to {bits}-bit...[/blue]"
         )
-        cfg = QuantizeConfig(bits=bits, hf_token=token)
+        cfg = QuantizeConfig(
+            bits=cast(Literal[2, 3, 4, 6, 8], bits),
+            hf_token=token,
+        )
         try:
             quantized_path = run_quantize(
                 model,
@@ -1703,16 +1706,20 @@ def quantize(
     token: Optional[str] = typer.Option(None, "--token", help="HuggingFace token"),
 ):
     """Convert and quantize a HuggingFace model to MLX format."""
+    if bits not in _VALID_QUANTIZE_BITS:
+        console.print(f"[red]Invalid --bits value: {bits}. Must be one of {sorted(_VALID_QUANTIZE_BITS)}.[/red]")
+        raise typer.Exit(1)
+
     _track_usage(
         "quantize_started",
         {"bits": bits, "group_size": group_size, "upload": bool(upload)},
     )
     if not model:
-        model = _pick_model()
+        model = cast(str, _pick_model())
     from ppmlx.quantize import quantize as do_quantize, QuantizeConfig
 
     cfg = QuantizeConfig(
-        bits=bits,
+        bits=cast(Literal[2, 3, 4, 6, 8], bits),
         group_size=group_size,
         output_path=Path(output) if output else None,
         upload_repo=upload,
@@ -1720,7 +1727,7 @@ def quantize(
     )
 
     try:
-        path = do_quantize(model, cfg, progress_callback=lambda msg: console.print(f"[blue]{msg}[/blue]"))
+        path = do_quantize(cast(str, model), cfg, progress_callback=lambda msg: console.print(f"[blue]{msg}[/blue]"))
         console.print(f"[green]Quantized model saved to: {path}[/green]")
     except Exception as e:
         console.print(f"[red]Quantization failed: {e}[/red]")
@@ -2743,7 +2750,7 @@ def memory_add_cmd(
     from ppmlx.memory_store import get_memory_store
     from ppmlx.memory_engine import ShadowMemoryCandidate
 
-    defaults = {"type": type_, "scope": scope, "confidence": confidence, "salience": 0.85, "valid_from": valid_from, "valid_to": valid_to}
+    defaults: dict[str, Any] = {"type": type_, "scope": scope, "confidence": confidence, "salience": 0.85, "valid_from": valid_from, "valid_to": valid_to}
     if input_data:
         path = Path(input_data).expanduser()
         raw = path.read_text() if path.is_file() else input_data
@@ -2753,7 +2760,7 @@ def memory_add_cmd(
         if stdin_raw.strip():
             triples = _memory_parse_input(stdin_raw, defaults=defaults)
         else:
-            triple = {
+            triple: dict[str, Any] = {
                 "type": type_, "subject": subject, "predicate": predicate, "object": object_, "text": text,
                 "scope": scope, "confidence": confidence, "salience": 0.85, "source_quote": text,
                 "valid_from": valid_from, "valid_to": valid_to,
@@ -2776,7 +2783,7 @@ def memory_add_cmd(
         "response_text": "",
         "metadata": {"source": "cli-add", "input": "batch" if len(triples) > 1 else "single"},
     }
-    items = []
+    items: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for triple in triples:
         c = ShadowMemoryCandidate(
             type=triple["type"], subject=triple["subject"], predicate=triple["predicate"], object=triple["object"],

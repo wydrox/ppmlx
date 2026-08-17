@@ -13,32 +13,76 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Get version from pyproject.toml
         id: version
         run: |
-          VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import tomllib
+
+          with Path("pyproject.toml").open("rb") as source:
+              version = tomllib.load(source)["project"]["version"]
+          if re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}(?:[a-zA-Z0-9.]+)?", version) is None:
+              raise SystemExit(f"The release version is invalid: {version!r}.")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+          PY
 
       - name: Get sdist URL and SHA256 from PyPI
         id: sha
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          JSON=$(curl -sSf "https://pypi.org/pypi/ppmlx/${VERSION}/json")
-          URL=$(echo "$JSON" | python3 -c "import sys,json; [print(u['url']) for u in json.load(sys.stdin)['urls'] if u['filename'].endswith('.tar.gz')]")
-          SHA=$(echo "$JSON" | python3 -c "import sys,json; [print(u['digests']['sha256']) for u in json.load(sys.stdin)['urls'] if u['filename'].endswith('.tar.gz')]")
-          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          from urllib.parse import quote, urlparse
+          from urllib.request import urlopen
+
+          version = os.environ["RELEASE_VERSION"]
+          api_url = f"https://pypi.org/pypi/ppmlx/{quote(version)}/json"
+          with urlopen(api_url, timeout=30) as response:
+              release = json.load(response)
+          files = [item for item in release["urls"] if item["filename"].endswith(".tar.gz")]
+          if len(files) != 1:
+              raise SystemExit(f"PyPI must contain one source archive, found {len(files)}.")
+          file = files[0]
+          url = file["url"]
+          digest = file["digests"]["sha256"]
+          parsed = urlparse(url)
+          if parsed.scheme != "https" or parsed.hostname != "files.pythonhosted.org":
+              raise SystemExit(f"PyPI returned an unapproved source archive URL: {url!r}.")
+          if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+              raise SystemExit("PyPI returned an invalid SHA-256 digest.")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"sha256={digest}\n")
+              output.write(f"url={url}\n")
+          PY
 
       - name: Update formula and open PR on tap repo
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_SHA256: ${{ steps.sha.outputs.sha256 }}
+          RELEASE_URL: ${{ steps.sha.outputs.url }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION=${{ steps.version.outputs.version }}
-          SHA=${{ steps.sha.outputs.sha256 }}
-          URL=${{ steps.sha.outputs.url }}
+          set -euo pipefail
+          VERSION="$RELEASE_VERSION"
+          SHA="$RELEASE_SHA256"
+          URL="$RELEASE_URL"
           TAP_REPO="the-focus-company/homebrew-ppmlx"
+
+          [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){2}([a-zA-Z0-9.]+)?$ ]]
+          [[ "$SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$URL" == https://files.pythonhosted.org/* ]]
 
           gh repo clone "$TAP_REPO" tap -- --depth 1
           cd tap

@@ -501,6 +501,17 @@ def test_pull_quantize_invalid_bits():
     assert "Invalid --bits" in result.output
 
 
+def test_quantize_command_rejects_invalid_bits():
+    """quantize --bits 5 fails before the quantization function runs."""
+    _setup_pull_quantize_mocks()
+
+    result = runner.invoke(app, ["quantize", "mistral", "--bits", "5"])
+
+    assert result.exit_code == 1
+    assert "Invalid --bits" in result.output
+    sys.modules["ppmlx.quantize"].quantize.assert_not_called()
+
+
 def test_pull_quantize_keep_original():
     """pull --quantize --keep-original does not remove the original download."""
     _setup_pull_quantize_mocks()

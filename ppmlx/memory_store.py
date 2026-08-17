@@ -11,6 +11,23 @@ from typing import Any
 
 
 ACTIVE_STATUSES = {"active"}
+REDACTION_MARKER = "[REDACTED]"
+_PERSISTED_SECRET_PATTERNS = (
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}\b"),
+    re.compile(r"\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"\b[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bhf_[A-Za-z0-9]{16,}\b"),
+    re.compile(r"\b(?:xox[baprs]-|glpat-)[A-Za-z0-9_-]{10,}\b", re.IGNORECASE),
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{10,}", re.IGNORECASE),
+)
+_PERSISTED_SECRET_FIELDS = re.compile(
+    r"^(?:.*[_-])?(?:api[_-]?key|authorization|password|secret|token|credential|private[_-]?key)$",
+    re.IGNORECASE,
+)
 MAX_GRAPH_ENTITY_LABEL_CHARS = 80
 MAX_GRAPH_ENTITY_LABEL_WORDS = 12
 _SAFE_ENTITY_PREFIXES = (
@@ -23,6 +40,71 @@ _SAFE_ENTITY_PREFIXES = (
     "module",
     "workspace",
 )
+
+
+def _redact_persisted_value(value: Any, *, field: str | None = None) -> Any:
+    """Return a copy that does not contain common secret values."""
+    if field and _PERSISTED_SECRET_FIELDS.fullmatch(field):
+        return REDACTION_MARKER if value not in (None, "") else value
+    if isinstance(value, str):
+        redacted = value
+        for pattern in _PERSISTED_SECRET_PATTERNS:
+            redacted = pattern.sub(REDACTION_MARKER, redacted)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_persisted_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_persisted_value(item) for item in value)
+    if isinstance(value, dict):
+        return {
+            key: _redact_persisted_value(item, field=str(key))
+            for key, item in value.items()
+        }
+    return value
+
+
+def contains_persisted_secret(text: str) -> bool:
+    """Return True when text contains a credential that must not be stored."""
+    return any(pattern.search(text) for pattern in _PERSISTED_SECRET_PATTERNS)
+
+
+def _namespace_fields(
+    scope: str,
+    *,
+    app_id: str | None,
+    project_id: str | None,
+    session_id: str | None,
+) -> tuple[tuple[str, str | None], ...]:
+    """Return the identifiers that define one memory namespace."""
+    if scope == "project":
+        return (("project_id", project_id),)
+    if scope == "app":
+        return (("app_id", app_id),)
+    if scope == "session":
+        return (
+            ("session_id", session_id),
+            ("project_id", project_id),
+            ("app_id", app_id),
+        )
+    return ()
+
+
+def _namespace_identity(
+    scope: str,
+    *,
+    app_id: str | None,
+    project_id: str | None,
+    session_id: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    values = dict(
+        _namespace_fields(
+            scope,
+            app_id=app_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+    )
+    return values.get("app_id"), values.get("project_id"), values.get("session_id")
 
 # Retrieval ranking: higher is better. workflow_state is intentionally low so
 # durable decisions/preferences win over transient task chatter.
@@ -60,8 +142,6 @@ SINGLE_VALUE_PREDICATES = {
     "use",
     "supports_engine",
     "configuration",
-    "prefers",
-    "prefer",
     "decided",
     "decided_as",
     "goal",
@@ -319,6 +399,7 @@ class MemoryStore:
 
     @staticmethod
     def _record_event_conn(conn: sqlite3.Connection, event: dict[str, Any]) -> None:
+        event = _redact_persisted_value(event)
         conn.execute(
             """INSERT OR REPLACE INTO memory_events (
                 event_id, endpoint, app_id, project_id, session_id,
@@ -352,6 +433,8 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """Create or replace a queued asynchronous memory extraction job."""
         self.init()
+        payload = _redact_persisted_value(payload)
+        metadata = _redact_persisted_value(metadata or {})
         resolved_job_id = job_id or self._job_id(source_event_id, payload)
         with self._lock, self._connect() as conn:
             conn.execute(
@@ -377,7 +460,7 @@ class MemoryStore:
                     None,
                     None,
                     expired_at,
-                    json.dumps(metadata or {}, ensure_ascii=False),
+                    json.dumps(metadata, ensure_ascii=False),
                 ),
             )
             conn.commit()
@@ -495,6 +578,7 @@ class MemoryStore:
 
     def complete_extraction_job(self, job_id: str, *, result: dict[str, Any] | None = None) -> bool:
         self.init()
+        result = _redact_persisted_value(result or {})
         with self._lock, self._connect() as conn:
             cur = conn.execute(
                 """UPDATE memory_extraction_jobs
@@ -502,13 +586,14 @@ class MemoryStore:
                        completed_at = strftime('%Y-%m-%dT%H:%M:%f', 'now'),
                        invalid_at = COALESCE(invalid_at, strftime('%Y-%m-%dT%H:%M:%f', 'now'))
                    WHERE job_id = ?""",
-                (json.dumps(result or {}, ensure_ascii=False), job_id),
+                (json.dumps(result, ensure_ascii=False), job_id),
             )
             conn.commit()
         return cur.rowcount > 0
 
     def fail_extraction_job(self, job_id: str, error: str, *, retry: bool = False) -> bool:
         self.init()
+        error = str(_redact_persisted_value(error))
         status_expr = "CASE WHEN ? AND attempts < max_attempts THEN 'queued' ELSE 'failed' END"
         with self._lock, self._connect() as conn:
             cur = conn.execute(
@@ -524,10 +609,23 @@ class MemoryStore:
 
     def store_atom(self, atom: dict[str, Any]) -> dict[str, Any]:
         self.init()
-        atom_id = str(atom.get("atom_id") or self._atom_id(atom))
+        atom = _redact_persisted_value(atom)
         with self._lock, self._connect() as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN IMMEDIATE")
+            atom = dict(atom)
+            metadata = dict(atom.get("metadata") or {})
+            source_event_id = atom.get("source_event_id")
+            if source_event_id:
+                source_event = conn.execute(
+                    "SELECT app_id, project_id, session_id FROM memory_events WHERE event_id = ?",
+                    (source_event_id,),
+                ).fetchone()
+                if source_event is not None:
+                    for field in ("app_id", "project_id", "session_id"):
+                        metadata[field] = source_event[field]
+            atom["metadata"] = metadata
+            atom_id = str(atom.get("atom_id") or self._atom_id(atom))
             conn.execute(
                 """INSERT OR REPLACE INTO memory_atoms (
                     atom_id, source_event_id, source_job_id, type, subject, predicate, object,
@@ -547,7 +645,7 @@ class MemoryStore:
                     atom.get("valid_at"),
                     atom.get("invalid_at"),
                     atom.get("expired_at"),
-                    json.dumps(atom.get("metadata", {}), ensure_ascii=False),
+                    json.dumps(metadata, ensure_ascii=False),
                 ),
             )
             if self._atom_has_supersession_signal(atom):
@@ -572,6 +670,9 @@ class MemoryStore:
         subject: str | None = None,
         predicate: str | None = None,
         scope: str | None = None,
+        app_id: str | None = None,
+        project_id: str | None = None,
+        session_id: str | None = None,
         active_only: bool = True,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
@@ -585,6 +686,15 @@ class MemoryStore:
         if active_only:
             conditions.append("invalid_at IS NULL")
             conditions.append("(expired_at IS NULL OR expired_at > strftime('%Y-%m-%dT%H:%M:%f', 'now'))")
+        namespace_condition, namespace_params = self._atom_namespace_condition(
+            scope=scope,
+            app_id=app_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        if namespace_condition:
+            conditions.append(namespace_condition)
+            params.extend(namespace_params)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         params.append(limit)
         with self._connect() as conn:
@@ -611,7 +721,7 @@ class MemoryStore:
         """
         scope = str(atom.get("scope") or "global")
         rows = conn.execute(
-            """SELECT atom_id, subject, object FROM memory_atoms
+            """SELECT atom_id, subject, object, scope, metadata_json FROM memory_atoms
                WHERE type = ? AND predicate = ? AND scope = ?
                  AND atom_id != ? AND invalid_at IS NULL
                  AND (expired_at IS NULL OR expired_at > strftime('%Y-%m-%dT%H:%M:%f', 'now'))""",
@@ -622,10 +732,20 @@ class MemoryStore:
 
         canonical_subject = _canonical_atom_subject(atom["subject"])
         object_norm = _norm(str(atom["object"]))
+        metadata_value = atom.get("metadata")
+        metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
+        namespace = _namespace_identity(
+            scope,
+            app_id=metadata.get("app_id"),
+            project_id=metadata.get("project_id"),
+            session_id=metadata.get("session_id"),
+        )
         superseded_ids = [
             row["atom_id"]
             for row in rows
-            if _canonical_atom_subject(row["subject"]) == canonical_subject and _norm(str(row["object"])) != object_norm
+            if _canonical_atom_subject(row["subject"]) == canonical_subject
+            and _norm(str(row["object"])) != object_norm
+            and self._atom_row_namespace(row) == namespace
         ]
         if not superseded_ids:
             return
@@ -787,6 +907,7 @@ class MemoryStore:
             conn.commit()
 
     def _store_candidate_conn(self, conn: sqlite3.Connection, candidate: dict[str, Any], validation: dict[str, Any]) -> None:
+        candidate = _redact_persisted_value(candidate)
         conn.execute(
             """INSERT OR REPLACE INTO memory_candidates (
                 candidate_id, event_id, type, subject, predicate, object, text, scope,
@@ -823,7 +944,7 @@ class MemoryStore:
         force: bool = False,
         dedup: bool = True,
     ) -> list[dict[str, Any]]:
-        """Store multiple candidates in one transaction, with optional global SPO dedup."""
+        """Store candidates in one transaction, with namespace-scoped SPO dedup."""
         self.init()
         results: list[dict[str, Any]] = []
         with self._lock, self._connect() as conn:
@@ -835,12 +956,46 @@ class MemoryStore:
                 superseded_ids: list[str] = []
                 now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now')").fetchone()[0]
                 if dedup and not force:
-                    # 1) Exact SPO dedup across scopes.
+                    event_namespace = event
+                    if event_namespace is None or event_namespace.get("event_id") != candidate.get("event_id"):
+                        event_row = conn.execute(
+                            "SELECT app_id, project_id, session_id FROM memory_events WHERE event_id = ?",
+                            (candidate.get("event_id"),),
+                        ).fetchone()
+                        event_namespace = dict(event_row) if event_row is not None else {}
+                    candidate_scope = str(candidate.get("scope") or "global")
+                    namespace_condition, namespace_params = self._exact_namespace_condition(
+                        scope=candidate_scope,
+                        app_id=event_namespace.get("app_id"),
+                        project_id=event_namespace.get("project_id"),
+                        session_id=event_namespace.get("session_id"),
+                    )
+
+                    # 1) Exact candidate dedup in one namespace.
+                    exact_conditions = [
+                        "c.type = ?",
+                        "c.subject = ?",
+                        "c.predicate = ?",
+                        "c.object = ?",
+                        "c.scope = ?",
+                        "c.status = 'active'",
+                    ]
+                    exact_params: list[Any] = [
+                        candidate.get("type"),
+                        candidate.get("subject"),
+                        candidate.get("predicate"),
+                        candidate.get("object"),
+                        candidate_scope,
+                    ]
+                    if namespace_condition:
+                        exact_conditions.append(namespace_condition)
+                        exact_params.extend(namespace_params)
                     existing_rows = conn.execute(
-                        """SELECT * FROM memory_candidates
-                           WHERE subject = ? AND predicate = ? AND object = ? AND status = 'active'
-                           ORDER BY created_at DESC""",
-                        (candidate["subject"], candidate["predicate"], candidate["object"]),
+                        f"""SELECT c.* FROM memory_candidates c
+                            LEFT JOIN memory_events e ON e.event_id = c.event_id
+                            WHERE {' AND '.join(exact_conditions)}
+                            ORDER BY c.created_at DESC""",
+                        exact_params,
                     ).fetchall()
                     if existing_rows:
                         superseded_ids = [row["candidate_id"] for row in existing_rows]
@@ -853,16 +1008,28 @@ class MemoryStore:
                         action = "updated"
                     # 2) Single-value temporal slot collapse (different object).
                     elif _is_single_value_predicate(str(candidate.get("type") or ""), str(candidate.get("predicate") or "")):
+                        slot_conditions = [
+                            "c.type = ?",
+                            "c.subject = ?",
+                            "c.predicate = ?",
+                            "c.scope = ?",
+                            "c.status = 'active'",
+                        ]
+                        slot_params: list[Any] = [
+                            candidate.get("type"),
+                            candidate.get("subject"),
+                            candidate.get("predicate"),
+                            candidate_scope,
+                        ]
+                        if namespace_condition:
+                            slot_conditions.append(namespace_condition)
+                            slot_params.extend(namespace_params)
                         slot_rows = conn.execute(
-                            """SELECT * FROM memory_candidates
-                               WHERE type = ? AND subject = ? AND predicate = ? AND scope = ? AND status = 'active'
-                               ORDER BY created_at DESC""",
-                            (
-                                candidate.get("type"),
-                                candidate.get("subject"),
-                                candidate.get("predicate"),
-                                candidate.get("scope"),
-                            ),
+                            f"""SELECT c.* FROM memory_candidates c
+                                LEFT JOIN memory_events e ON e.event_id = c.event_id
+                                WHERE {' AND '.join(slot_conditions)}
+                                ORDER BY c.created_at DESC""",
+                            slot_params,
                         ).fetchall()
                         if slot_rows:
                             superseded_ids = [row["candidate_id"] for row in slot_rows]
@@ -964,6 +1131,7 @@ class MemoryStore:
             conn.commit()
 
     def _upsert_memory_edge_conn(self, conn: sqlite3.Connection, candidate: dict[str, Any]) -> None:
+        candidate = _redact_persisted_value(candidate)
         edge_id = self._edge_id(candidate["candidate_id"], candidate["predicate"])
         namespace = self._candidate_namespace_conn(conn, candidate)
         subject_projection = self._resolve_graph_entity_conn(
@@ -1374,15 +1542,61 @@ class MemoryStore:
             ).fetchall()
         return [self._row_to_candidate(row) for row in rows]
 
-    def find_active_slot(self, *, type: str, subject: str, predicate: str, scope: str) -> list[dict[str, Any]]:
+    def find_active_slot(
+        self,
+        *,
+        type: str,
+        subject: str,
+        predicate: str,
+        scope: str,
+        app_id: str | None = None,
+        project_id: str | None = None,
+        session_id: str | None = None,
+        exact_namespace: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Find active values in one slot, with optional exact namespace matching.
+
+        The default keeps the old unfiltered result for callers that omit a namespace.
+        The validator uses exact matching so a missing identifier only matches an empty namespace.
+        An exact session identity includes the session, project, and app identifiers.
+        """
         self.init()
+        conditions = [
+            "c.type = ?",
+            "c.subject = ?",
+            "c.predicate = ?",
+            "c.scope = ?",
+            "c.status = 'active'",
+        ]
+        params: list[Any] = [type, subject, predicate, scope]
+        namespace_fields: tuple[tuple[str, str | None], ...] = ()
+        if scope == "project":
+            namespace_fields = (("project_id", project_id),)
+        elif scope == "session":
+            namespace_fields = (("session_id", session_id),)
+            if exact_namespace:
+                namespace_fields += (("project_id", project_id), ("app_id", app_id))
+        elif scope == "app":
+            namespace_fields = (("app_id", app_id),)
+
+        for namespace_column, namespace_value in namespace_fields:
+            if not exact_namespace and namespace_value is None:
+                continue
+            if namespace_value is None:
+                conditions.append(f"e.{namespace_column} IS NULL")
+            else:
+                conditions.append(f"e.{namespace_column} = ?")
+                params.append(namespace_value)
+
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                """SELECT * FROM memory_candidates
-                   WHERE type = ? AND subject = ? AND predicate = ? AND scope = ? AND status = 'active'
-                   ORDER BY created_at DESC""",
-                (type, subject, predicate, scope),
+                f"""SELECT c.*, e.app_id, e.project_id, e.session_id
+                    FROM memory_candidates c
+                    LEFT JOIN memory_events e ON e.event_id = c.event_id
+                    WHERE {' AND '.join(conditions)}
+                    ORDER BY c.created_at DESC""",
+                params,
             ).fetchall()
         return [self._row_to_candidate(row) for row in rows]
 
@@ -1490,7 +1704,14 @@ class MemoryStore:
         if not subject_n or not predicate_n or not object_n or not text_n:
             raise ValueError("set_fact requires subject, predicate, object, and text")
 
-        event_id = f"set-fact-{sha1(f'{type_n}:{subject_n}:{predicate_n}:{scope_n}:{object_n}'.encode()).hexdigest()[:12]}"
+        namespace_identity = _namespace_identity(
+            scope_n,
+            app_id=app_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        namespace_key = json.dumps(namespace_identity, ensure_ascii=False, separators=(",", ":"))
+        event_id = f"set-fact-{sha1(f'{type_n}:{subject_n}:{predicate_n}:{scope_n}:{namespace_key}:{object_n}'.encode()).hexdigest()[:12]}"
         candidate_id = f"mem_{sha1(f'{event_id}:{type_n}:{_norm(subject_n)}:{_norm(predicate_n)}:{_norm(object_n)}:{scope_n}'.encode()).hexdigest()[:16]}"
         event = {
             "event_id": event_id,
@@ -1524,11 +1745,29 @@ class MemoryStore:
             self._record_event_conn(conn, event)
             now = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now')").fetchone()[0]
             valid_from_n = valid_from or now
+            active_conditions = [
+                "c.type = ?",
+                "c.subject = ?",
+                "c.predicate = ?",
+                "c.scope = ?",
+                "c.status = 'active'",
+            ]
+            active_params: list[Any] = [type_n, subject_n, predicate_n, scope_n]
+            namespace_condition, namespace_params = self._exact_namespace_condition(
+                scope=scope_n,
+                app_id=app_id,
+                project_id=project_id,
+                session_id=session_id,
+            )
+            if namespace_condition:
+                active_conditions.append(namespace_condition)
+                active_params.extend(namespace_params)
             active_rows = conn.execute(
-                """SELECT * FROM memory_candidates
-                   WHERE type = ? AND subject = ? AND predicate = ? AND scope = ? AND status = 'active'
-                   ORDER BY created_at DESC, id DESC""",
-                (type_n, subject_n, predicate_n, scope_n),
+                f"""SELECT c.* FROM memory_candidates c
+                    LEFT JOIN memory_events e ON e.event_id = c.event_id
+                    WHERE {' AND '.join(active_conditions)}
+                    ORDER BY c.created_at DESC, c.id DESC""",
+                active_params,
             ).fetchall()
 
             same = [row for row in active_rows if _norm(row["object"]) == _norm(object_n)]
@@ -1624,41 +1863,48 @@ class MemoryStore:
         if type:
             conditions.append("type = ?")
             params.append(type)
-        params.append(max(1, int(limit)))
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            groups = conn.execute(
-                f"""SELECT subject, predicate, scope, type,
-                          COUNT(DISTINCT object) AS object_count,
-                          COUNT(*) AS count
-                   FROM memory_candidates
-                   WHERE {' AND '.join(conditions)}
-                   GROUP BY subject, predicate, scope, type
-                   HAVING COUNT(DISTINCT object) > 1
-                   ORDER BY object_count DESC, count DESC, subject ASC
-                   LIMIT ?""",
+            rows = conn.execute(
+                f"""SELECT c.*, e.app_id, e.project_id, e.session_id
+                    FROM memory_candidates c
+                    LEFT JOIN memory_events e ON e.event_id = c.event_id
+                    WHERE {' AND '.join(f'c.{condition}' for condition in conditions)}
+                    ORDER BY COALESCE(c.valid_from, c.created_at) DESC, c.created_at DESC, c.id DESC""",
                 params,
             ).fetchall()
-            out: list[dict[str, Any]] = []
-            for group in groups:
-                candidates = conn.execute(
-                    """SELECT candidate_id, object, confidence, salience, created_at, valid_from, valid_to, text
-                       FROM memory_candidates
-                       WHERE status = 'active' AND subject = ? AND predicate = ? AND scope = ? AND type = ?
-                       ORDER BY COALESCE(valid_from, created_at) DESC, created_at DESC, id DESC""",
-                    (group["subject"], group["predicate"], group["scope"], group["type"]),
-                ).fetchall()
-                out.append({
-                    "subject": group["subject"],
-                    "predicate": group["predicate"],
-                    "scope": group["scope"],
-                    "type": group["type"],
-                    "object_count": int(group["object_count"]),
-                    "count": int(group["count"]),
-                    "objects": [row["object"] for row in candidates],
-                    "candidates": [dict(row) for row in candidates],
-                })
-        return out
+
+        grouped: dict[tuple[Any, ...], list[sqlite3.Row]] = {}
+        for row in rows:
+            namespace = _namespace_identity(
+                str(row["scope"]),
+                app_id=row["app_id"],
+                project_id=row["project_id"],
+                session_id=row["session_id"],
+            )
+            key = (row["subject"], row["predicate"], row["scope"], row["type"], *namespace)
+            grouped.setdefault(key, []).append(row)
+
+        out: list[dict[str, Any]] = []
+        for key, candidates in grouped.items():
+            objects = list(dict.fromkeys(str(row["object"]) for row in candidates))
+            if len(objects) < 2:
+                continue
+            out.append({
+                "subject": key[0],
+                "predicate": key[1],
+                "scope": key[2],
+                "type": key[3],
+                "app_id": key[4],
+                "project_id": key[5],
+                "session_id": key[6],
+                "object_count": len(objects),
+                "count": len(candidates),
+                "objects": objects,
+                "candidates": [dict(row) for row in candidates],
+            })
+        out.sort(key=lambda group: (-group["object_count"], -group["count"], str(group["subject"])))
+        return out[:max(1, int(limit))]
 
     def migrate_temporal_conflicts(
         self,
@@ -1689,6 +1935,9 @@ class MemoryStore:
                 "predicate": group["predicate"],
                 "scope": group["scope"],
                 "type": group["type"],
+                "app_id": group.get("app_id"),
+                "project_id": group.get("project_id"),
+                "session_id": group.get("session_id"),
                 "keep": keep,
                 "supersede": drop,
             })
@@ -2740,6 +2989,104 @@ class MemoryStore:
         return [self._row_to_candidate(row) for row in rows]
 
     @staticmethod
+    def _atom_row_namespace(
+        row: sqlite3.Row,
+    ) -> tuple[str | None, str | None, str | None]:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            metadata = {}
+        return _namespace_identity(
+            str(row["scope"]),
+            app_id=metadata.get("app_id"),
+            project_id=metadata.get("project_id"),
+            session_id=metadata.get("session_id"),
+        )
+
+    @staticmethod
+    def _atom_namespace_condition(
+        *,
+        scope: str | None,
+        app_id: str | None,
+        project_id: str | None,
+        session_id: str | None,
+    ) -> tuple[str | None, list[Any]]:
+        def metadata_clause(field: str, value: str | None) -> tuple[str, list[Any]]:
+            expression = f"json_extract(metadata_json, '$.{field}')"
+            if value is None:
+                return f"{expression} IS NULL", []
+            return f"{expression} = ?", [value]
+
+        if scope == "global":
+            return None, []
+        if scope:
+            clauses: list[str] = []
+            scoped_params: list[Any] = []
+            for field, value in _namespace_fields(
+                scope,
+                app_id=app_id,
+                project_id=project_id,
+                session_id=session_id,
+            ):
+                if scope != "session" and value is None:
+                    continue
+                clause, values = metadata_clause(field, value)
+                clauses.append(clause)
+                scoped_params.extend(values)
+            return (" AND ".join(clauses) if clauses else None), scoped_params
+        if not (app_id or project_id or session_id):
+            return None, []
+
+        clauses = ["scope = 'global'"]
+        params = []
+        if project_id:
+            project_clause, project_params = metadata_clause("project_id", project_id)
+            clauses.append(f"(scope = 'project' AND {project_clause})")
+            params.extend(project_params)
+        if session_id:
+            session_clauses = ["scope = 'session'"]
+            session_params: list[Any] = []
+            for field, value in _namespace_fields(
+                "session",
+                app_id=app_id,
+                project_id=project_id,
+                session_id=session_id,
+            ):
+                clause, values = metadata_clause(field, value)
+                session_clauses.append(clause)
+                session_params.extend(values)
+            clauses.append("(" + " AND ".join(session_clauses) + ")")
+            params.extend(session_params)
+        if app_id:
+            app_clause, app_params = metadata_clause("app_id", app_id)
+            clauses.append(f"(scope = 'app' AND {app_clause})")
+            params.extend(app_params)
+        return "(" + " OR ".join(clauses) + ")", params
+
+    @staticmethod
+    def _exact_namespace_condition(
+        *,
+        scope: str,
+        app_id: str | None,
+        project_id: str | None,
+        session_id: str | None,
+    ) -> tuple[str | None, list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in _namespace_fields(
+            scope,
+            app_id=app_id,
+            project_id=project_id,
+            session_id=session_id,
+        ):
+            if value is None:
+                clauses.append(f"e.{column} IS NULL")
+            else:
+                clauses.append(f"e.{column} = ?")
+                params.append(value)
+        return (" AND ".join(clauses) if clauses else None), params
+
+    @staticmethod
     def _namespace_condition(
         *,
         scope: str | None,
@@ -2749,12 +3096,26 @@ class MemoryStore:
     ) -> tuple[str | None, list[Any]]:
         if scope == "global":
             return None, []
-        if scope == "project" and project_id:
-            return "e.project_id = ?", [project_id]
-        if scope == "session" and session_id:
-            return "e.session_id = ?", [session_id]
+        if scope == "session":
+            return MemoryStore._exact_namespace_condition(
+                scope=scope,
+                app_id=app_id,
+                project_id=project_id,
+                session_id=session_id,
+            )
         if scope:
-            return None, []
+            clauses: list[str] = []
+            scoped_params: list[Any] = []
+            for column, value in _namespace_fields(
+                scope,
+                app_id=app_id,
+                project_id=project_id,
+                session_id=session_id,
+            ):
+                if value is not None:
+                    clauses.append(f"e.{column} = ?")
+                    scoped_params.append(value)
+            return (" AND ".join(clauses) if clauses else None), scoped_params
         if not (app_id or project_id or session_id):
             return None, []
 
@@ -2764,8 +3125,21 @@ class MemoryStore:
             clauses.append("(c.scope = 'project' AND e.project_id = ?)")
             params.append(project_id)
         if session_id:
-            clauses.append("(c.scope = 'session' AND e.session_id = ?)")
-            params.append(session_id)
+            session_clauses = ["c.scope = 'session'"]
+            session_params: list[Any] = []
+            for column, value in _namespace_fields(
+                "session",
+                app_id=app_id,
+                project_id=project_id,
+                session_id=session_id,
+            ):
+                if value is None:
+                    session_clauses.append(f"e.{column} IS NULL")
+                else:
+                    session_clauses.append(f"e.{column} = ?")
+                    session_params.append(value)
+            clauses.append("(" + " AND ".join(session_clauses) + ")")
+            params.extend(session_params)
         if app_id:
             clauses.append("(c.scope = 'app' AND e.app_id = ?)")
             params.append(app_id)
@@ -2841,6 +3215,14 @@ class MemoryStore:
 
     @staticmethod
     def _atom_id(atom: dict[str, Any]) -> str:
+        metadata_value = atom.get("metadata")
+        metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
+        namespace = _namespace_identity(
+            str(atom.get("scope") or "global"),
+            app_id=metadata.get("app_id"),
+            project_id=metadata.get("project_id"),
+            session_id=metadata.get("session_id"),
+        )
         parts = (
             atom.get("source_event_id") or "",
             atom.get("source_job_id") or "",
@@ -2849,6 +3231,7 @@ class MemoryStore:
             atom.get("predicate") or "",
             atom.get("object") or "",
             atom.get("scope") or "global",
+            *namespace,
         )
         digest = sha1(":".join(_norm(str(part)) for part in parts).encode()).hexdigest()[:16]
         return f"atom_{digest}"
@@ -3013,9 +3396,8 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """Compact durable active candidates into memory_atoms summaries.
 
-        Groups by type+subject+predicate+scope and keeps the newest/highest
-        confidence value as an atom. Optional forget_sources archives the raw
-        candidates after successful atom writes.
+        Groups by slot and exact namespace. It keeps the newest high-confidence
+        value as an atom. Optional forget_sources archives older values in that group.
         """
         self.init()
         selected_types = types or ["decision", "preference", "constraint", "instruction", "fact"]
@@ -3026,13 +3408,20 @@ class MemoryStore:
             and float(row.get("confidence") or 0.0) >= float(min_confidence)
             and str(row.get("scope") or "") in {"global", "project"}
         ]
-        groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+        groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         for row in durable:
+            namespace = _namespace_identity(
+                str(row.get("scope") or "project"),
+                app_id=row.get("app_id"),
+                project_id=row.get("project_id"),
+                session_id=row.get("session_id"),
+            )
             key = (
                 str(row.get("type") or ""),
                 str(row.get("subject") or ""),
                 str(row.get("predicate") or ""),
                 str(row.get("scope") or "project"),
+                *namespace,
             )
             groups.setdefault(key, []).append(row)
 
@@ -3052,6 +3441,9 @@ class MemoryStore:
                 "subject": key[1],
                 "predicate": key[2],
                 "scope": key[3],
+                "app_id": key[4],
+                "project_id": key[5],
+                "session_id": key[6],
                 "object": keep.get("object"),
                 "text": keep.get("text"),
                 "confidence": keep.get("confidence"),
@@ -3090,7 +3482,9 @@ class MemoryStore:
                     "source": "compact_candidates_to_atoms",
                     "source_candidate_id": item.get("source_candidate_id"),
                     "source_candidate_ids": item.get("source_candidate_ids"),
-                    "project_id": project_id,
+                    "app_id": item.get("app_id"),
+                    "project_id": item.get("project_id"),
+                    "session_id": item.get("session_id"),
                     "supersedes_prior": True,
                 },
             }
@@ -3108,7 +3502,7 @@ class MemoryStore:
     def get_namespaces(self) -> dict[str, list[str]]:
         """Return distinct app_ids, project_ids, session_ids, and scopes in the memory database."""
         self.init()
-        res = {"app_ids": [], "project_ids": [], "session_ids": [], "scopes": []}
+        res: dict[str, list[str]] = {"app_ids": [], "project_ids": [], "session_ids": [], "scopes": []}
         with self._connect() as conn:
             # Get distinct app_ids
             rows = conn.execute("SELECT DISTINCT app_id FROM memory_events WHERE app_id IS NOT NULL AND app_id != ''").fetchall()
@@ -3347,7 +3741,7 @@ def _semantic_similarity(query: str, document: str) -> float:
         ("cpu", "governor"), ("governor", "powersave"), ("cart", "checkout"),
         ("rewrite", "refactor"), ("commit", "pushed"), ("convex", "backend"),
     }
-    bridge_hits = 0
+    bridge_hits = 0.0
     blob = f"{q} {d}"
     for a, b in bridges:
         if a in q_tokens and b in d_tokens:
@@ -3380,9 +3774,7 @@ def _is_single_value_predicate(type_: str, predicate: str) -> bool:
     if type_ == "workflow_state" and pred not in {_norm(item) for item in ADDITIVE_WORKFLOW_PREDICATES}:
         # Default workflow slots are single-value unless explicitly additive.
         return pred in {_norm(item) for item in ("current_task", "next_action", "blocker", "status", "core_status", "current_phase")}
-    if type_ in {"preference", "decision", "constraint"} and pred in {
-        "prefers", "prefer", "decided", "decided_as", "requires", "mode", "uses", "use"
-    }:
+    if type_ == "decision" and pred in {"decided", "decided_as", "mode", "uses", "use"}:
         return True
     return False
 

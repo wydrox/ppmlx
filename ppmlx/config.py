@@ -4,7 +4,7 @@ import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 DEFAULT_ANALYTICS_HOST = "https://eu.i.posthog.com"
 DEFAULT_ANALYTICS_PROJECT_API_KEY = "phc_rnwLcbdiern6SwykkoSt9BPLoB8zAjVsae3TmgrXw2kA"
@@ -299,7 +299,7 @@ def _apply_toml(cfg: Config, data: dict) -> None:
 
 
 def _apply_env(cfg: Config) -> None:
-    mapping = {
+    mapping: dict[str, tuple[str, str, Callable[[str], object]]] = {
         "PPMLX_HOST": ("server", "host", str),
         "PPMLX_PORT": ("server", "port", int),
         "PPMLX_CORS": ("server", "cors", _parse_bool),
@@ -409,7 +409,7 @@ def _ask_analytics_opt_in() -> bool:
                 questionary.Choice("Yes — help the tiny beta goblin learn 🐣", True),
                 questionary.Choice("No — not today", False),
             ],
-            default=False,
+            default=False,  # type: ignore[arg-type]  # Questionary matches Choice.value.
             use_indicator=True,
         ).ask()
         return bool(answer) if answer is not None else False

@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-08-18
+
+### Added
+- Python 3.11 and 3.12 quality gates with Ruff, strict Mypy, and clean package-install tests.
+- Exact TestPyPI and PyPI artifact verification, an Apple Silicon generation test, and verified GitHub Release creation.
+
+### Changed
+- Restrict the memory MCP dependency to the compatible MCP 1.x API.
+- Make memory writes, retrieval, conflict migration, and atom compaction use exact project, app, and session namespaces.
+
+### Fixed
+- Correct vision routing and tokenizer access across Chat Completions, Responses, and WebSocket APIs.
+- Preserve Responses API image input and fix Anthropic stream request logging.
+- Keep additive preferences, constraints, and todos active unless a correction names the prior value.
+
+### Security
+- Redact common provider credentials before events, jobs, candidates, graph data, atoms, and FTS data reach SQLite.
+- Prevent reused or incomplete session identifiers from retrieving memory from another project or app.
+
 ## [0.5.8] - 2026-07-29
 
 ### Added

@@ -9,10 +9,9 @@ guides the model to specific spans in the text rather than open-ended generation
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 import re
 
-from ppmlx.memory_engine import ShadowMemoryCandidate
 
 
 _EXTRACTION_MODEL = "gemma-4-e2b"
@@ -46,126 +45,126 @@ _EXTRACTION_TEMPLATES: dict[str, str] = {
 
 Text: {text}
 
-SUBJECT (the entity the fact is about): 
-PREDICATE (the property or relation): 
-OBJECT (the value or target): 
-SUMMARY (one sentence): 
-SCOPE (global, project, or session): 
-CONFIDENCE (0.0-1.0): 
-SALIENCE (0.0-1.0, how durable/important): 
-QUOTE (verbatim from text): 
+SUBJECT (the entity the fact is about):
+PREDICATE (the property or relation):
+OBJECT (the value or target):
+SUMMARY (one sentence):
+SCOPE (global, project, or session):
+CONFIDENCE (0.0-1.0):
+SALIENCE (0.0-1.0, how durable/important):
+QUOTE (verbatim from text):
 """,
 
     "preference": """Extract a preference from this text. A preference is what someone likes or wants.
 
 Text: {text}
 
-SUBJECT (who has the preference): 
-PREDICATE (use "prefers" unless there is a better verb): 
-OBJECT (what they prefer, be specific): 
-SUMMARY (one sentence): 
-SCOPE (usually "global" unless project-specific): 
-CONFIDENCE (0.0-1.0): 
-SALIENCE (0.0-1.0): 
-QUOTE (verbatim from text): 
+SUBJECT (who has the preference):
+PREDICATE (use "prefers" unless there is a better verb):
+OBJECT (what they prefer, be specific):
+SUMMARY (one sentence):
+SCOPE (usually "global" unless project-specific):
+CONFIDENCE (0.0-1.0):
+SALIENCE (0.0-1.0):
+QUOTE (verbatim from text):
 """,
 
     "decision": """Extract a decision from this text. A decision is a choice that was made.
 
 Text: {text}
 
-SUBJECT (who or what made the decision, e.g. a project name): 
-PREDICATE (use "decided" unless there is a better verb): 
-OBJECT (what was decided, be specific): 
-SUMMARY (one sentence): 
-SCOPE (project if project-specific, otherwise global): 
-CONFIDENCE (0.0-1.0): 
-SALIENCE (0.0-1.0): 
-QUOTE (verbatim from text): 
+SUBJECT (who or what made the decision, e.g. a project name):
+PREDICATE (use "decided" unless there is a better verb):
+OBJECT (what was decided, be specific):
+SUMMARY (one sentence):
+SCOPE (project if project-specific, otherwise global):
+CONFIDENCE (0.0-1.0):
+SALIENCE (0.0-1.0):
+QUOTE (verbatim from text):
 """,
 
     "todo": """Extract a todo item from this text. A todo is an action item or next step.
 
 Text: {text}
 
-SUBJECT (who or what needs to do it, e.g. a project or person): 
-PREDICATE (use "needs" unless there is a better verb): 
-OBJECT (what needs to be done, be specific): 
-SUMMARY (one sentence): 
-SCOPE (project if project-specific, otherwise global): 
-CONFIDENCE (0.0-1.0): 
-SALIENCE (0.0-1.0): 
-QUOTE (verbatim from text): 
+SUBJECT (who or what needs to do it, e.g. a project or person):
+PREDICATE (use "needs" unless there is a better verb):
+OBJECT (what needs to be done, be specific):
+SUMMARY (one sentence):
+SCOPE (project if project-specific, otherwise global):
+CONFIDENCE (0.0-1.0):
+SALIENCE (0.0-1.0):
+QUOTE (verbatim from text):
 """,
 
     "constraint": """Extract a constraint from this text. A constraint is a limitation or requirement.
 
 Text: {text}
 
-SUBJECT (what the constraint applies to): 
-PREDICATE (use "requires" or "budget" or "must" or "max" as appropriate): 
-OBJECT (the constraint value, be specific): 
-SUMMARY (one sentence): 
-SCOPE (usually project): 
-CONFIDENCE (0.0-1.0): 
-SALIENCE (0.0-1.0): 
-QUOTE (verbatim from text): 
+SUBJECT (what the constraint applies to):
+PREDICATE (use "requires" or "budget" or "must" or "max" as appropriate):
+OBJECT (the constraint value, be specific):
+SUMMARY (one sentence):
+SCOPE (usually project):
+CONFIDENCE (0.0-1.0):
+SALIENCE (0.0-1.0):
+QUOTE (verbatim from text):
 """,
 
     "instruction": """Extract an instruction from this text. An instruction tells how to behave.
 
 Text: {text}
 
-SUBJECT (who should follow the instruction): 
-PREDICATE (use "should" unless there is a better verb): 
-OBJECT (what the instruction says): 
-SUMMARY (one sentence): 
-SCOPE (session if temporary, global if permanent): 
-CONFIDENCE (0.0-1.0): 
-SALIENCE (0.0-1.0): 
-QUOTE (verbatim from text): 
+SUBJECT (who should follow the instruction):
+PREDICATE (use "should" unless there is a better verb):
+OBJECT (what the instruction says):
+SUMMARY (one sentence):
+SCOPE (session if temporary, global if permanent):
+CONFIDENCE (0.0-1.0):
+SALIENCE (0.0-1.0):
+QUOTE (verbatim from text):
 """,
 
     "relationship": """Extract a relationship from this text. A relationship connects two entities.
 
 Text: {text}
 
-SUBJECT (the first entity): 
-PREDICATE (the relationship, e.g. "depends_on", "uses", "contains"): 
-OBJECT (the second entity): 
-SUMMARY (one sentence): 
-SCOPE (project or global): 
-CONFIDENCE (0.0-1.0): 
-SALIENCE (0.0-1.0): 
-QUOTE (verbatim from text): 
+SUBJECT (the first entity):
+PREDICATE (the relationship, e.g. "depends_on", "uses", "contains"):
+OBJECT (the second entity):
+SUMMARY (one sentence):
+SCOPE (project or global):
+CONFIDENCE (0.0-1.0):
+SALIENCE (0.0-1.0):
+QUOTE (verbatim from text):
 """,
 
     "entity_note": """Extract a note about an entity from this text.
 
 Text: {text}
 
-SUBJECT (the entity, e.g. a project or system): 
-PREDICATE (what happened to the entity, e.g. "file_changed", "version", "status"): 
-OBJECT (the value or detail): 
-SUMMARY (one sentence): 
-SCOPE (project or session): 
-CONFIDENCE (0.0-1.0): 
-SALIENCE (0.0-1.0): 
-QUOTE (verbatim from text): 
+SUBJECT (the entity, e.g. a project or system):
+PREDICATE (what happened to the entity, e.g. "file_changed", "version", "status"):
+OBJECT (the value or detail):
+SUMMARY (one sentence):
+SCOPE (project or session):
+CONFIDENCE (0.0-1.0):
+SALIENCE (0.0-1.0):
+QUOTE (verbatim from text):
 """,
 
     "workflow_state": """Extract workflow state from this text. Workflow state tracks current progress.
 
 Text: {text}
 
-SUBJECT (the project or session): 
-PREDICATE (use "current_task", "next_action", "blocker", or "command_run"): 
-OBJECT (the specific task, action, or blocker): 
-SUMMARY (one sentence): 
-SCOPE (usually project): 
-CONFIDENCE (0.0-1.0): 
-SALIENCE (0.0-1.0): 
-QUOTE (verbatim from text): 
+SUBJECT (the project or session):
+PREDICATE (use "current_task", "next_action", "blocker", or "command_run"):
+OBJECT (the specific task, action, or blocker):
+SUMMARY (one sentence):
+SCOPE (usually project):
+CONFIDENCE (0.0-1.0):
+SALIENCE (0.0-1.0):
+QUOTE (verbatim from text):
 """,
 }
 
@@ -180,7 +179,7 @@ _FIELD_NAMES = [
 class SlotExtractor:
     """
     Extract structured candidates using type-specific prompts.
-    
+
     For each type in a classified segment, runs one small LLM call with a
     template designed for that specific type. The fill-in-the-blanks format
     is much easier for small models than open-ended generation.
@@ -205,11 +204,11 @@ class SlotExtractor:
     ) -> list[ExtractedCandidate]:
         """
         Extract candidates from a segment for the given types.
-        
+
         Args:
             segment_text: the text to extract from
             fact_types: list of type strings (e.g., ["decision", "todo"])
-        
+
         Returns:
             list of ExtractedCandidate (one per type that produced valid output)
         """
@@ -217,21 +216,21 @@ class SlotExtractor:
         for ftype in fact_types:
             if ftype == "none" or ftype not in _EXTRACTION_TEMPLATES:
                 continue
-            
+
             template = _EXTRACTION_TEMPLATES[ftype]
             prompt = template.replace("{text}", segment_text[:2000])
-            
+
             raw = self.generation_fn(
                 self.model_name,
                 [{"role": "user", "content": prompt}],
                 self.max_tokens,
                 self.temperature,
             )
-            
+
             candidate = _parse_slot_output(raw, ftype, segment_text)
             if candidate is not None:
                 candidates.append(candidate)
-        
+
         return candidates
 
 
@@ -242,7 +241,7 @@ def _parse_slot_output(
 ) -> ExtractedCandidate | None:
     """
     Parse the model's fill-in-the-blanks output.
-    
+
     The model responds with lines like:
         SUBJECT: ppmlx
         PREDICATE: uses
@@ -252,11 +251,11 @@ def _parse_slot_output(
         CONFIDENCE: 0.9
         SALIENCE: 0.85
         QUOTE: ppmlx uses MLX
-    
+
     We extract values with regex, apply validation, and return a candidate.
     """
     fields: dict[str, str] = {}
-    
+
     for field_name in _FIELD_NAMES:
         # Match "FIELD: value" or "FIELD value" — model might vary format
         m = re.search(
@@ -266,26 +265,26 @@ def _parse_slot_output(
         )
         if m:
             fields[field_name] = m.group(1).strip()
-    
+
     # Validate required fields
     subject = _clean(fields.get("subject", ""))
     predicate = _clean(fields.get("predicate", ""))
     object_ = _clean(fields.get("object", ""))
     summary = _clean(fields.get("summary", ""))
-    
+
     if not subject or not predicate or not object_:
         return None
-    
+
     # Scope validation
     scope = _clean(fields.get("scope", "global")).lower()
     if scope not in {"global", "project", "session"}:
         # Heuristic: if the segment mentions project-specific things, scope=project
         scope = "project" if any(w in source_text.lower() for w in ["ppmlx", "project", "repo", "codebase"]) else "global"
-    
+
     # Numeric fields
     confidence = _parse_float(fields.get("confidence", ""), 0.7)
     salience = _parse_float(fields.get("salience", ""), 0.8)
-    
+
     # Source quote validation
     quote = _clean(fields.get("quote", ""))
     if not quote or quote.lower() not in source_text.lower():
@@ -294,10 +293,10 @@ def _parse_slot_output(
         quote = _find_best_quote(source_text, subject, predicate, object_)
         if not quote:
             return None
-    
+
     # Build text from summary or construct from S-P-O
     text = summary if summary else f"{subject} {predicate} {object_}"
-    
+
     return ExtractedCandidate(
         type=fact_type,
         subject=subject,
@@ -325,15 +324,15 @@ def _find_best_quote(
     sentences = re.split(r"(?<=[.!?])\s+", source_text)
     best_score = 0.0
     best_sentence = ""
-    
+
     subj_terms = set(subject.lower().split())
     pred_terms = set(predicate.lower().split())
     obj_terms = set(object_.lower().split())
     all_terms = subj_terms | pred_terms | obj_terms
-    
+
     if not all_terms:
         return ""
-    
+
     for sent in sentences:
         sent_lower = sent.lower()
         sent_terms = set(re.findall(r"\b\w+\b", sent_lower))
@@ -342,7 +341,7 @@ def _find_best_quote(
         if score > best_score and len(sent) > 10:
             best_score = score
             best_sentence = sent.strip()
-    
+
     return best_sentence
 
 

@@ -11,20 +11,21 @@ to the next available stage or falls back to the v1 single-pass extraction.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable, cast
 import time
 import numpy as np
 
 from ppmlx.memory_store import MemoryStore, get_memory_store
 from ppmlx.memory_engine import (
     MemoryEngine, MemoryValidator, ShadowMemoryCandidate,
-    STATUS_ACTIVE, STATUS_QUARANTINED, STATUS_REJECTED,
+    STATUS_ACTIVE,
 )
 from ppmlx.dense_chunker import (
     DenseChunker, TextSegment, build_indicator_embeddings,
 )
 from ppmlx.contrastive_retriever import (
     ContrastiveRetriever, MemorySnapshot, RelevantSegment,
+    TextSegment as RetrieverTextSegment,
     build_contrastive_pipeline,
 )
 from ppmlx.slot_classifier import SlotClassifier, ClassifiedSegment
@@ -62,7 +63,7 @@ class ExtractionReport:
 class DecomposedMemoryEngine:
     """
     Memory extraction with task decomposition for small local models.
-    
+
     Usage:
         engine = DecomposedMemoryEngine(store, embedding_model="nomic-embed-text")
         report = engine.extract_from_session(messages, project_id="ppmlx", session_id="s1")
@@ -98,7 +99,7 @@ class DecomposedMemoryEngine:
         self._extractor: SlotExtractor | None = None
         self._consistency: SelfConsistencyExtractor | None = None
         self._validator: MemoryValidator | None = None
-        
+
         # Cached indicator embeddings
         self._indicator_embeddings: list[np.ndarray] | None = None
         self._snapshot: MemorySnapshot | None = None
@@ -201,6 +202,8 @@ class DecomposedMemoryEngine:
                     "messages": messages,
                     "response_text": "",
                 }
+                if self._validator is None:
+                    raise RuntimeError("Memory validator is not initialized")
                 validation = self._validator.validate(event, candidate)
                 self.store.store_candidate(candidate.to_record(), validation)
                 if validation.get("status") == STATUS_ACTIVE:
@@ -239,6 +242,8 @@ class DecomposedMemoryEngine:
             return segments
 
         embed_fn = self._make_embed_fn()
+        if self._dense_chunker is None or self._indicator_embeddings is None:
+            raise RuntimeError("Dense chunker is not initialized")
         segments = self._dense_chunker.chunk(
             messages,
             self._indicator_embeddings,
@@ -264,8 +269,12 @@ class DecomposedMemoryEngine:
             report.segments_relevant = len(relevant)
             return relevant
 
+        if self._retriever is None or self._snapshot is None:
+            raise RuntimeError("Contrastive retriever is not initialized")
         embed_fn = self._make_batch_embed_fn()
-        relevant = self._retriever.retrieve(segments, self._snapshot, embed_fn)
+        relevant = self._retriever.retrieve(
+            cast(list[RetrieverTextSegment], segments), self._snapshot, embed_fn,
+        )
         report.segments_relevant = len(relevant)
         return relevant
 
@@ -282,16 +291,22 @@ class DecomposedMemoryEngine:
                 raw_response="classification disabled",
             )
 
+        if self._classifier is None:
+            raise RuntimeError("Slot classifier is not initialized")
         return self._classifier.classify(seg.text)
 
     def _run_extract(
         self, classified: ClassifiedSegment, report: ExtractionReport
     ) -> list[ExtractedCandidate]:
+        if self._extractor is None:
+            raise RuntimeError("Slot extractor is not initialized")
         return self._extractor.extract(classified.text, classified.types)
 
     def _run_consistency(
         self, classified: ClassifiedSegment, report: ExtractionReport
     ) -> list[ConsensusCandidate]:
+        if self._consistency is None:
+            raise RuntimeError("Consistency extractor is not initialized")
         return self._consistency.extract(classified.text, classified.types)
 
     # ------------------------------------------------------------------

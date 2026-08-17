@@ -209,7 +209,7 @@ def pick_models(*, local_only: bool = False, available_limit: int | None = None)
         always_hide_cursor=True,
     )
 
-    app = Application(
+    app: Application[list[str]] = Application(
         layout=Layout(HSplit([header_window, list_window, footer_window])),
         key_bindings=kb,
         style=get_style(),
