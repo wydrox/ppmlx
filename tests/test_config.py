@@ -478,6 +478,25 @@ class TestGetPpLlmDir:
 
 
 class TestFirstRunAnalyticsOnboarding:
+    def test_analytics_selector_uses_boolean_default(self, monkeypatch):
+        import questionary
+        from ppmlx.config import _ask_analytics_opt_in
+
+        captured: dict[str, object] = {}
+
+        class FakeQuestion:
+            def ask(self):
+                return False
+
+        def fake_select(message, **kwargs):
+            captured.update(kwargs)
+            return FakeQuestion()
+
+        monkeypatch.setattr(questionary, "select", fake_select)
+
+        assert _ask_analytics_opt_in() is False
+        assert captured["default"] is False
+
     def test_save_analytics_preference_writes_default_sink(self, tmp_home, monkeypatch):
         from ppmlx.config import _save_analytics_preference
 

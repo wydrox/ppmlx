@@ -66,7 +66,7 @@ def _mock_generate_text(response: str):
 # ---------------------------------------------------------------------------
 
 class TestDenseChunker:
-    
+
     def test_trivial_empty(self):
         chunker = DenseChunker()
         indicators = build_indicator_embeddings(_mock_embed_batch)
@@ -147,7 +147,7 @@ class TestContrastiveRetriever:
         b = np.array([0.0, 1.0, 0.0], dtype=np.float32)
         idx.add(a, {"id": "a"})
         idx.add(b, {"id": "b"})
-        
+
         results = idx.search(np.array([1.0, 0.1, 0.0], dtype=np.float32), top_k=2)
         assert len(results) == 2
         assert results[0][1]["id"] == "a"
@@ -172,7 +172,7 @@ class TestContrastiveRetriever:
                 {"candidate_id": "old", "confidence": 0.9})
         retriever._candidate_index = idx
         snapshot = MemorySnapshot(candidates=[], candidate_embeddings={}, summary_text="")
-        
+
         # Novel: cosine ~0.25 → kept
         seg = CRTextSegment(text="new info", start_idx=0, end_idx=8, density_score=0.8)
         result = retriever._score_segment(
@@ -188,7 +188,7 @@ class TestContrastiveRetriever:
                 {"candidate_id": "old", "confidence": 0.9})
         retriever._candidate_index = idx
         snapshot = MemorySnapshot(candidates=[], candidate_embeddings={}, summary_text="")
-        
+
         # Very similar, high confidence existing → dropped
         seg = CRTextSegment(text="old info", start_idx=0, end_idx=8, density_score=0.5)
         result = retriever._score_segment(
@@ -203,7 +203,7 @@ class TestContrastiveRetriever:
                 {"candidate_id": "old", "confidence": 0.9})
         retriever._candidate_index = idx
         snapshot = MemorySnapshot(candidates=[], candidate_embeddings={}, summary_text="")
-        
+
         seg = CRTextSegment(
             text="actually this was wrong", start_idx=0, end_idx=22, density_score=0.8
         )
@@ -220,7 +220,7 @@ class TestContrastiveRetriever:
                 {"candidate_id": "weak", "confidence": 0.4})
         retriever._candidate_index = idx
         snapshot = MemorySnapshot(candidates=[], candidate_embeddings={}, summary_text="")
-        
+
         seg = CRTextSegment(
             text="ppmlx uses MLX for inference", start_idx=0, end_idx=28, density_score=0.9
         )
@@ -236,7 +236,7 @@ class TestContrastiveRetriever:
                 {"candidate_id": "old", "confidence": 0.9})
         retriever._candidate_index = idx
         snapshot = MemorySnapshot(candidates=[], candidate_embeddings={}, summary_text="")
-        
+
         # Orthogonal → below relevance floor → dropped
         seg = CRTextSegment(text="weather is nice", start_idx=0, end_idx=15, density_score=0.3)
         result = retriever._score_segment(
@@ -313,7 +313,7 @@ SCOPE: project
 CONFIDENCE: 0.9
 SALIENCE: 0.85
 QUOTE: ppmlx uses MLX for inference"""
-        
+
         result = _parse_slot_output(raw, "fact", "ppmlx uses MLX for inference. It runs locally.")
         assert result is not None
         assert result.subject == "ppmlx"
@@ -528,12 +528,12 @@ QUOTE: We decided to use SQLite"""
             messages=[{"role": "user", "content": "test"}],
             project_id="test", session_id="test",
         )
-        assert report.used_fallback == False
+        assert not report.used_fallback
 
     def test_memory_snapshot_loading(self, tmp_path):
         """Test that MemorySnapshot loads from store correctly."""
         from ppmlx.contrastive_retriever import MemorySnapshot, build_contrastive_pipeline
-        
+
         store = MemoryStore(tmp_path / "test.db")
         # Seed a candidate
         from ppmlx.memory_engine import ShadowMemoryCandidate

@@ -318,7 +318,7 @@ def config_menu() -> None:
         always_hide_cursor=True,
     )
 
-    app = Application(
+    app: Application[None] = Application(
         layout=Layout(body),
         key_bindings=kb,
         style=get_style(),

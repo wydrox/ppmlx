@@ -191,7 +191,7 @@ def _extract_updated_at(model: Any) -> str | None:
     updated = getattr(model, "last_modified", None) or getattr(model, "lastModified", None)
     if updated is None:
         updated = getattr(model, "created_at", None)
-    if hasattr(updated, "strftime"):
+    if updated is not None and hasattr(updated, "strftime"):
         return updated.strftime("%Y-%m-%d")
     if updated:
         return str(updated)[:10]

@@ -293,6 +293,40 @@ def test_context_reducer_respects_project_namespace(tmp_path: Path):
     assert "projector" not in context
 
 
+def test_context_reducer_respects_project_namespace_for_atoms(tmp_path: Path):
+    store = MemoryStore(tmp_path / "memory.db")
+    for project_id, object_ in (
+        ("project-a", "OLED display"),
+        ("project-b", "private projector"),
+    ):
+        store.store_atom({
+            "type": "decision",
+            "subject": "display choice",
+            "predicate": "decided",
+            "object": object_,
+            "text": f"The display choice is {object_}.",
+            "scope": "project",
+            "confidence": 0.95,
+            "metadata": {"project_id": project_id},
+        })
+
+    reducer = ContextReducer(
+        ContextBudget(mode="inject", session_context_tokens=500),
+        store=store,
+    )
+    result = reducer.reduce(
+        request_id="req-atom-ns",
+        model_alias="test",
+        model_repo="repo/test",
+        messages=[{"role": "user", "content": "What display choice did we make?"}],
+        memory_context={"project_id": "project-a"},
+    )
+
+    context = result.messages[0]["content"]
+    assert "OLED display" in context
+    assert "private projector" not in context
+
+
 def test_general_handoff_hides_noisy_eval_namespaces_by_default(tmp_path: Path):
     store = MemoryStore(tmp_path / "memory.db")
     _store_memory(

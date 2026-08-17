@@ -1,5 +1,13 @@
 """Single-select model picker using prompt_toolkit."""
 from __future__ import annotations
+from typing import TypedDict
+
+
+class _PickerState(TypedDict):
+    cursor: int
+    search: str
+    filter_col: str
+    sort_desc: bool
 
 
 def pick_model(
@@ -32,7 +40,12 @@ def pick_model(
         registry_status = "last refresh: unknown"
 
     # State
-    state = {"cursor": 0, "search": "", "filter_col": "alias", "sort_desc": False}
+    state: _PickerState = {
+        "cursor": 0,
+        "search": "",
+        "filter_col": "alias",
+        "sort_desc": False,
+    }
 
     def _selectable_indices(rows):
         return [i for i, r in enumerate(rows) if r.section_header is None]
@@ -196,7 +209,7 @@ def pick_model(
         always_hide_cursor=True,
     )
 
-    app = Application(
+    app: Application[str | None] = Application(
         layout=Layout(HSplit([header_window, list_window, footer_window])),
         key_bindings=kb,
         style=get_style(),

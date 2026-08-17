@@ -1,7 +1,7 @@
 from __future__ import annotations
 import math
 import threading
-from typing import Any
+from typing import Any, cast
 
 
 def _resolve_model_path(repo_id: str) -> str:
@@ -91,9 +91,9 @@ class EmbedEngine:
             # Assume outputs is directly the embedding tensor
             embeddings = outputs
 
-        result = []
+        result: list[list[float]] = []
         for i in range(len(texts)):
-            vec = embeddings[i].tolist()
+            vec: list[float] = cast(list[float], embeddings[i].tolist())
             if normalize:
                 vec = _l2_normalize(vec)
             result.append(vec)

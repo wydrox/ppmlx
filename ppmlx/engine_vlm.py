@@ -55,7 +55,7 @@ class VisionEngine:
         ``file://`` URLs and bare filesystem paths are rejected to prevent
         local file read attacks.  The CLI REPL sets ``allow_local_paths=True``.
         """
-        images = []
+        images: list[str | bytes] = []
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, list):
@@ -131,6 +131,12 @@ class VisionEngine:
         completion_tokens = len(str(output).split())
 
         return str(output), prompt_tokens, completion_tokens
+
+    def get_tokenizer(self, repo_id: str) -> Any:
+        """Return the tokenizer that belongs to a loaded vision processor."""
+        self.load(repo_id)
+        _, processor = self._models[repo_id]
+        return getattr(processor, "tokenizer", processor)
 
     def list_loaded(self) -> list[str]:
         return list(self._models.keys())

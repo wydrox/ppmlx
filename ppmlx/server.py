@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager
+from typing import Any
 
 log = logging.getLogger("ppmlx.server")
 log.setLevel(logging.INFO)
@@ -263,7 +264,8 @@ def _memory_compact_enabled() -> bool:
 
 def _memory_context_from_request(request: Request, body: dict, messages: list[dict]) -> dict:
     """Build memory namespace metadata from OpenAI metadata and headers."""
-    raw_meta = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    raw_metadata = body.get("metadata")
+    raw_meta: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     headers = request.headers
     return {
         "app_id": raw_meta.get("app_id") or raw_meta.get("app") or headers.get("x-ppmlx-app"),
@@ -281,6 +283,7 @@ def _memory_context_from_request(request: Request, body: dict, messages: list[di
 def _record_compact_observability(*, request_id: str, metadata: dict, memory_context: dict | None) -> None:
     """Record local compact metrics and emit privacy-safe PostHog analytics."""
     context = memory_context or {}
+    latency_ms = float(metadata.get("latency_ms") or 0.0)
     original_tokens = int(metadata.get("original_tokens") or 0)
     reduced_tokens = int(metadata.get("reduced_tokens") or 0)
     compression_ratio = (original_tokens / reduced_tokens) if reduced_tokens > 0 else 0.0
@@ -300,7 +303,7 @@ def _record_compact_observability(*, request_id: str, metadata: dict, memory_con
         "context_items": int(metadata.get("context_items") or 0),
         "compacted": bool(metadata.get("compacted")),
         "injected": bool(metadata.get("injected")),
-        "latency_ms": float(metadata.get("latency_ms") or 0.0),
+        "latency_ms": latency_ms,
     }
     try:
         from ppmlx.memory_store import get_memory_store
@@ -324,7 +327,7 @@ def _record_compact_observability(*, request_id: str, metadata: dict, memory_con
             "context_items": local_record["context_items"],
             "compacted": local_record["compacted"],
             "injected": local_record["injected"],
-            "latency_ms": round(float(local_record["latency_ms"]), 3),
+            "latency_ms": round(latency_ms, 3),
             "has_app_id": bool(context.get("app_id")),
             "has_project_id": bool(context.get("project_id")),
             "has_session_id": bool(context.get("session_id")),
@@ -385,24 +388,23 @@ def _schedule_memory_shadow_capture(
     if not _memory_shadow_enabled():
         return
     context = memory_context or {}
-    payload = {
-        "request_id": request_id,
-        "endpoint": endpoint,
-        "model_alias": model_alias,
-        "model_repo": model_repo,
-        "messages": [dict(msg) for msg in messages],
-        "response_text": response_text,
-        "app_id": context.get("app_id"),
-        "project_id": context.get("project_id"),
-        "session_id": context.get("session_id"),
-        "metadata": context.get("metadata") or {},
-    }
-
+    capture_messages = [dict(msg) for msg in messages]
     def _run_capture() -> None:
         try:
             from ppmlx.memory_engine import get_memory_engine
 
-            get_memory_engine().capture_chat(**payload)
+            get_memory_engine().capture_chat(
+                request_id=request_id,
+                endpoint=endpoint,
+                model_alias=model_alias,
+                model_repo=model_repo,
+                messages=capture_messages,
+                response_text=response_text,
+                app_id=context.get("app_id"),
+                project_id=context.get("project_id"),
+                session_id=context.get("session_id"),
+                metadata=context.get("metadata") or {},
+            )
         except Exception:
             log.debug("Memory shadow capture failed", exc_info=True)
 
@@ -596,7 +598,7 @@ def _parse_tool_calls(
 
 
 def _parse_tool_calls_mlx(
-    text: str, tokenizer: object, tools: list[dict] | None,
+    text: str, tokenizer: Any, tools: list[dict] | None,
 ) -> tuple[str, list[dict]]:
     """Parse tool calls using mlx_lm's model-specific parser."""
     start_tag = tokenizer.tool_call_start
@@ -1050,6 +1052,7 @@ def _stream_chat(
         full_text = ""
         thinking_duration_ms = None
         reasoning_chars_count = 0
+        tokenizer: object | None = None
 
         def _delta(key, text):
             """Build a delta dict, adding role on the first chunk."""
@@ -1063,6 +1066,7 @@ def _stream_chat(
             if engine_type == "text":
                 from ppmlx.engine import get_engine
                 engine = get_engine()
+                tokenizer = engine.get_tokenizer(repo_id)
 
                 # Determine whether to enable thinking
                 if think is not None:
@@ -1311,8 +1315,9 @@ def _stream_chat(
                         yield _make_chunk_sse(_delta("content", chunk))
             elif engine_type == "vision":
                 from ppmlx.engine_vlm import get_vision_engine
-                engine = get_vision_engine()
-                text, _, _ = engine.generate(repo_id, messages, max_tokens=max_tokens or 1024)
+                vision_engine = get_vision_engine()
+                tokenizer = vision_engine.get_tokenizer(repo_id)
+                text, _, _ = vision_engine.generate(repo_id, messages, max_tokens=max_tokens or 1024)
                 full_text = text
                 if first_token_ts is None:
                     first_token_ts = time.time()
@@ -1323,7 +1328,6 @@ def _stream_chat(
             yield f"data: {json.dumps(err)}\n\n"
 
         # Parse tool calls if tools were provided
-        tokenizer = engine.get_tokenizer(repo_id)
         _, tool_calls = _parse_tool_calls(full_text, tokenizer=tokenizer, tools=tools) if tools else ("", [])
 
         if tool_calls:
@@ -1409,10 +1413,13 @@ async def _nonstream_chat(
     else:
         enable_thinking = True
 
+    tokenizer: object | None = None
+
     try:
         if engine_type == "text":
             from ppmlx.engine import get_engine
             engine = get_engine()
+            tokenizer = engine.get_tokenizer(repo_id)
             gen_kwargs = dict(
                 temperature=0.7 if temperature is None else temperature,
                 top_p=1.0 if top_p is None else top_p,
@@ -1436,8 +1443,9 @@ async def _nonstream_chat(
                 )
         elif engine_type == "vision":
             from ppmlx.engine_vlm import get_vision_engine
-            engine = get_vision_engine()
-            text, prompt_tokens, completion_tokens = engine.generate(repo_id, messages)
+            vision_engine = get_vision_engine()
+            tokenizer = vision_engine.get_tokenizer(repo_id)
+            text, prompt_tokens, completion_tokens = vision_engine.generate(repo_id, messages)
             reasoning = None
         else:
             raise HTTPException(status_code=400, detail=f"Model '{model_name}' is an embedding model.")
@@ -1460,14 +1468,16 @@ async def _nonstream_chat(
     total_dur = (time.time() - start_ts) * 1000
 
     # Parse tool calls if tools were provided
-    tokenizer = engine.get_tokenizer(repo_id)
     remaining_text, tool_calls = _parse_tool_calls(text, tokenizer=tokenizer, tools=tools) if tools else (text, [])
 
     # Compute reasoning token count for usage details
-    try:
-        reasoning_tokens_count = len(tokenizer.encode(reasoning)) if reasoning else None
-    except Exception:
-        reasoning_tokens_count = None
+    reasoning_tokens_count = None
+    encode = getattr(tokenizer, "encode", None)
+    if reasoning and callable(encode):
+        try:
+            reasoning_tokens_count = len(encode(reasoning))
+        except Exception:
+            pass
 
     message: dict = {"role": "assistant", "content": remaining_text or None}
     if reasoning:
@@ -1665,13 +1675,32 @@ def _responses_input_to_messages(input_data) -> list[dict]:
                 content = item.get("content", "")
                 # Handle content array (e.g. [{type: "input_text", text: "..."}])
                 if isinstance(content, list):
-                    text_parts = []
+                    converted_parts: list[dict] = []
+                    has_image = False
                     for part in content:
                         if isinstance(part, dict):
                             t = part.get("text", "")
                             if t:
-                                text_parts.append(t)
-                    content = "\n".join(text_parts) if text_parts else ""
+                                converted_parts.append({"type": "text", "text": t})
+                            if part.get("type") in {"input_image", "image_url"}:
+                                raw_image_url = part.get("image_url", "")
+                                if isinstance(raw_image_url, dict):
+                                    image_url = raw_image_url.get("url", "")
+                                else:
+                                    image_url = raw_image_url
+                                if isinstance(image_url, str) and image_url:
+                                    converted_parts.append({
+                                        "type": "image_url",
+                                        "image_url": {"url": image_url},
+                                    })
+                                    has_image = True
+                    if has_image:
+                        content = converted_parts
+                    else:
+                        content = "\n".join(
+                            part["text"] for part in converted_parts
+                            if part.get("type") == "text"
+                        )
                 messages.append({"role": role, "content": content})
         return messages
     return [{"role": "user", "content": str(input_data)}]
@@ -1930,11 +1959,13 @@ def _stream_responses(
         # Track output index: reasoning (if any) is at 0, message at 0 or 1
         reasoning_idx: int | None = None
         msg_output_idx = 0
+        tokenizer: object | None = None
 
         try:
             if engine_type == "text":
                 from ppmlx.engine import get_engine
                 engine = get_engine()
+                tokenizer = engine.get_tokenizer(repo_id)
                 gen = engine.stream_generate(
                     repo_id, messages,
                     temperature=0.7 if temperature is None else temperature,
@@ -1945,7 +1976,6 @@ def _stream_responses(
                     enable_thinking=not bool(tools),  # Disable thinking for tool calls
                 )
 
-                tokenizer = engine.get_tokenizer(repo_id)
                 template = getattr(tokenizer, "chat_template", None)
                 assume_in_thinking = bool(
                     (not tools) and isinstance(template, str)
@@ -1984,17 +2014,13 @@ def _stream_responses(
 
             elif engine_type == "vision":
                 from ppmlx.engine_vlm import get_vision_engine
-                engine = get_vision_engine()
-                text, _, _ = engine.generate(
+                vision_engine = get_vision_engine()
+                tokenizer = vision_engine.get_tokenizer(repo_id)
+                text, _, _ = vision_engine.generate(
                     repo_id, messages,
                     max_tokens=max_tokens,
                 )
                 full_text = text
-                yield _sse("response.output_text.delta", {
-                    "output_index": 0,
-                    "content_index": 0,
-                    "delta": text,
-                }, seq)
         except Exception:
             log.exception("responses stream error")
             yield _sse("error", {
@@ -2007,7 +2033,6 @@ def _stream_responses(
         log.info("responses generation done in %.1fs, %d chars", gen_dur, len(full_text))
 
         # Parse tool calls from the model output
-        tokenizer = engine.get_tokenizer(repo_id)
         remaining_text, tool_calls = _parse_tool_calls(full_text, tokenizer=tokenizer, tools=tools)
         log.info("parsed %d tool_calls, remaining_text=%d chars",
                  len(tool_calls), len(remaining_text))
@@ -2122,10 +2147,12 @@ async def _nonstream_responses(
     tools=None,
 ):
     """Non-streaming Responses API."""
+    tokenizer: object | None = None
     try:
         if engine_type == "text":
             from ppmlx.engine import get_engine
             engine = get_engine()
+            tokenizer = engine.get_tokenizer(repo_id)
             text, reasoning, prompt_tokens, completion_tokens, *_ = engine.generate(
                 repo_id, messages,
                 temperature=0.7 if temperature is None else temperature,
@@ -2136,8 +2163,9 @@ async def _nonstream_responses(
             )
         elif engine_type == "vision":
             from ppmlx.engine_vlm import get_vision_engine
-            engine = get_vision_engine()
-            text, prompt_tokens, completion_tokens = engine.generate(repo_id, messages)
+            vision_engine = get_vision_engine()
+            tokenizer = vision_engine.get_tokenizer(repo_id)
+            text, prompt_tokens, completion_tokens = vision_engine.generate(repo_id, messages)
         else:
             raise HTTPException(status_code=400, detail=f"Model '{model_name}' is an embedding model.")
     except HTTPException:
@@ -2146,7 +2174,6 @@ async def _nonstream_responses(
         log.exception("Responses generation failed")
         raise HTTPException(status_code=503, detail="Model generation failed")
 
-    tokenizer = engine.get_tokenizer(repo_id)
     remaining_text, tool_calls = _parse_tool_calls(text, tokenizer=tokenizer, tools=tools)
 
     output: list[dict] = []
@@ -2562,6 +2589,7 @@ def _stream_anthropic(
         # Log request to DB
         try:
             _log_request(
+                None,
                 endpoint="/v1/messages",
                 model_alias=model_name,
                 model_repo=repo_id,
@@ -2715,6 +2743,15 @@ async def responses_ws(websocket: WebSocket):
 
             has_imgs = _has_images(messages)
             engine_type = _route_engine(repo_id, has_imgs)
+            if engine_type == "embed":
+                await websocket.send_json({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request",
+                        "message": "Embedding models are not supported by /v1/responses",
+                    },
+                })
+                continue
 
             resp_id = "resp_" + uuid.uuid4().hex[:24]
             msg_id = "msg_" + uuid.uuid4().hex[:24]
@@ -2732,12 +2769,14 @@ async def responses_ws(websocket: WebSocket):
             await websocket.send_json({"type": "response.created", **resp_obj})
 
             full_text = ""
+            tokenizer: object | None = None
             try:
                 if engine_type == "text":
                     from ppmlx.engine import get_engine
                     engine = get_engine()
+                    tokenizer = engine.get_tokenizer(repo_id)
                     if tools:
-                        text, _, _, _ = engine.generate(
+                        text, _, _, _, _ = engine.generate(
                             repo_id, messages,
                             temperature=0.7 if temperature is None else temperature,
                             top_p=1.0 if top_p is None else top_p,
@@ -2757,10 +2796,11 @@ async def responses_ws(websocket: WebSocket):
                             full_text += chunk
                 elif engine_type == "vision":
                     from ppmlx.engine_vlm import get_vision_engine
-                    engine = get_vision_engine()
-                    text, _, _ = engine.generate(
+                    vision_engine = get_vision_engine()
+                    tokenizer = vision_engine.get_tokenizer(repo_id)
+                    text, _, _ = vision_engine.generate(
                         repo_id, messages,
-                        max_tokens=max_tokens,
+                        max_tokens=max_tokens or 4096,
                     )
                     full_text = text
             except Exception:
@@ -2771,7 +2811,6 @@ async def responses_ws(websocket: WebSocket):
                 })
                 continue
 
-            tokenizer = engine.get_tokenizer(repo_id)
             remaining_text, tool_calls = _parse_tool_calls(full_text, tokenizer=tokenizer, tools=tools if tools else None)
             output_items: list[dict] = []
             output_idx = 0

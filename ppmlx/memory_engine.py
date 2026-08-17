@@ -22,7 +22,9 @@ from ppmlx.config import load_config
 from ppmlx.memory_store import (
     ADDITIVE_WORKFLOW_PREDICATES,
     MemoryStore,
+    REDACTION_MARKER,
     _is_single_value_predicate,
+    contains_persisted_secret,
     get_memory_store,
 )
 from ppmlx.tool_distillers import CodingToolDistiller, DistilledMemoryCandidate, GenericJsonToolDistiller, ToolDistiller
@@ -45,12 +47,6 @@ ALLOWED_TYPES = {
     "workflow_state",
 }
 
-SENSITIVE_PATTERNS = [
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}\b"),
-    re.compile(r"\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*\S+", re.IGNORECASE),
-    re.compile(r"\b[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b"),
-]
-
 SUPERSEDE_SIGNALS = (
     "actually",
     "from now on",
@@ -59,6 +55,17 @@ SUPERSEDE_SIGNALS = (
     "not anymore",
     "supersede",
 )
+
+PREFERENCE_CONTRAST_GROUPS = (
+    frozenset({"brief", "concise", "detailed", "long", "short", "terse", "verbose"}),
+    frozenset({"dark", "light"}),
+    frozenset({"disabled", "enabled", "off", "on"}),
+    frozenset({"imperial", "metric"}),
+)
+
+PREFERENCE_TARGET_STOPWORDS = {
+    "a", "an", "and", "for", "if", "in", "is", "of", "or", "the", "to", "with",
+}
 
 REJECT_SIGNALS = (
     "do not remember",
@@ -638,7 +645,8 @@ class MemoryValidator:
             return self._decision(STATUS_REJECTED, candidate, ["unsupported_type"])
         if candidate.metadata.get("reject_requested"):
             return self._decision(STATUS_REJECTED, candidate, ["reject_requested"])
-        if _contains_sensitive("\n".join([candidate.text, candidate.object, candidate.source_quote])):
+        candidate_evidence = "\n".join([candidate.text, candidate.object, candidate.source_quote])
+        if REDACTION_MARKER in candidate_evidence or _contains_sensitive(candidate_evidence):
             return self._decision(STATUS_REJECTED, candidate, ["sensitive"])
         if candidate.source_quote and candidate.source_quote.lower() not in source_text.lower():
             return self._decision(STATUS_REJECTED, candidate, ["unsupported"])
@@ -658,6 +666,10 @@ class MemoryValidator:
             subject=candidate.subject,
             predicate=candidate.predicate,
             scope=candidate.scope,
+            app_id=event.get("app_id"),
+            project_id=event.get("project_id"),
+            session_id=event.get("session_id"),
+            exact_namespace=True,
         )
         single_value = _is_single_value_predicate(candidate.type, candidate.predicate)
         for active in active_slot:
@@ -669,11 +681,18 @@ class MemoryValidator:
                 if "supersedes_prior" not in reasons:
                     reasons.append("supersedes_prior")
                 continue
-            if self._is_additive_slot(candidate):
-                continue
             if any(signal in source_text.lower() for signal in SUPERSEDE_SIGNALS):
+                if self._is_additive_slot(candidate) and not self._additive_correction_targets(
+                    candidate,
+                    active,
+                    source_text,
+                ):
+                    continue
                 invalidates.append(active["candidate_id"])
-                reasons.append("supersedes_prior")
+                if "supersedes_prior" not in reasons:
+                    reasons.append("supersedes_prior")
+            elif self._is_additive_slot(candidate):
+                continue
             else:
                 return self._decision(STATUS_DISPUTED, candidate, ["contradiction"])
 
@@ -702,6 +721,8 @@ class MemoryValidator:
         # Single-value temporal slots are never additive.
         if _is_single_value_predicate(candidate.type, candidate.predicate):
             return False
+        if candidate.type == "preference":
+            return True
         if candidate.type == "todo":
             return True
         if candidate.type == "constraint" and _norm(candidate.predicate) in {"requires", "required_feature"}:
@@ -727,6 +748,25 @@ class MemoryValidator:
             pred = _norm(candidate.predicate)
             return pred in {_norm(item) for item in ADDITIVE_WORKFLOW_PREDICATES}
         return False
+
+    @staticmethod
+    def _additive_correction_targets(
+        candidate: ShadowMemoryCandidate,
+        active: dict[str, Any],
+        source_text: str,
+    ) -> bool:
+        """Return True when a correction identifies the active additive value."""
+        active_object = _norm(str(active.get("object") or ""))
+        candidate_object = _norm(candidate.object)
+        normalized_source = _norm(source_text)
+        if active_object and active_object in normalized_source:
+            return True
+
+        if candidate.type != "preference":
+            return False
+        active_terms = _preference_target_terms(active_object)
+        candidate_terms = _preference_target_terms(candidate_object)
+        return any(active_terms & group and candidate_terms & group for group in PREFERENCE_CONTRAST_GROUPS)
 
     @staticmethod
     def _is_scope_leakage(event: dict[str, Any], candidate: ShadowMemoryCandidate) -> bool:
@@ -1023,12 +1063,6 @@ class MemoryEngine:
 def get_memory_engine(path: Path | None = None) -> MemoryEngine:
     store = get_memory_store(path) if path else get_memory_store()
     cfg = load_config()
-    common_kwargs = {
-        "extraction_input_tokens": cfg.memory.extraction_input_tokens,
-        "extraction_overlap_tokens": cfg.memory.extraction_overlap_tokens,
-        "extraction_max_chunks_per_event": cfg.memory.extraction_max_chunks_per_event,
-        "extraction_timeout_seconds": cfg.memory.extraction_timeout_seconds,
-    }
     from ppmlx.memory_extractors import ModelMemoryJsonExtractor
 
     rule_extractor = RuleBasedMemoryExtractor(max_candidates=cfg.memory.max_candidates_per_event)
@@ -1044,7 +1078,10 @@ def get_memory_engine(path: Path | None = None) -> MemoryEngine:
         extraction_workers=cfg.memory.extraction_workers,
         parallel_extraction=cfg.memory.extraction_workers > 1,
         enqueue_extraction=True,
-        **common_kwargs,
+        extraction_input_tokens=cfg.memory.extraction_input_tokens,
+        extraction_overlap_tokens=cfg.memory.extraction_overlap_tokens,
+        extraction_max_chunks_per_event=cfg.memory.extraction_max_chunks_per_event,
+        extraction_timeout_seconds=cfg.memory.extraction_timeout_seconds,
     )
 
 
@@ -1053,6 +1090,14 @@ def event_source_text(event: dict[str, Any]) -> str:
     if event.get("response_text"):
         parts.append(f"assistant: {event['response_text']}")
     return "\n".join(part for part in parts if part)
+
+
+def _preference_target_terms(text: str) -> set[str]:
+    return {
+        term
+        for term in re.findall(r"[a-z0-9_]+", text.lower())
+        if len(term) >= 2 and term not in PREFERENCE_TARGET_STOPWORDS
+    }
 
 
 def _event_extraction_chunks(
@@ -1164,8 +1209,9 @@ def _split_oversized_message(
             break
         chunk = dict(message)
         chunk["content"] = piece
+        message_metadata = message.get("metadata")
         chunk["metadata"] = {
-            **(message.get("metadata") if isinstance(message.get("metadata"), dict) else {}),
+            **(message_metadata if isinstance(message_metadata, dict) else {}),
             "extraction_fragment": {"start": start, "end": start + len(piece)},
         }
         chunks.append(chunk)
@@ -1242,7 +1288,7 @@ def _message_to_text(message: dict[str, Any]) -> str:
 
 
 def _contains_sensitive(text: str) -> bool:
-    return any(pattern.search(text) for pattern in SENSITIVE_PATTERNS)
+    return contains_persisted_secret(text)
 
 
 def _candidate_reject_requested(candidate: ShadowMemoryCandidate, source_text: str) -> bool:

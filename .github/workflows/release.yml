@@ -6,32 +6,346 @@ on:
       - 'v*'
 
 permissions:
-  id-token: write
+  contents: read
 
 jobs:
+  quality:
+    name: Release checks (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.0"
+
+      - name: Install Python
+        run: uv python install "${{ matrix.python-version }}"
+
+      - name: Check the lock file
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --frozen --python "${{ matrix.python-version }}"
+
+      - name: Run Ruff
+        run: uv run ruff check ppmlx tests scripts/*.py
+
+      - name: Run Mypy
+        run: uv run mypy ppmlx
+
+      - name: Run tests
+        run: uv run pytest tests/ -v --tb=short
+
+  mlx-smoke:
+    name: MLX runtime smoke (Apple Silicon)
+    needs: quality
+    runs-on: macos-15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.0"
+
+      - name: Install Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.11
+
+      - name: Verify the Apple Silicon MLX runtime
+        run: |
+          test "$(uname -m)" = "arm64"
+          uv run python - <<'PY'
+          import platform
+
+          from huggingface_hub import snapshot_download
+          import mlx
+          import mlx.core as mx
+          import ppmlx
+          from ppmlx.engine import TextEngine
+
+          assert platform.machine() == "arm64"
+          values = mx.array([1.0, 2.0, 3.0])
+          result = mx.sum(values * values)
+          mx.eval(result)
+          assert float(result.item()) == 14.0
+
+          model_path = snapshot_download(
+              repo_id="mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+              revision="a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+          )
+          generation = TextEngine(max_loaded=1).generate(
+              model_path,
+              [{"role": "user", "content": "Reply with OK."}],
+              temperature=0.0,
+              top_p=1.0,
+              max_tokens=8,
+              enable_thinking=False,
+          )
+          assert generation.completion_tokens > 0
+          assert generation.text.strip() or generation.reasoning
+          print(
+              f"ppmlx {ppmlx.__version__}, {mlx.__name__}: "
+              f"MLX array result {result.item()}, generated {generation.completion_tokens} tokens"
+          )
+          PY
+
+  build:
+    name: Build the release artifact
+    needs: quality
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.0"
+
+      - name: Install Python
+        run: uv python install 3.11
+
+      - name: Check the lock file
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.11
+
+      - name: Build
+        run: uv build --out-dir dist
+
+      - name: Check package metadata
+        run: uv run twine check dist/*
+
+      - name: Check package contents
+        id: package
+        run: |
+          uv run python scripts/check_distribution.py dist \
+            --manifest build-metadata/release.json \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Verify the release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+        run: test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+
+      - name: Upload the release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            build-metadata/release.json
+          if-no-files-found: error
+
   test-publish:
+    name: Publish to TestPyPI
+    needs: [build, mlx-smoke]
     runs-on: ubuntu-latest
     environment: testpypi
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-      - name: Build
-        run: uv build
+      - name: Download the release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-distributions
+          path: release-artifact
+
       - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
+          packages-dir: release-artifact/dist/
+
+  verify-test-pypi:
+    name: Verify TestPyPI (Python ${{ matrix.python-version }})
+    needs: [build, test-publish]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.0"
+
+      - name: Install Python
+        run: uv python install "${{ matrix.python-version }}"
+
+      - name: Download the release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-distributions
+          path: release-artifact
+
+      - name: Verify the TestPyPI artifact
+        id: testpypi
+        run: |
+          uv run --no-project --python "${{ matrix.python-version }}" python scripts/verify_testpypi_artifact.py \
+            --manifest release-artifact/build-metadata/release.json \
+            --download-dir "$RUNNER_TEMP/ppmlx-testpypi-download" \
+            --index-base-url https://test.pypi.org/pypi \
+            --approved-file-host test-files.pythonhosted.org \
+            --attempts 12 \
+            --delay-seconds 10 \
+            --timeout-seconds 20 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Confirm the verified version
+        env:
+          BUILT_VERSION: ${{ needs.build.outputs.version }}
+          VERIFIED_VERSION: ${{ steps.testpypi.outputs.version }}
+        run: test "$BUILT_VERSION" = "$VERIFIED_VERSION"
+
+      - name: Create a clean virtual environment
+        run: uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/ppmlx-test-pypi-venv"
+
+      - name: Install the TestPyPI package
+        env:
+          VERIFIED_WHEEL: ${{ steps.testpypi.outputs.wheel }}
+        run: |
+          uv pip install \
+            --python "$RUNNER_TEMP/ppmlx-test-pypi-venv/bin/python" \
+            --index-url https://pypi.org/simple/ \
+            "$VERIFIED_WHEEL"
+
+      - name: Run the TestPyPI smoke test
+        working-directory: ${{ runner.temp }}
+        env:
+          EXPECTED_VERSION: ${{ steps.testpypi.outputs.version }}
+        run: |
+          "$RUNNER_TEMP/ppmlx-test-pypi-venv/bin/python" \
+            "$GITHUB_WORKSPACE/scripts/verify_installed_distribution.py" \
+            --expected-version "$EXPECTED_VERSION"
 
   publish:
-    needs: test-publish
+    name: Publish to PyPI
+    needs: [verify-test-pypi, mlx-smoke]
     runs-on: ubuntu-latest
     environment: pypi
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-      - name: Build
-        run: uv build
+      - name: Download the release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-distributions
+          path: release-artifact
+
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
+        with:
+          packages-dir: release-artifact/dist/
+
+  verify-pypi:
+    name: Verify PyPI (Python ${{ matrix.python-version }})
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.0"
+
+      - name: Install Python
+        run: uv python install "${{ matrix.python-version }}"
+
+      - name: Download the release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-distributions
+          path: release-artifact
+
+      - name: Verify the PyPI artifact
+        id: pypi
+        run: |
+          uv run --no-project --python "${{ matrix.python-version }}" python scripts/verify_testpypi_artifact.py \
+            --manifest release-artifact/build-metadata/release.json \
+            --download-dir "$RUNNER_TEMP/ppmlx-pypi-download" \
+            --index-base-url https://pypi.org/pypi \
+            --approved-file-host files.pythonhosted.org \
+            --attempts 12 \
+            --delay-seconds 10 \
+            --timeout-seconds 20 \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Confirm the verified version
+        env:
+          BUILT_VERSION: ${{ needs.build.outputs.version }}
+          VERIFIED_VERSION: ${{ steps.pypi.outputs.version }}
+        run: test "$BUILT_VERSION" = "$VERIFIED_VERSION"
+
+      - name: Create a clean virtual environment
+        run: uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/ppmlx-pypi-venv"
+
+      - name: Install the verified PyPI wheel
+        env:
+          VERIFIED_WHEEL: ${{ steps.pypi.outputs.wheel }}
+        run: |
+          uv pip install \
+            --python "$RUNNER_TEMP/ppmlx-pypi-venv/bin/python" \
+            --index-url https://pypi.org/simple/ \
+            "$VERIFIED_WHEEL"
+
+      - name: Run the installed-distribution check
+        working-directory: ${{ runner.temp }}
+        env:
+          EXPECTED_VERSION: ${{ steps.pypi.outputs.version }}
+        run: |
+          "$RUNNER_TEMP/ppmlx-pypi-venv/bin/python" \
+            "$GITHUB_WORKSPACE/scripts/verify_installed_distribution.py" \
+            --expected-version "$EXPECTED_VERSION"
+
+  github-release:
+    name: Create the GitHub Release
+    needs: [build, verify-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the verified release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-distributions
+          path: release-artifact
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" release-artifact/dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "$RELEASE_TAG"

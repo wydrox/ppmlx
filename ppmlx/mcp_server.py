@@ -16,7 +16,6 @@ import asyncio
 import json
 import sys
 import threading
-import time
 from pathlib import Path
 
 from mcp.server import Server
@@ -51,22 +50,22 @@ def get_store() -> MemoryStore:
 
 def start_background_worker(poll_seconds: float = 2.0) -> None:
     """Start a daemon thread that processes extraction jobs from the queue.
-    
+
     Runs until the server shuts down.  Claims jobs one at a time, processes
     them synchronously (model extraction), then sleeps when queue is empty.
     """
     global _worker_thread, _worker_stop
     if _worker_thread is not None:
         return  # already running
-    
+
     _worker_stop = threading.Event()
-    
+
     def _loop():
         s = get_store()
         # Lazy-load the extraction engine (requires model)
         engine = None
         consecutive_empty = 0
-        
+
         while not _worker_stop.is_set():
             try:
                 job = s.claim_extraction_job("mcp-worker")
@@ -76,31 +75,31 @@ def start_background_worker(poll_seconds: float = 2.0) -> None:
                     wait = min(poll_seconds * (2 ** min(consecutive_empty - 1, 4)), 30.0)
                     _worker_stop.wait(wait)
                     continue
-                
+
                 consecutive_empty = 0
-                
+
                 # Lazy-init engine on first job
                 if engine is None:
                     from ppmlx.memory_engine import MemoryEngine
                     engine = MemoryEngine(store=s)
-                
+
                 # Process the claimed job
                 event = dict(job.get("payload") or {})
                 event_id = str(event.get("event_id") or job.get("source_event_id") or job["job_id"])
                 event["event_id"] = event_id
                 event.setdefault("request", {"messages": event.get("messages", [])})
-                
+
                 result = engine._extract_validate_store(event, suppress_extraction_errors=True)
                 result["job_id"] = job["job_id"]
                 s.complete_extraction_job(job["job_id"], result=result)
-                
+
             except Exception as exc:
                 try:
                     if job:
                         s.fail_extraction_job(job["job_id"], str(exc), retry=True)
                 except Exception:
                     pass
-    
+
     _worker_thread = threading.Thread(target=_loop, name="ppmlx-memory-worker", daemon=True)
     _worker_thread.start()
 
@@ -283,12 +282,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         }, ensure_ascii=False))]
 
     elif name == "memory_graph_walk":
-        result = s.graph_walk(
+        walk_result = s.graph_walk(
             entity_name=str(arguments["entity_name"]),
             max_hops=int(arguments.get("max_hops", 2)),
             include_inferred=bool(arguments.get("include_inferred", True)),
         )
-        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+        return [TextContent(type="text", text=json.dumps(walk_result, ensure_ascii=False, indent=2))]
 
     elif name == "memory_stats":
         stats = s.stats()
@@ -340,7 +339,7 @@ def main():
     # Parse --no-worker flag
     if "--no-worker" in sys.argv:
         _worker_enabled = False
-    
+
     async def _run():
         if _worker_enabled:
             start_background_worker()
@@ -350,7 +349,7 @@ def main():
         finally:
             if _worker_enabled:
                 stop_background_worker()
-    
+
     asyncio.run(_run())
 
 

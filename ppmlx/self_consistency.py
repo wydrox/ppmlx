@@ -5,10 +5,9 @@ candidates that appear in ≥2 runs. Eliminates hallucinations from small models
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 import re
-import numpy as np
 
 from ppmlx.slot_extractor import SlotExtractor, ExtractedCandidate
 
@@ -25,11 +24,11 @@ class ConsensusCandidate:
 class SelfConsistencyExtractor:
     """
     Run extraction 3 times with variation, keep majority-voted candidates.
-    
+
     Variation comes from:
     - Different temperature (0.0, 0.3, 0.5)
     - Different few-shot examples (none, coding, infra — placeholder for now)
-    
+
     The core insight: real facts are stable across runs; hallucinations vary.
     A hallucination in one run is very unlikely to appear in 2 others.
     """
@@ -63,13 +62,13 @@ class SelfConsistencyExtractor:
 
         for run_idx in range(self.num_runs):
             temp = self.temperatures[min(run_idx, len(self.temperatures) - 1)]
-            
+
             extractor = SlotExtractor(
                 model_name=self.model_name,
                 generation_fn=self.generation_fn,
                 temperature=temp,
             )
-            
+
             candidates = extractor.extract(segment_text, fact_types)
             all_runs.append(candidates)
 
@@ -87,7 +86,7 @@ class SelfConsistencyExtractor:
                 medoid = self._select_medoid(cluster)
                 if medoid is None:
                     continue
-                
+
                 # Adjust confidence: base × agreement_bonus
                 agreement_bonus = min(1.0, len(cluster) / self.num_runs)
                 adjusted_conf = round(medoid.confidence * (0.7 + 0.3 * agreement_bonus), 4)
@@ -107,7 +106,7 @@ class SelfConsistencyExtractor:
     ) -> list[list[ExtractedCandidate]]:
         """
         Cluster candidates across runs by fuzzy type+subject+predicate+object match.
-        
+
         Two candidates match if:
         - Same type
         - Subject tokens Jaccard ≥ 0.6
@@ -130,7 +129,7 @@ class SelfConsistencyExtractor:
         while remaining:
             seed_run, seed = remaining.pop(0)
             cluster = [seed]
-            
+
             i = 0
             while i < len(remaining):
                 _, other = remaining[i]
@@ -139,7 +138,7 @@ class SelfConsistencyExtractor:
                     remaining.pop(i)
                 else:
                     i += 1
-            
+
             clusters.append(cluster)
 
         return clusters
@@ -149,7 +148,7 @@ class SelfConsistencyExtractor:
         """Return True if two candidates likely describe the same fact."""
         if a.type != b.type:
             return False
-        
+
         subj_score = _token_jaccard(a.subject, b.subject)
         pred_score = _token_jaccard(a.predicate, b.predicate)
         obj_score = _token_jaccard(a.object, b.object)

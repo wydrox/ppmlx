@@ -1,5 +1,13 @@
 """Read-only interactive model browser using prompt_toolkit."""
 from __future__ import annotations
+from typing import TypedDict
+
+
+class _BrowserState(TypedDict):
+    cursor: int
+    search: str
+    filter_col: str
+    sort_desc: bool
 
 
 def browse_models(
@@ -22,7 +30,12 @@ def browse_models(
         render_model_row, render_table_header, render_section_title,
     )
 
-    state = {"cursor": 0, "search": "", "filter_col": "alias", "sort_desc": False}
+    state: _BrowserState = {
+        "cursor": 0,
+        "search": "",
+        "filter_col": "alias",
+        "sort_desc": False,
+    }
 
     def _selectable_indices(r):
         return [i for i, row in enumerate(r) if row.section_header is None]
@@ -188,7 +201,7 @@ def browse_models(
         always_hide_cursor=True,
     )
 
-    app = Application(
+    app: Application[None] = Application(
         layout=Layout(HSplit([header_window, list_window, footer_window])),
         key_bindings=kb,
         style=get_style(),

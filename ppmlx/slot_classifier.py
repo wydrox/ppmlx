@@ -9,7 +9,7 @@ pattern as ModelMemoryJsonExtractor.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 import json
 
 from ppmlx.memory_engine import ALLOWED_TYPES
@@ -32,7 +32,7 @@ class ClassifiedSegment:
 class SlotClassifier:
     """
     Classify a conversation segment into memory types.
-    
+
     Uses a small LLM call with constrained JSON output. This is a discriminative
     task (what types are present?) rather than generative (extract S-P-O), so
     it's reliable even for 2B models.
@@ -91,11 +91,11 @@ Types found:"""
 def _parse_classification(raw: str, segment_text: str) -> ClassifiedSegment:
     """Parse the model's JSON array output. Defensive — handles markdown, prose, etc."""
     raw = raw.strip()
-    
+
     # Extract JSON array from the response
     types: list[str] = []
     confidence = 0.0
-    
+
     # Try direct JSON parse
     try:
         parsed = json.loads(raw)

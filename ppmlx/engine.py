@@ -7,7 +7,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, NamedTuple
+from typing import Any, Iterator, NamedTuple, cast
 
 log = logging.getLogger("ppmlx.engine")
 
@@ -174,7 +174,7 @@ class TextEngine:
         from mlx_lm import load as mlx_load
         path = _resolve_model_path(repo_id)
         try:
-            model, tokenizer = mlx_load(path)
+            model, tokenizer = cast(tuple[Any, Any], mlx_load(path))
         except ValueError as exc:
             if not _can_retry_gemma4_non_strict(path, exc):
                 raise
@@ -447,7 +447,7 @@ class TextEngine:
             return 0
 
         for response in mlx_stream(lm.model, lm.tokenizer, **kwargs):
-            chunk = response.text if hasattr(response, "text") else response
+            chunk: str = response if isinstance(response, str) else response.text
             buf += chunk
 
             while buf:

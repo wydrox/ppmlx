@@ -93,6 +93,29 @@ def test_generate_calls_vlm(monkeypatch):
     assert completion_tokens > 0
 
 
+def test_get_tokenizer_returns_processor_tokenizer():
+    """The server can use a vision tokenizer for tool-call parsing."""
+    tokenizer = object()
+    processor = type("Processor", (), {"tokenizer": tokenizer})()
+    mlx_vlm_mod = sys.modules["mlx_vlm"]
+    mlx_vlm_mod.load = lambda path: (object(), processor)
+
+    engine = VisionEngine()
+
+    assert engine.get_tokenizer("test/vision-model") is tokenizer
+
+
+def test_get_tokenizer_uses_processor_as_fallback():
+    """A processor without a tokenizer remains a usable parser fallback."""
+    processor = object()
+    mlx_vlm_mod = sys.modules["mlx_vlm"]
+    mlx_vlm_mod.load = lambda path: (object(), processor)
+
+    engine = VisionEngine()
+
+    assert engine.get_tokenizer("test/vision-model") is processor
+
+
 def test_list_loaded(monkeypatch):
     """After loading a model, list_loaded should contain the repo_id."""
     mock_model = object()

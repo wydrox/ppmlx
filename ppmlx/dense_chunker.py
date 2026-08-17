@@ -146,7 +146,7 @@ def _fact_signal_score(
 ) -> float:
     """
     Max cosine similarity of the window's embedding to the fact-indicator bank.
-    
+
     Windows semantically similar to known fact-indicator phrases ("we decided",
     "next step", "I prefer") score higher — they likely contain extractable facts.
     """
@@ -164,7 +164,7 @@ def _fact_signal_score(
 class DenseChunker:
     """
     Sliding-window information density scorer.
-    
+
     1. Split transcript into overlapping windows
     2. Score each window: fact_signal + entity_density + lexical_diversity - penalties
     3. Select top 20% windows
@@ -205,12 +205,12 @@ class DenseChunker:
     ) -> list[TextSegment]:
         """
         Extract dense segments from conversation messages.
-        
+
         Args:
             messages: list of {"role": str, "content": str}
             indicator_embeddings: pre-computed embeddings of fact-indicator phrases
             embed_fn: text → normalized embedding vector
-        
+
         Returns:
             list of TextSegment, ordered by position in transcript
         """
@@ -264,19 +264,19 @@ class DenseChunker:
         for group in merged:
             first_win = windows[group[0]]
             last_win = windows[group[-1]]
-            
+
             # Expand boundaries by ±half stride for context
             expand = stride_chars // 2
             seg_start = max(0, first_win[1] - expand)
             seg_end = min(len(full_text), last_win[2] + expand)
-            
+
             seg_text = full_text[seg_start:seg_end].strip()
             if not seg_text:
                 continue
-            
+
             # Average density score for the group
             avg_score = sum(s[1] for s in scores if s[0] in group) / len(group)
-            
+
             segments.append(TextSegment(
                 text=seg_text,
                 start_idx=seg_start,
@@ -297,7 +297,7 @@ class DenseChunker:
         if indicator_embeddings and precomputed_embedding is not None:
             similarities = [float(np.dot(precomputed_embedding, iv)) for iv in indicator_embeddings]
             fact = max(similarities) if similarities else 0.0
-        
+
         entity = _entity_density(text)
         diversity = _lexical_diversity(text)
         code_p = _code_penalty(text)
@@ -327,14 +327,14 @@ class DenseChunker:
             content = str(msg.get("content", ""))
             if not content.strip():
                 continue
-            
+
             prefix = f"{role}: "
             line = prefix + content
             lines.append(line)
-            
+
             for cp in range(pos, pos + len(line)):
                 char_map[cp] = {"role": role, "message_idx": len(lines) - 1}
-            
+
             pos += len(line) + 1  # +1 for newline
 
         return "\n".join(lines), char_map
@@ -350,11 +350,11 @@ def build_indicator_embeddings(
 ) -> list[np.ndarray]:
     """
     Embed the fact-indicator phrase bank. Call once, cache the result.
-    
+
     Args:
         embed_fn: batch embedding function (list[str] → list[np.ndarray])
         phrases: override default phrase list
-    
+
     Returns:
         list of normalized embedding vectors
     """

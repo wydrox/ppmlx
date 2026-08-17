@@ -1,6 +1,8 @@
 """Dedicated memory config editor TUI using prompt_toolkit."""
 from __future__ import annotations
 
+from typing import Any
+
 
 def memory_config_menu() -> None:
     """Show an interactive editor for [memory] config only."""
@@ -40,7 +42,7 @@ def memory_config_menu() -> None:
     chunk_options = [4, 8, 16, 32, 64, 128]
     timeout_options = [5.0, 15.0, 45.0, 90.0, 180.0]
 
-    state = {
+    state: dict[str, Any] = {
         "cursor": 0,
         "enabled": enabled,
         "mode_index": modes.index(mode),
@@ -127,7 +129,7 @@ def memory_config_menu() -> None:
         state["dirty"] = False
         state["saved_flash"] = True
 
-    def _cycle(index_key: str, options: list, delta: int) -> None:
+    def _cycle(index_key: str, options: list[Any], delta: int) -> None:
         state[index_key] = (state[index_key] + delta) % len(options)
         state["dirty"] = True
 
@@ -228,7 +230,7 @@ def memory_config_menu() -> None:
         if state["editing_model"] and ch.isprintable() and len(ch) == 1:
             state["model_buf"] += ch
 
-    app = Application(
+    app: Application[None] = Application(
         layout=Layout(Window(content=FormattedTextControl(_get_text), always_hide_cursor=True)),
         key_bindings=kb,
         style=get_style(),
@@ -249,7 +251,7 @@ def _normalize_extractor(value: object) -> str:
     return "hybrid"
 
 
-def _option_index(options: list, value: object) -> int:
+def _option_index(options: list[Any], value: object) -> int:
     try:
         typed_value = type(options[0])(value)
     except (TypeError, ValueError):

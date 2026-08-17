@@ -435,7 +435,7 @@ def download_model(alias_or_repo: str, token: str | None = None) -> Path:
             def display(self, *args: object, **kwargs: object) -> None:
                 pass
 
-        result: dict[str, object] = {}
+        result: dict[str, BaseException] = {}
 
         def _bg_download() -> None:
             try:
@@ -536,7 +536,7 @@ def get_model_path(alias_or_repo: str) -> Path | None:
 def list_local_models() -> list[dict[str, Any]]:
     """List all locally downloaded models."""
     models_dir = _get_models_dir()
-    result = []
+    result: list[dict[str, Any]] = []
     if not models_dir.exists():
         return result
 
