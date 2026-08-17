@@ -4,13 +4,44 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to publish
+        required: true
+        type: string
+
+run-name: Release ${{ inputs.release_tag || github.ref_name }}
+
+concurrency:
+  group: release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  RELEASE_REF: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
 permissions:
   contents: read
 
 jobs:
+  release-context:
+    name: Validate the release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --silent
+
   quality:
     name: Release checks (Python ${{ matrix.python-version }})
+    needs: release-context
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -19,6 +50,8 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
@@ -50,6 +83,8 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
@@ -109,6 +144,8 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
@@ -139,7 +176,6 @@ jobs:
 
       - name: Verify the release tag
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_VERSION: ${{ steps.package.outputs.version }}
         run: test "$RELEASE_TAG" = "v$RELEASE_VERSION"
 
@@ -169,7 +205,7 @@ jobs:
           path: release-artifact
 
       - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: release-artifact/dist/
@@ -185,6 +221,8 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
@@ -256,7 +294,7 @@ jobs:
           path: release-artifact
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: release-artifact/dist/
 
@@ -271,6 +309,8 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
@@ -342,7 +382,6 @@ jobs:
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           gh release create "$RELEASE_TAG" release-artifact/dist/* \
             --repo "$GITHUB_REPOSITORY" \
