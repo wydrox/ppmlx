@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-18
+
 ### Added
 - Pure protocol facades for Claude Code 2.1.231, Codex 0.147.0, OpenCode 1.18.18, and Pi 0.84.2.
 - Exact request, tool-result, and streamed-response replay through the `agent-ir/v1` contract fixtures.
