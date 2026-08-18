@@ -1192,6 +1192,7 @@ vision = [
 dev = [
     { name = "anyio" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1228,6 +1229,7 @@ provides-extras = ["vision", "embeddings", "analytics", "all"]
 dev = [
     { name = "anyio", specifier = ">=4.0" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "mypy", specifier = ">=1.10" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },

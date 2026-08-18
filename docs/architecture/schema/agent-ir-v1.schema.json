@@ -1,0 +1,1469 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppmlx.dev/schema/agent-ir-v1.schema.json",
+  "title": "ppmlx Agent IR v1",
+  "description": "The protocol-neutral ppmlx request and event envelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ir_version",
+    "conversation_id",
+    "source",
+    "requests",
+    "events"
+  ],
+  "properties": {
+    "ir_version": {
+      "const": "agent-ir/v1"
+    },
+    "conversation_id": {
+      "type": "string",
+      "pattern": "^conv_[A-Za-z0-9_-]+$"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "requests": {
+      "type": "array",
+      "minItems": 1,
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/requestEnvelope"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "initial"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/requestEnvelope"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "continuation"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/event"
+      }
+    },
+    "sensitivity": {
+      "$ref": "#/$defs/sensitivity"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    }
+  },
+  "$defs": {
+    "sensitivity": {
+      "description": "Absent values use the restricted fail-closed default.",
+      "type": "string",
+      "enum": [
+        "public",
+        "internal",
+        "confidential",
+        "restricted"
+      ],
+      "default": "restricted"
+    },
+    "provenance": {
+      "description": "Absent source markers use origin unknown and trust untrusted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin",
+        "trust"
+      ],
+      "properties": {
+        "origin": {
+          "type": "string",
+          "enum": [
+            "harness",
+            "provider",
+            "tool",
+            "memory",
+            "ppmlx",
+            "unknown"
+          ]
+        },
+        "origin_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trust": {
+          "type": "string",
+          "enum": [
+            "trusted",
+            "untrusted",
+            "unknown"
+          ]
+        }
+      },
+      "default": {
+        "origin": "unknown",
+        "trust": "untrusted"
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._-]*$"
+      },
+      "additionalProperties": true
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "harness",
+        "harness_version",
+        "protocol",
+        "protocol_version"
+      ],
+      "properties": {
+        "harness": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harness_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+        },
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "anthropic-messages",
+            "openai-responses",
+            "openai-chat"
+          ]
+        },
+        "protocol_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^req_[A-Za-z0-9_-]+$"
+    },
+    "requestEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "kind",
+        "request"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "initial",
+            "continuation"
+          ]
+        },
+        "parent_request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "request": {
+          "$ref": "#/$defs/request"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "initial"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "parent_request_id"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "continuation"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "parent_request_id"
+            ]
+          }
+        }
+      ]
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "instructions",
+        "messages",
+        "tools"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instructions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/instruction"
+          }
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/message"
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/toolDefinition"
+          }
+        },
+        "tool_choice": {
+          "$ref": "#/$defs/toolChoice"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "stream": {
+          "type": "boolean"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "instruction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_role",
+        "source_location",
+        "order",
+        "content"
+      ],
+      "properties": {
+        "source_role": {
+          "type": "string",
+          "enum": [
+            "system",
+            "developer",
+            "user",
+            "assistant",
+            "tool",
+            "unknown"
+          ]
+        },
+        "source_location": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/contentBlock"
+          }
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "content"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "system",
+            "developer",
+            "user",
+            "assistant",
+            "tool"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/contentBlock"
+          }
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "toolDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "input_schema"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        },
+        "input_schema": {
+          "type": "object"
+        },
+        "strict": {
+          "type": "boolean"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "toolChoice": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "auto",
+            "none",
+            "required"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "name"
+          ],
+          "properties": {
+            "type": {
+              "const": "tool"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "temperature": {
+          "type": "number"
+        },
+        "top_p": {
+          "type": "number"
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stop": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "reasoning_effort": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "contentBlock": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/textBlock"
+        },
+        {
+          "$ref": "#/$defs/imageBlock"
+        },
+        {
+          "$ref": "#/$defs/documentBlock"
+        },
+        {
+          "$ref": "#/$defs/reasoningBlock"
+        },
+        {
+          "$ref": "#/$defs/toolCallBlock"
+        },
+        {
+          "$ref": "#/$defs/toolResultBlock"
+        },
+        {
+          "$ref": "#/$defs/refusalBlock"
+        },
+        {
+          "$ref": "#/$defs/extensionBlock"
+        }
+      ]
+    },
+    "textBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "text"
+      ],
+      "properties": {
+        "type": {
+          "const": "text"
+        },
+        "text": {
+          "type": "string"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "imageBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "media_type"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "required": [
+            "url"
+          ]
+        }
+      ],
+      "properties": {
+        "type": {
+          "const": "image"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "data": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "documentBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "media_type"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "text"
+          ]
+        },
+        {
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "required": [
+            "url"
+          ]
+        }
+      ],
+      "properties": {
+        "type": {
+          "const": "document"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string"
+        },
+        "data": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "reasoningBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "data"
+      ],
+      "properties": {
+        "type": {
+          "const": "reasoning"
+        },
+        "data": true,
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "toolCallBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "call_id",
+        "name",
+        "arguments_raw"
+      ],
+      "properties": {
+        "type": {
+          "const": "tool_call"
+        },
+        "call_id": {
+          "$ref": "#/$defs/callId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments_raw": {
+          "type": "string"
+        },
+        "arguments_json": true,
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "toolResultBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "call_id",
+        "content",
+        "is_error"
+      ],
+      "properties": {
+        "type": {
+          "const": "tool_result"
+        },
+        "call_id": {
+          "$ref": "#/$defs/callId"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/contentBlock"
+          }
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "refusalBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "text"
+      ],
+      "properties": {
+        "type": {
+          "const": "refusal"
+        },
+        "text": {
+          "type": "string"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "extensionBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "namespace",
+        "data",
+        "required"
+      ],
+      "properties": {
+        "type": {
+          "const": "extension"
+        },
+        "namespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "data": true,
+        "required": {
+          "type": "boolean"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        }
+      }
+    },
+    "callId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "choiceIndex": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "toolCallIndex": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "contentIndex": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "outputId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parallelGroupId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outputContentBlock": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/textBlock"
+        },
+        {
+          "$ref": "#/$defs/imageBlock"
+        },
+        {
+          "$ref": "#/$defs/documentBlock"
+        },
+        {
+          "$ref": "#/$defs/reasoningBlock"
+        },
+        {
+          "$ref": "#/$defs/refusalBlock"
+        },
+        {
+          "$ref": "#/$defs/extensionBlock"
+        }
+      ]
+    },
+    "event": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/contentStartedEvent"
+        },
+        {
+          "$ref": "#/$defs/contentDeltaEvent"
+        },
+        {
+          "$ref": "#/$defs/contentCompletedEvent"
+        },
+        {
+          "$ref": "#/$defs/toolCallStartedEvent"
+        },
+        {
+          "$ref": "#/$defs/toolCallArgumentsDeltaEvent"
+        },
+        {
+          "$ref": "#/$defs/toolCallCompletedEvent"
+        },
+        {
+          "$ref": "#/$defs/toolResultEvent"
+        },
+        {
+          "$ref": "#/$defs/responseCompletedEvent"
+        },
+        {
+          "$ref": "#/$defs/responseRefusedEvent"
+        },
+        {
+          "$ref": "#/$defs/responseCancelledEvent"
+        },
+        {
+          "$ref": "#/$defs/responseFailedEvent"
+        }
+      ]
+    },
+    "contentStartedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "content_index",
+        "content_type"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "content.started"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "content_index": {
+          "$ref": "#/$defs/contentIndex"
+        },
+        "content_type": {
+          "type": "string",
+          "enum": [
+            "text",
+            "image",
+            "document",
+            "reasoning",
+            "refusal",
+            "extension"
+          ]
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "contentDeltaEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "content_index",
+        "delta"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "content.delta"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "content_index": {
+          "$ref": "#/$defs/contentIndex"
+        },
+        "delta": {
+          "type": "string"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "contentCompletedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "content_index",
+        "content"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "content.completed"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "content_index": {
+          "$ref": "#/$defs/contentIndex"
+        },
+        "content": {
+          "$ref": "#/$defs/outputContentBlock"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "toolCallStartedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "tool_call_index",
+        "call_id",
+        "name"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "tool_call.started"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "tool_call_index": {
+          "$ref": "#/$defs/toolCallIndex"
+        },
+        "parallel_group_id": {
+          "$ref": "#/$defs/parallelGroupId"
+        },
+        "call_id": {
+          "$ref": "#/$defs/callId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "toolCallArgumentsDeltaEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "tool_call_index",
+        "call_id",
+        "delta"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "tool_call.arguments.delta"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "tool_call_index": {
+          "$ref": "#/$defs/toolCallIndex"
+        },
+        "parallel_group_id": {
+          "$ref": "#/$defs/parallelGroupId"
+        },
+        "call_id": {
+          "$ref": "#/$defs/callId"
+        },
+        "delta": {
+          "type": "string"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "toolCallCompletedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "tool_call_index",
+        "call_id",
+        "name",
+        "arguments_raw"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "tool_call.completed"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "tool_call_index": {
+          "$ref": "#/$defs/toolCallIndex"
+        },
+        "parallel_group_id": {
+          "$ref": "#/$defs/parallelGroupId"
+        },
+        "call_id": {
+          "$ref": "#/$defs/callId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments_raw": {
+          "type": "string"
+        },
+        "arguments_json": true,
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "toolResultEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "tool_call_index",
+        "call_id",
+        "content",
+        "is_error"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "tool_result"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "tool_call_index": {
+          "$ref": "#/$defs/toolCallIndex"
+        },
+        "parallel_group_id": {
+          "$ref": "#/$defs/parallelGroupId"
+        },
+        "call_id": {
+          "$ref": "#/$defs/callId"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/contentBlock"
+          }
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "responseRefusedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "refusal"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "response.refused"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "refusal": {
+          "$ref": "#/$defs/refusalBlock"
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "responseCompletedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "finish_reason"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "response.completed"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "finish_reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "responseCancelledEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "reason"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "response.cancelled"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "responseFailedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "sequence",
+        "type",
+        "choice_index",
+        "output_id",
+        "error"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "type": {
+          "const": "response.failed"
+        },
+        "choice_index": {
+          "$ref": "#/$defs/choiceIndex"
+        },
+        "output_id": {
+          "$ref": "#/$defs/outputId"
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "category",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "provider",
+            "ppmlx_estimate"
+          ]
+        }
+      }
+    }
+  }
+}

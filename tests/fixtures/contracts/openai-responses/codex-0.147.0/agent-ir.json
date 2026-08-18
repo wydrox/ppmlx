@@ -1,0 +1,1232 @@
+{
+  "ir_version": "agent-ir/v1",
+  "conversation_id": "conv_capture_roundtrip",
+  "source": {
+    "harness": "codex",
+    "harness_version": "0.147.0",
+    "protocol": "openai-responses",
+    "protocol_version": "v1"
+  },
+  "requests": [
+    {
+      "request_id": "req_capture_initial",
+      "kind": "initial",
+      "request": {
+        "model": "capture-model",
+        "instructions": [
+          {
+            "source_role": "developer",
+            "source_location": "/instructions",
+            "order": 0,
+            "content": [
+              {
+                "type": "text",
+                "text": "You are a fixture agent.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the shell tool to run exactly: printf fixture-ok. Then report the result.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            },
+            "id": "msg_capture_user",
+            "extensions": {
+              "openai-responses.native_message_fields": {
+                "type": "message"
+              }
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "exec_command",
+            "description": "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "cmd": {
+                  "type": "string",
+                  "description": "Shell command to execute."
+                },
+                "justification": {
+                  "type": "string",
+                  "description": "User-facing approval question for `require_escalated`; omit otherwise."
+                },
+                "login": {
+                  "type": "boolean",
+                  "description": "True runs the shell with -l/-i semantics; false disables them. Defaults to true."
+                },
+                "max_output_tokens": {
+                  "type": "number",
+                  "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."
+                },
+                "prefix_rule": {
+                  "type": "array",
+                  "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"].",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "sandbox_permissions": {
+                  "type": "string",
+                  "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.",
+                  "enum": [
+                    "use_default",
+                    "require_escalated"
+                  ]
+                },
+                "shell": {
+                  "type": "string",
+                  "description": "Shell binary to launch. Defaults to the user's default shell."
+                },
+                "tty": {
+                  "type": "boolean",
+                  "description": "True allocates a PTY for the command; false or omitted uses plain pipes."
+                },
+                "workdir": {
+                  "type": "string",
+                  "description": "Working directory for the command. Defaults to the turn cwd."
+                },
+                "yield_time_ms": {
+                  "type": "number",
+                  "description": "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+                }
+              },
+              "required": [
+                "cmd"
+              ],
+              "additionalProperties": false
+            },
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            },
+            "strict": false,
+            "extensions": {
+              "openai-responses.native_tool_fields": {
+                "type": "function"
+              }
+            }
+          }
+        ],
+        "generation": {
+          "extensions": {
+            "openai-responses.generation": {
+              "reasoning": {
+                "summary": "auto"
+              }
+            }
+          }
+        },
+        "stream": true,
+        "sensitivity": "public",
+        "provenance": {
+          "origin": "harness",
+          "trust": "untrusted"
+        },
+        "extensions": {
+          "openai-responses.request_options": {
+            "include": [
+              "reasoning.encrypted_content"
+            ],
+            "parallel_tool_calls": false,
+            "store": false
+          },
+          "openai-responses.native_request": {
+            "model": "capture-model",
+            "instructions": "You are a fixture agent.",
+            "input": [
+              {
+                "type": "message",
+                "id": "msg_capture_user",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Use the shell tool to run exactly: printf fixture-ok. Then report the result."
+                  }
+                ]
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "name": "exec_command",
+                "description": "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+                "strict": false,
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "cmd": {
+                      "type": "string",
+                      "description": "Shell command to execute."
+                    },
+                    "justification": {
+                      "type": "string",
+                      "description": "User-facing approval question for `require_escalated`; omit otherwise."
+                    },
+                    "login": {
+                      "type": "boolean",
+                      "description": "True runs the shell with -l/-i semantics; false disables them. Defaults to true."
+                    },
+                    "max_output_tokens": {
+                      "type": "number",
+                      "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."
+                    },
+                    "prefix_rule": {
+                      "type": "array",
+                      "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"].",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "sandbox_permissions": {
+                      "type": "string",
+                      "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.",
+                      "enum": [
+                        "use_default",
+                        "require_escalated"
+                      ]
+                    },
+                    "shell": {
+                      "type": "string",
+                      "description": "Shell binary to launch. Defaults to the user's default shell."
+                    },
+                    "tty": {
+                      "type": "boolean",
+                      "description": "True allocates a PTY for the command; false or omitted uses plain pipes."
+                    },
+                    "workdir": {
+                      "type": "string",
+                      "description": "Working directory for the command. Defaults to the turn cwd."
+                    },
+                    "yield_time_ms": {
+                      "type": "number",
+                      "description": "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+                    }
+                  },
+                  "required": [
+                    "cmd"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "reasoning": {
+              "summary": "auto"
+            },
+            "store": false,
+            "stream": true,
+            "include": [
+              "reasoning.encrypted_content"
+            ],
+            "prompt_cache_key": "session_capture_001",
+            "client_metadata": {
+              "x-codex-window-id": "session_capture_001:0",
+              "x-codex-turn-metadata": "{\"installation_id\":\"install_capture_001\",\"session_id\":\"session_capture_001\",\"thread_id\":\"thread_capture_001\",\"turn_id\":\"turn_capture_001\",\"window_id\":\"session_capture_001:0\",\"request_kind\":\"turn\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"turn_started_at_unix_ms\":0}",
+              "x-codex-installation-id": "install_capture_001",
+              "session_id": "session_capture_001",
+              "thread_id": "thread_capture_001",
+              "turn_id": "turn_capture_001"
+            }
+          }
+        },
+        "tool_choice": "auto",
+        "metadata": {
+          "client_metadata": {
+            "x-codex-window-id": "session_capture_001:0",
+            "x-codex-turn-metadata": "{\"installation_id\":\"install_capture_001\",\"session_id\":\"session_capture_001\",\"thread_id\":\"thread_capture_001\",\"turn_id\":\"turn_capture_001\",\"window_id\":\"session_capture_001:0\",\"request_kind\":\"turn\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"turn_started_at_unix_ms\":0}",
+            "x-codex-installation-id": "install_capture_001",
+            "session_id": "session_capture_001",
+            "thread_id": "thread_capture_001",
+            "turn_id": "turn_capture_001"
+          },
+          "prompt_cache_key": "session_capture_001"
+        }
+      },
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "harness",
+        "trust": "untrusted"
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "kind": "continuation",
+      "parent_request_id": "req_capture_initial",
+      "request": {
+        "model": "capture-model",
+        "instructions": [
+          {
+            "source_role": "developer",
+            "source_location": "/instructions",
+            "order": 0,
+            "content": [
+              {
+                "type": "text",
+                "text": "You are a fixture agent.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the shell tool to run exactly: printf fixture-ok. Then report the result.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            },
+            "id": "msg_capture_user",
+            "extensions": {
+              "openai-responses.native_message_fields": {
+                "type": "message"
+              }
+            }
+          },
+          {
+            "id": "fc_capture_001",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_call",
+                "call_id": "call_capture_001",
+                "name": "exec_command",
+                "arguments_raw": "{\"cmd\":\"printf fixture-ok\"}",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "provider",
+                  "trust": "untrusted"
+                },
+                "extensions": {
+                  "openai-responses.native_function_call": {
+                    "type": "function_call",
+                    "id": "fc_capture_001"
+                  }
+                },
+                "arguments_json": {
+                  "cmd": "printf fixture-ok"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "provider",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "id": "fco_capture_001",
+            "role": "tool",
+            "content": [
+              {
+                "type": "tool_result",
+                "call_id": "call_capture_001",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Chunk ID: capture\nWall time: 0 seconds\nProcess exited with code 0\nFinal output:\nfixture-ok",
+                    "sensitivity": "public",
+                    "provenance": {
+                      "origin": "tool",
+                      "trust": "untrusted"
+                    }
+                  }
+                ],
+                "is_error": false,
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "tool",
+                  "trust": "untrusted"
+                },
+                "extensions": {
+                  "openai-responses.native_tool_result": {
+                    "type": "function_call_output",
+                    "id": "fco_capture_001",
+                    "call_id": "call_capture_001",
+                    "output": "Chunk ID: capture\nWall time: 0 seconds\nProcess exited with code 0\nFinal output:\nfixture-ok"
+                  }
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "tool",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "exec_command",
+            "description": "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "cmd": {
+                  "type": "string",
+                  "description": "Shell command to execute."
+                },
+                "justification": {
+                  "type": "string",
+                  "description": "User-facing approval question for `require_escalated`; omit otherwise."
+                },
+                "login": {
+                  "type": "boolean",
+                  "description": "True runs the shell with -l/-i semantics; false disables them. Defaults to true."
+                },
+                "max_output_tokens": {
+                  "type": "number",
+                  "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."
+                },
+                "prefix_rule": {
+                  "type": "array",
+                  "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"].",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "sandbox_permissions": {
+                  "type": "string",
+                  "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.",
+                  "enum": [
+                    "use_default",
+                    "require_escalated"
+                  ]
+                },
+                "shell": {
+                  "type": "string",
+                  "description": "Shell binary to launch. Defaults to the user's default shell."
+                },
+                "tty": {
+                  "type": "boolean",
+                  "description": "True allocates a PTY for the command; false or omitted uses plain pipes."
+                },
+                "workdir": {
+                  "type": "string",
+                  "description": "Working directory for the command. Defaults to the turn cwd."
+                },
+                "yield_time_ms": {
+                  "type": "number",
+                  "description": "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+                }
+              },
+              "required": [
+                "cmd"
+              ],
+              "additionalProperties": false
+            },
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            },
+            "strict": false,
+            "extensions": {
+              "openai-responses.native_tool_fields": {
+                "type": "function"
+              }
+            }
+          }
+        ],
+        "generation": {
+          "extensions": {
+            "openai-responses.generation": {
+              "reasoning": {
+                "summary": "auto"
+              }
+            }
+          }
+        },
+        "stream": true,
+        "sensitivity": "public",
+        "provenance": {
+          "origin": "harness",
+          "trust": "untrusted"
+        },
+        "extensions": {
+          "openai-responses.request_options": {
+            "include": [
+              "reasoning.encrypted_content"
+            ],
+            "parallel_tool_calls": false,
+            "store": false
+          },
+          "openai-responses.native_request": {
+            "model": "capture-model",
+            "instructions": "You are a fixture agent.",
+            "input": [
+              {
+                "type": "message",
+                "id": "msg_capture_user",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Use the shell tool to run exactly: printf fixture-ok. Then report the result."
+                  }
+                ]
+              },
+              {
+                "type": "function_call",
+                "id": "fc_capture_001",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"printf fixture-ok\"}",
+                "call_id": "call_capture_001"
+              },
+              {
+                "type": "function_call_output",
+                "id": "fco_capture_001",
+                "call_id": "call_capture_001",
+                "output": "Chunk ID: capture\nWall time: 0 seconds\nProcess exited with code 0\nFinal output:\nfixture-ok"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "name": "exec_command",
+                "description": "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+                "strict": false,
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "cmd": {
+                      "type": "string",
+                      "description": "Shell command to execute."
+                    },
+                    "justification": {
+                      "type": "string",
+                      "description": "User-facing approval question for `require_escalated`; omit otherwise."
+                    },
+                    "login": {
+                      "type": "boolean",
+                      "description": "True runs the shell with -l/-i semantics; false disables them. Defaults to true."
+                    },
+                    "max_output_tokens": {
+                      "type": "number",
+                      "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."
+                    },
+                    "prefix_rule": {
+                      "type": "array",
+                      "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"].",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "sandbox_permissions": {
+                      "type": "string",
+                      "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.",
+                      "enum": [
+                        "use_default",
+                        "require_escalated"
+                      ]
+                    },
+                    "shell": {
+                      "type": "string",
+                      "description": "Shell binary to launch. Defaults to the user's default shell."
+                    },
+                    "tty": {
+                      "type": "boolean",
+                      "description": "True allocates a PTY for the command; false or omitted uses plain pipes."
+                    },
+                    "workdir": {
+                      "type": "string",
+                      "description": "Working directory for the command. Defaults to the turn cwd."
+                    },
+                    "yield_time_ms": {
+                      "type": "number",
+                      "description": "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+                    }
+                  },
+                  "required": [
+                    "cmd"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "reasoning": {
+              "summary": "auto"
+            },
+            "store": false,
+            "stream": true,
+            "include": [
+              "reasoning.encrypted_content"
+            ],
+            "prompt_cache_key": "session_capture_001",
+            "client_metadata": {
+              "x-codex-window-id": "session_capture_001:0",
+              "x-codex-turn-metadata": "{\"installation_id\":\"install_capture_001\",\"session_id\":\"session_capture_001\",\"thread_id\":\"thread_capture_001\",\"turn_id\":\"turn_capture_002\",\"window_id\":\"session_capture_001:0\",\"request_kind\":\"turn\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"turn_started_at_unix_ms\":0}",
+              "x-codex-installation-id": "install_capture_001",
+              "session_id": "session_capture_001",
+              "thread_id": "thread_capture_001",
+              "turn_id": "turn_capture_002"
+            }
+          }
+        },
+        "tool_choice": "auto",
+        "metadata": {
+          "client_metadata": {
+            "x-codex-window-id": "session_capture_001:0",
+            "x-codex-turn-metadata": "{\"installation_id\":\"install_capture_001\",\"session_id\":\"session_capture_001\",\"thread_id\":\"thread_capture_001\",\"turn_id\":\"turn_capture_002\",\"window_id\":\"session_capture_001:0\",\"request_kind\":\"turn\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"turn_started_at_unix_ms\":0}",
+            "x-codex-installation-id": "install_capture_001",
+            "session_id": "session_capture_001",
+            "thread_id": "thread_capture_001",
+            "turn_id": "turn_capture_002"
+          },
+          "prompt_cache_key": "session_capture_001"
+        }
+      },
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "harness",
+        "trust": "untrusted"
+      }
+    }
+  ],
+  "events": [
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 0,
+      "type": "tool_call.started",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "fc_capture_001",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "call_capture_001",
+      "name": "exec_command"
+    },
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 1,
+      "type": "tool_call.arguments.delta",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "fc_capture_001",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "call_capture_001",
+      "delta": "{\"cmd\":\"printf fixture-ok\"}",
+      "extensions": {
+        "openai-responses.native_event": {
+          "type": "response.function_call_arguments.delta",
+          "sequence_number": 2,
+          "item_id": "fc_capture_001",
+          "output_index": 0,
+          "delta": "{\"cmd\":\"printf fixture-ok\"}"
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 2,
+      "type": "tool_call.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "fc_capture_001",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "call_capture_001",
+      "name": "exec_command",
+      "arguments_raw": "{\"cmd\":\"printf fixture-ok\"}",
+      "extensions": {
+        "openai-responses.native_event": {
+          "type": "response.output_item.done",
+          "sequence_number": 4,
+          "output_index": 0,
+          "item": {
+            "id": "fc_capture_001",
+            "type": "function_call",
+            "status": "completed",
+            "arguments": "{\"cmd\":\"printf fixture-ok\"}",
+            "call_id": "call_capture_001",
+            "name": "exec_command"
+          }
+        }
+      },
+      "arguments_json": {
+        "cmd": "printf fixture-ok"
+      }
+    },
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 3,
+      "type": "response.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "fc_capture_001",
+      "finish_reason": "completed",
+      "usage": {
+        "source": "provider",
+        "input_tokens": 64,
+        "output_tokens": 12,
+        "total_tokens": 76
+      },
+      "extensions": {
+        "openai-responses.native_stream": [
+          {
+            "event": "response.created",
+            "data": {
+              "type": "response.created",
+              "sequence_number": 0,
+              "response": {
+                "id": "resp_capture_tool",
+                "object": "response",
+                "created_at": 0,
+                "status": "in_progress",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "capture-model",
+                "output": [],
+                "parallel_tool_calls": true,
+                "previous_response_id": null,
+                "reasoning": {
+                  "effort": null,
+                  "summary": null
+                },
+                "store": false,
+                "temperature": 1.0,
+                "text": {
+                  "format": {
+                    "type": "text"
+                  }
+                },
+                "tool_choice": "auto",
+                "tools": [],
+                "top_p": 1.0,
+                "truncation": "disabled",
+                "usage": null,
+                "user": null,
+                "metadata": {}
+              }
+            }
+          },
+          {
+            "event": "response.output_item.added",
+            "data": {
+              "type": "response.output_item.added",
+              "sequence_number": 1,
+              "output_index": 0,
+              "item": {
+                "id": "fc_capture_001",
+                "type": "function_call",
+                "status": "in_progress",
+                "arguments": "",
+                "call_id": "call_capture_001",
+                "name": "exec_command"
+              }
+            }
+          },
+          {
+            "event": "response.function_call_arguments.delta",
+            "data": {
+              "type": "response.function_call_arguments.delta",
+              "sequence_number": 2,
+              "item_id": "fc_capture_001",
+              "output_index": 0,
+              "delta": "{\"cmd\":\"printf fixture-ok\"}"
+            }
+          },
+          {
+            "event": "response.function_call_arguments.done",
+            "data": {
+              "type": "response.function_call_arguments.done",
+              "sequence_number": 3,
+              "item_id": "fc_capture_001",
+              "output_index": 0,
+              "arguments": "{\"cmd\":\"printf fixture-ok\"}"
+            }
+          },
+          {
+            "event": "response.output_item.done",
+            "data": {
+              "type": "response.output_item.done",
+              "sequence_number": 4,
+              "output_index": 0,
+              "item": {
+                "id": "fc_capture_001",
+                "type": "function_call",
+                "status": "completed",
+                "arguments": "{\"cmd\":\"printf fixture-ok\"}",
+                "call_id": "call_capture_001",
+                "name": "exec_command"
+              }
+            }
+          },
+          {
+            "event": "response.completed",
+            "data": {
+              "type": "response.completed",
+              "sequence_number": 5,
+              "response": {
+                "id": "resp_capture_tool",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "capture-model",
+                "output": [
+                  {
+                    "id": "fc_capture_001",
+                    "type": "function_call",
+                    "status": "completed",
+                    "arguments": "{\"cmd\":\"printf fixture-ok\"}",
+                    "call_id": "call_capture_001",
+                    "name": "exec_command"
+                  }
+                ],
+                "parallel_tool_calls": true,
+                "previous_response_id": null,
+                "reasoning": {
+                  "effort": null,
+                  "summary": null
+                },
+                "store": false,
+                "temperature": 1.0,
+                "text": {
+                  "format": {
+                    "type": "text"
+                  }
+                },
+                "tool_choice": "auto",
+                "tools": [],
+                "top_p": 1.0,
+                "truncation": "disabled",
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 0
+                  },
+                  "output_tokens": 12,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 0
+                  },
+                  "total_tokens": 76
+                },
+                "user": null,
+                "metadata": {}
+              }
+            }
+          },
+          {
+            "event": null,
+            "data": "[DONE]"
+          }
+        ]
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 4,
+      "type": "tool_result",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "tool",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "fco_capture_001",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "call_capture_001",
+      "content": [
+        {
+          "type": "text",
+          "text": "Chunk ID: capture\nWall time: 0 seconds\nProcess exited with code 0\nFinal output:\nfixture-ok",
+          "sensitivity": "public",
+          "provenance": {
+            "origin": "tool",
+            "trust": "untrusted"
+          }
+        }
+      ],
+      "is_error": false,
+      "extensions": {
+        "openai-responses.native_tool_result": {
+          "type": "function_call_output",
+          "id": "fco_capture_001",
+          "call_id": "call_capture_001",
+          "output": "Chunk ID: capture\nWall time: 0 seconds\nProcess exited with code 0\nFinal output:\nfixture-ok"
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 5,
+      "type": "content.started",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_final",
+      "content_index": 0,
+      "content_type": "text"
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 6,
+      "type": "content.delta",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_final",
+      "content_index": 0,
+      "delta": "The tool returned fixture-ok.",
+      "extensions": {
+        "openai-responses.native_event": {
+          "type": "response.output_text.delta",
+          "sequence_number": 3,
+          "item_id": "msg_capture_final",
+          "output_index": 0,
+          "content_index": 0,
+          "delta": "The tool returned fixture-ok.",
+          "logprobs": []
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 7,
+      "type": "content.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_final",
+      "content_index": 0,
+      "content": {
+        "type": "text",
+        "text": "The tool returned fixture-ok.",
+        "sensitivity": "public",
+        "provenance": {
+          "origin": "provider",
+          "trust": "untrusted"
+        }
+      },
+      "extensions": {
+        "openai-responses.native_event": {
+          "type": "response.content_part.done",
+          "sequence_number": 5,
+          "item_id": "msg_capture_final",
+          "output_index": 0,
+          "content_index": 0,
+          "part": {
+            "type": "output_text",
+            "annotations": [],
+            "logprobs": [],
+            "text": "The tool returned fixture-ok."
+          }
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 8,
+      "type": "response.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_final",
+      "finish_reason": "completed",
+      "usage": {
+        "source": "provider",
+        "input_tokens": 64,
+        "output_tokens": 8,
+        "total_tokens": 72
+      },
+      "extensions": {
+        "openai-responses.native_stream": [
+          {
+            "event": "response.created",
+            "data": {
+              "type": "response.created",
+              "sequence_number": 0,
+              "response": {
+                "id": "resp_capture_final",
+                "object": "response",
+                "created_at": 0,
+                "status": "in_progress",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "capture-model",
+                "output": [],
+                "parallel_tool_calls": true,
+                "previous_response_id": null,
+                "reasoning": {
+                  "effort": null,
+                  "summary": null
+                },
+                "store": false,
+                "temperature": 1.0,
+                "text": {
+                  "format": {
+                    "type": "text"
+                  }
+                },
+                "tool_choice": "auto",
+                "tools": [],
+                "top_p": 1.0,
+                "truncation": "disabled",
+                "usage": null,
+                "user": null,
+                "metadata": {}
+              }
+            }
+          },
+          {
+            "event": "response.output_item.added",
+            "data": {
+              "type": "response.output_item.added",
+              "sequence_number": 1,
+              "output_index": 0,
+              "item": {
+                "id": "msg_capture_final",
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": []
+              }
+            }
+          },
+          {
+            "event": "response.content_part.added",
+            "data": {
+              "type": "response.content_part.added",
+              "sequence_number": 2,
+              "item_id": "msg_capture_final",
+              "output_index": 0,
+              "content_index": 0,
+              "part": {
+                "type": "output_text",
+                "annotations": [],
+                "logprobs": [],
+                "text": ""
+              }
+            }
+          },
+          {
+            "event": "response.output_text.delta",
+            "data": {
+              "type": "response.output_text.delta",
+              "sequence_number": 3,
+              "item_id": "msg_capture_final",
+              "output_index": 0,
+              "content_index": 0,
+              "delta": "The tool returned fixture-ok.",
+              "logprobs": []
+            }
+          },
+          {
+            "event": "response.output_text.done",
+            "data": {
+              "type": "response.output_text.done",
+              "sequence_number": 4,
+              "item_id": "msg_capture_final",
+              "output_index": 0,
+              "content_index": 0,
+              "text": "The tool returned fixture-ok.",
+              "logprobs": []
+            }
+          },
+          {
+            "event": "response.content_part.done",
+            "data": {
+              "type": "response.content_part.done",
+              "sequence_number": 5,
+              "item_id": "msg_capture_final",
+              "output_index": 0,
+              "content_index": 0,
+              "part": {
+                "type": "output_text",
+                "annotations": [],
+                "logprobs": [],
+                "text": "The tool returned fixture-ok."
+              }
+            }
+          },
+          {
+            "event": "response.output_item.done",
+            "data": {
+              "type": "response.output_item.done",
+              "sequence_number": 6,
+              "output_index": 0,
+              "item": {
+                "id": "msg_capture_final",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": "The tool returned fixture-ok."
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "event": "response.completed",
+            "data": {
+              "type": "response.completed",
+              "sequence_number": 7,
+              "response": {
+                "id": "resp_capture_final",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "capture-model",
+                "output": [
+                  {
+                    "id": "msg_capture_final",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                      {
+                        "type": "output_text",
+                        "annotations": [],
+                        "logprobs": [],
+                        "text": "The tool returned fixture-ok."
+                      }
+                    ]
+                  }
+                ],
+                "parallel_tool_calls": true,
+                "previous_response_id": null,
+                "reasoning": {
+                  "effort": null,
+                  "summary": null
+                },
+                "store": false,
+                "temperature": 1.0,
+                "text": {
+                  "format": {
+                    "type": "text"
+                  }
+                },
+                "tool_choice": "auto",
+                "tools": [],
+                "top_p": 1.0,
+                "truncation": "disabled",
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 0
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 0
+                  },
+                  "total_tokens": 72
+                },
+                "user": null,
+                "metadata": {}
+              }
+            }
+          },
+          {
+            "event": null,
+            "data": "[DONE]"
+          }
+        ]
+      }
+    }
+  ],
+  "sensitivity": "public",
+  "provenance": {
+    "origin": "harness",
+    "trust": "untrusted"
+  }
+}

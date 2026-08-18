@@ -73,6 +73,7 @@ dev = [
     "pytest-mock>=3.14",
     "httpx>=0.27",
     "anyio>=4.0",
+    "jsonschema>=4.23,<5",
     "ruff>=0.8",
     "mypy>=1.10",
     "twine>=6.0",
@@ -86,6 +87,7 @@ testpaths = ["tests"]
 include = [
     "/LICENSE",
     "/README.md",
+    "/docs",
     "/pyproject.toml",
     "/ppmlx",
     "/tests",

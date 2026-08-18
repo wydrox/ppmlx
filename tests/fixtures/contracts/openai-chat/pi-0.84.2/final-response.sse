@@ -1,0 +1,8 @@
+data: {"id":"chatcmpl-capture-final","object":"chat.completion.chunk","created":0,"model":"capture-model","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-capture-final","object":"chat.completion.chunk","created":0,"model":"capture-model","choices":[{"index":0,"delta":{"content":"The tool returned fixture-ok."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-capture-final","object":"chat.completion.chunk","created":0,"model":"capture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":64,"completion_tokens":8,"total_tokens":72}}
+
+data: [DONE]
+

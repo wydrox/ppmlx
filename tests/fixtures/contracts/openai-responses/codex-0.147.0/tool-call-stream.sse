@@ -1,0 +1,20 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_capture_tool","object":"response","created_at":0,"status":"in_progress","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"capture-model","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":false,"temperature":1.0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"fc_capture_001","type":"function_call","status":"in_progress","arguments":"","call_id":"call_capture_001","name":"exec_command"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":2,"item_id":"fc_capture_001","output_index":0,"delta":"{\"cmd\":\"printf fixture-ok\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":3,"item_id":"fc_capture_001","output_index":0,"arguments":"{\"cmd\":\"printf fixture-ok\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":4,"output_index":0,"item":{"id":"fc_capture_001","type":"function_call","status":"completed","arguments":"{\"cmd\":\"printf fixture-ok\"}","call_id":"call_capture_001","name":"exec_command"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_capture_tool","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"capture-model","output":[{"id":"fc_capture_001","type":"function_call","status":"completed","arguments":"{\"cmd\":\"printf fixture-ok\"}","call_id":"call_capture_001","name":"exec_command"}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":false,"temperature":1.0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":{"input_tokens":64,"input_tokens_details":{"cached_tokens":0},"output_tokens":12,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":76},"user":null,"metadata":{}}}
+
+data: [DONE]
+

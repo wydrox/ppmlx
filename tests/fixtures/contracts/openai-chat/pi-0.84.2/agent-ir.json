@@ -1,0 +1,960 @@
+{
+  "ir_version": "agent-ir/v1",
+  "conversation_id": "conv_capture_roundtrip",
+  "source": {
+    "harness": "pi",
+    "harness_version": "0.84.2",
+    "protocol": "openai-chat",
+    "protocol_version": "v1"
+  },
+  "requests": [
+    {
+      "request_id": "req_capture_initial",
+      "kind": "initial",
+      "request": {
+        "model": "capture-model",
+        "instructions": [
+          {
+            "source_role": "system",
+            "source_location": "/messages/0/content",
+            "order": 0,
+            "content": [
+              {
+                "type": "text",
+                "text": "You are a fixture agent.\nCurrent working directory: /workspace\n",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "system",
+            "content": [
+              {
+                "type": "text",
+                "text": "You are a fixture agent.\nCurrent working directory: /workspace\n",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the bash tool to run exactly: printf fixture-ok. Then report the result.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "bash",
+            "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+            "input_schema": {
+              "type": "object",
+              "required": [
+                "command"
+              ],
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "description": "Bash command to execute"
+                },
+                "timeout": {
+                  "type": "number",
+                  "description": "Timeout in seconds (optional, no default timeout)"
+                }
+              }
+            },
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            },
+            "strict": false,
+            "extensions": {
+              "openai-chat.native_tool_fields": {
+                "type": "function"
+              }
+            }
+          }
+        ],
+        "generation": {
+          "max_output_tokens": 4096
+        },
+        "stream": true,
+        "sensitivity": "public",
+        "provenance": {
+          "origin": "harness",
+          "trust": "untrusted"
+        },
+        "extensions": {
+          "openai-chat.request_options": {
+            "store": false,
+            "stream_options": {
+              "include_usage": true
+            }
+          },
+          "openai-chat.native_request": {
+            "model": "capture-model",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a fixture agent.\nCurrent working directory: /workspace\n"
+              },
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use the bash tool to run exactly: printf fixture-ok. Then report the result."
+                  }
+                ]
+              }
+            ],
+            "stream": true,
+            "stream_options": {
+              "include_usage": true
+            },
+            "store": false,
+            "max_completion_tokens": 4096,
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "bash",
+                  "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+                  "parameters": {
+                    "type": "object",
+                    "required": [
+                      "command"
+                    ],
+                    "properties": {
+                      "command": {
+                        "type": "string",
+                        "description": "Bash command to execute"
+                      },
+                      "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (optional, no default timeout)"
+                      }
+                    }
+                  },
+                  "strict": false
+                }
+              }
+            ]
+          }
+        }
+      },
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "harness",
+        "trust": "untrusted"
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "kind": "continuation",
+      "parent_request_id": "req_capture_initial",
+      "request": {
+        "model": "capture-model",
+        "instructions": [
+          {
+            "source_role": "system",
+            "source_location": "/messages/0/content",
+            "order": 0,
+            "content": [
+              {
+                "type": "text",
+                "text": "You are a fixture agent.\nCurrent working directory: /workspace\n",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "system",
+            "content": [
+              {
+                "type": "text",
+                "text": "You are a fixture agent.\nCurrent working directory: /workspace\n",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the bash tool to run exactly: printf fixture-ok. Then report the result.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_call",
+                "call_id": "call_capture_001",
+                "name": "bash",
+                "arguments_raw": "{\"command\":\"printf fixture-ok\"}",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "provider",
+                  "trust": "untrusted"
+                },
+                "extensions": {
+                  "openai-chat.native_tool_call": {
+                    "type": "function"
+                  }
+                },
+                "arguments_json": {
+                  "command": "printf fixture-ok"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "provider",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "role": "tool",
+            "content": [
+              {
+                "type": "tool_result",
+                "call_id": "call_capture_001",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "fixture-ok",
+                    "sensitivity": "public",
+                    "provenance": {
+                      "origin": "tool",
+                      "trust": "untrusted"
+                    }
+                  }
+                ],
+                "is_error": false,
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "tool",
+                  "trust": "untrusted"
+                },
+                "extensions": {
+                  "openai-chat.native_tool_result": {
+                    "role": "tool",
+                    "content": "fixture-ok",
+                    "tool_call_id": "call_capture_001"
+                  }
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "tool",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "bash",
+            "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+            "input_schema": {
+              "type": "object",
+              "required": [
+                "command"
+              ],
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "description": "Bash command to execute"
+                },
+                "timeout": {
+                  "type": "number",
+                  "description": "Timeout in seconds (optional, no default timeout)"
+                }
+              }
+            },
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            },
+            "strict": false,
+            "extensions": {
+              "openai-chat.native_tool_fields": {
+                "type": "function"
+              }
+            }
+          }
+        ],
+        "generation": {
+          "max_output_tokens": 4096
+        },
+        "stream": true,
+        "sensitivity": "public",
+        "provenance": {
+          "origin": "harness",
+          "trust": "untrusted"
+        },
+        "extensions": {
+          "openai-chat.request_options": {
+            "store": false,
+            "stream_options": {
+              "include_usage": true
+            }
+          },
+          "openai-chat.native_request": {
+            "model": "capture-model",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a fixture agent.\nCurrent working directory: /workspace\n"
+              },
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use the bash tool to run exactly: printf fixture-ok. Then report the result."
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                  {
+                    "id": "call_capture_001",
+                    "type": "function",
+                    "function": {
+                      "name": "bash",
+                      "arguments": "{\"command\":\"printf fixture-ok\"}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "content": "fixture-ok",
+                "tool_call_id": "call_capture_001"
+              }
+            ],
+            "stream": true,
+            "stream_options": {
+              "include_usage": true
+            },
+            "store": false,
+            "max_completion_tokens": 4096,
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "bash",
+                  "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+                  "parameters": {
+                    "type": "object",
+                    "required": [
+                      "command"
+                    ],
+                    "properties": {
+                      "command": {
+                        "type": "string",
+                        "description": "Bash command to execute"
+                      },
+                      "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (optional, no default timeout)"
+                      }
+                    }
+                  },
+                  "strict": false
+                }
+              }
+            ]
+          }
+        }
+      },
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "harness",
+        "trust": "untrusted"
+      }
+    }
+  ],
+  "events": [
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 0,
+      "type": "tool_call.started",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "chatcmpl-capture-tool",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "call_capture_001",
+      "name": "bash"
+    },
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 1,
+      "type": "tool_call.arguments.delta",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "chatcmpl-capture-tool",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "call_capture_001",
+      "delta": "",
+      "extensions": {
+        "openai-chat.native_event": {
+          "id": "chatcmpl-capture-tool",
+          "object": "chat.completion.chunk",
+          "created": 0,
+          "model": "capture-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_capture_001",
+                    "type": "function",
+                    "function": {
+                      "name": "bash",
+                      "arguments": ""
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 2,
+      "type": "tool_call.arguments.delta",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "chatcmpl-capture-tool",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "call_capture_001",
+      "delta": "{\"command\":\"printf fixture-ok\"}",
+      "extensions": {
+        "openai-chat.native_event": {
+          "id": "chatcmpl-capture-tool",
+          "object": "chat.completion.chunk",
+          "created": 0,
+          "model": "capture-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": "{\"command\":\"printf fixture-ok\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 3,
+      "type": "tool_call.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "chatcmpl-capture-tool",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "call_capture_001",
+      "name": "bash",
+      "arguments_raw": "{\"command\":\"printf fixture-ok\"}",
+      "extensions": {
+        "openai-chat.native_event": {
+          "id": "chatcmpl-capture-tool",
+          "object": "chat.completion.chunk",
+          "created": 0,
+          "model": "capture-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_capture_001",
+                    "type": "function",
+                    "function": {
+                      "name": "bash",
+                      "arguments": ""
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        }
+      },
+      "arguments_json": {
+        "command": "printf fixture-ok"
+      }
+    },
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 4,
+      "type": "response.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "chatcmpl-capture-tool",
+      "finish_reason": "tool_calls",
+      "usage": {
+        "source": "provider",
+        "input_tokens": 64,
+        "output_tokens": 12,
+        "total_tokens": 76
+      },
+      "extensions": {
+        "openai-chat.native_stream": [
+          {
+            "event": null,
+            "data": {
+              "id": "chatcmpl-capture-tool",
+              "object": "chat.completion.chunk",
+              "created": 0,
+              "model": "capture-model",
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {
+                    "role": "assistant",
+                    "content": null
+                  },
+                  "finish_reason": null
+                }
+              ]
+            }
+          },
+          {
+            "event": null,
+            "data": {
+              "id": "chatcmpl-capture-tool",
+              "object": "chat.completion.chunk",
+              "created": 0,
+              "model": "capture-model",
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {
+                    "tool_calls": [
+                      {
+                        "index": 0,
+                        "id": "call_capture_001",
+                        "type": "function",
+                        "function": {
+                          "name": "bash",
+                          "arguments": ""
+                        }
+                      }
+                    ]
+                  },
+                  "finish_reason": null
+                }
+              ]
+            }
+          },
+          {
+            "event": null,
+            "data": {
+              "id": "chatcmpl-capture-tool",
+              "object": "chat.completion.chunk",
+              "created": 0,
+              "model": "capture-model",
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {
+                    "tool_calls": [
+                      {
+                        "index": 0,
+                        "function": {
+                          "arguments": "{\"command\":\"printf fixture-ok\"}"
+                        }
+                      }
+                    ]
+                  },
+                  "finish_reason": null
+                }
+              ]
+            }
+          },
+          {
+            "event": null,
+            "data": {
+              "id": "chatcmpl-capture-tool",
+              "object": "chat.completion.chunk",
+              "created": 0,
+              "model": "capture-model",
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {},
+                  "finish_reason": "tool_calls"
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 64,
+                "completion_tokens": 12,
+                "total_tokens": 76
+              }
+            }
+          },
+          {
+            "event": null,
+            "data": "[DONE]"
+          }
+        ]
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 5,
+      "type": "tool_result",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "tool",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "tool_result_capture_001",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "call_capture_001",
+      "content": [
+        {
+          "type": "text",
+          "text": "fixture-ok",
+          "sensitivity": "public",
+          "provenance": {
+            "origin": "tool",
+            "trust": "untrusted"
+          }
+        }
+      ],
+      "is_error": false,
+      "extensions": {
+        "openai-chat.native_tool_result": {
+          "role": "tool",
+          "content": "fixture-ok",
+          "tool_call_id": "call_capture_001"
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 6,
+      "type": "content.started",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "chatcmpl-capture-final",
+      "content_index": 0,
+      "content_type": "text"
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 7,
+      "type": "content.delta",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "chatcmpl-capture-final",
+      "content_index": 0,
+      "delta": "",
+      "extensions": {
+        "openai-chat.native_event": {
+          "id": "chatcmpl-capture-final",
+          "object": "chat.completion.chunk",
+          "created": 0,
+          "model": "capture-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": ""
+              },
+              "finish_reason": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 8,
+      "type": "content.delta",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "chatcmpl-capture-final",
+      "content_index": 0,
+      "delta": "The tool returned fixture-ok.",
+      "extensions": {
+        "openai-chat.native_event": {
+          "id": "chatcmpl-capture-final",
+          "object": "chat.completion.chunk",
+          "created": 0,
+          "model": "capture-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "The tool returned fixture-ok."
+              },
+              "finish_reason": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 9,
+      "type": "content.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "chatcmpl-capture-final",
+      "content_index": 0,
+      "content": {
+        "type": "text",
+        "text": "The tool returned fixture-ok.",
+        "sensitivity": "public",
+        "provenance": {
+          "origin": "provider",
+          "trust": "untrusted"
+        }
+      },
+      "extensions": {
+        "openai-chat.native_event": {
+          "id": "chatcmpl-capture-final",
+          "object": "chat.completion.chunk",
+          "created": 0,
+          "model": "capture-model",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 64,
+            "completion_tokens": 8,
+            "total_tokens": 72
+          }
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 10,
+      "type": "response.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "chatcmpl-capture-final",
+      "finish_reason": "stop",
+      "usage": {
+        "source": "provider",
+        "input_tokens": 64,
+        "output_tokens": 8,
+        "total_tokens": 72
+      },
+      "extensions": {
+        "openai-chat.native_stream": [
+          {
+            "event": null,
+            "data": {
+              "id": "chatcmpl-capture-final",
+              "object": "chat.completion.chunk",
+              "created": 0,
+              "model": "capture-model",
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {
+                    "role": "assistant",
+                    "content": ""
+                  },
+                  "finish_reason": null
+                }
+              ]
+            }
+          },
+          {
+            "event": null,
+            "data": {
+              "id": "chatcmpl-capture-final",
+              "object": "chat.completion.chunk",
+              "created": 0,
+              "model": "capture-model",
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {
+                    "content": "The tool returned fixture-ok."
+                  },
+                  "finish_reason": null
+                }
+              ]
+            }
+          },
+          {
+            "event": null,
+            "data": {
+              "id": "chatcmpl-capture-final",
+              "object": "chat.completion.chunk",
+              "created": 0,
+              "model": "capture-model",
+              "choices": [
+                {
+                  "index": 0,
+                  "delta": {},
+                  "finish_reason": "stop"
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 64,
+                "completion_tokens": 8,
+                "total_tokens": 72
+              }
+            }
+          },
+          {
+            "event": null,
+            "data": "[DONE]"
+          }
+        ]
+      }
+    }
+  ],
+  "sensitivity": "public",
+  "provenance": {
+    "origin": "harness",
+    "trust": "untrusted"
+  }
+}
