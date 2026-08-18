@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "description": "Sanitized wire contracts for streamed harness tool use.",
+  "capture_date": "2026-08-18",
+  "fixtures": [
+    {
+      "id": "claude-code-2.1.231-anthropic-messages",
+      "harness": "claude-code",
+      "version": "2.1.231",
+      "protocol": "anthropic-messages",
+      "protocol_version": "2023-06-01",
+      "endpoint": "/v1/messages",
+      "directory": "anthropic-messages/claude-code-2.1.231"
+    },
+    {
+      "id": "codex-0.147.0-openai-responses",
+      "harness": "codex",
+      "version": "0.147.0",
+      "protocol": "openai-responses",
+      "protocol_version": "v1",
+      "endpoint": "/v1/responses",
+      "directory": "openai-responses/codex-0.147.0"
+    },
+    {
+      "id": "opencode-1.18.18-openai-chat",
+      "harness": "opencode",
+      "version": "1.18.18",
+      "protocol": "openai-chat",
+      "protocol_version": "v1",
+      "endpoint": "/v1/chat/completions",
+      "directory": "openai-chat/opencode-1.18.18"
+    },
+    {
+      "id": "pi-0.84.2-openai-chat",
+      "harness": "pi",
+      "version": "0.84.2",
+      "protocol": "openai-chat",
+      "protocol_version": "v1",
+      "endpoint": "/v1/chat/completions",
+      "directory": "openai-chat/pi-0.84.2"
+    }
+  ]
+}

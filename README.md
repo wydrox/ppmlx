@@ -280,6 +280,10 @@ When the server is running, interactive API docs are available at:
 - **Swagger UI**: [http://localhost:6767/docs](http://localhost:6767/docs)
 - **ReDoc**: [http://localhost:6767/redoc](http://localhost:6767/redoc)
 
+## Architecture
+
+The [proxy architecture decisions](docs/architecture/README.md) define the target contracts for routing, tool use, provider authentication, memory, privacy, and harness compatibility.
+
 ## Requirements
 
 - macOS on Apple Silicon (M1 or later)

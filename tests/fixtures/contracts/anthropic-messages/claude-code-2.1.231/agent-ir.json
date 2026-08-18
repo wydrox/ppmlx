@@ -1,0 +1,1047 @@
+{
+  "ir_version": "agent-ir/v1",
+  "conversation_id": "conv_capture_roundtrip",
+  "source": {
+    "harness": "claude-code",
+    "harness_version": "2.1.231",
+    "protocol": "anthropic-messages",
+    "protocol_version": "2023-06-01"
+  },
+  "requests": [
+    {
+      "request_id": "req_capture_initial",
+      "kind": "initial",
+      "request": {
+        "model": "claude-sonnet-4-6",
+        "instructions": [
+          {
+            "source_role": "system",
+            "source_location": "/system/0",
+            "order": 0,
+            "content": [
+              {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.231.2bf; cc_entrypoint=sdk-cli;",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "source_role": "system",
+            "source_location": "/system/1",
+            "order": 1,
+            "content": [
+              {
+                "type": "text",
+                "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                },
+                "extensions": {
+                  "anthropic-messages.native_block": {
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "source_role": "system",
+            "source_location": "/system/2",
+            "order": 2,
+            "content": [
+              {
+                "type": "text",
+                "text": "You are a fixture agent.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                },
+                "extensions": {
+                  "anthropic-messages.native_block": {
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-08-18.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              },
+              {
+                "type": "text",
+                "text": "Use the Bash tool to run exactly: printf fixture-ok. Then report the result.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                },
+                "extensions": {
+                  "anthropic-messages.native_block": {
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "Bash",
+            "description": "execute shell commands",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "command": {
+                  "description": "The command to execute",
+                  "type": "string"
+                },
+                "timeout": {
+                  "description": "Optional timeout in milliseconds (max 600000)",
+                  "type": "number"
+                },
+                "description": {
+                  "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"",
+                  "type": "string"
+                },
+                "run_in_background": {
+                  "description": "Set to true to run this command in the background.",
+                  "type": "boolean"
+                },
+                "dangerouslyDisableSandbox": {
+                  "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            },
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "generation": {
+          "max_output_tokens": 32000,
+          "extensions": {
+            "anthropic-messages.generation": {
+              "thinking": {
+                "type": "adaptive"
+              },
+              "context_management": {
+                "edits": [
+                  {
+                    "type": "clear_thinking_20251015",
+                    "keep": "all"
+                  }
+                ]
+              },
+              "output_config": {
+                "effort": "high"
+              }
+            }
+          }
+        },
+        "stream": true,
+        "sensitivity": "public",
+        "provenance": {
+          "origin": "harness",
+          "trust": "untrusted"
+        },
+        "extensions": {
+          "anthropic-messages.native_request": {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-08-18.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"
+                  },
+                  {
+                    "type": "text",
+                    "text": "Use the Bash tool to run exactly: printf fixture-ok. Then report the result.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              }
+            ],
+            "system": [
+              {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.231.2bf; cc_entrypoint=sdk-cli;"
+              },
+              {
+                "type": "text",
+                "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              },
+              {
+                "type": "text",
+                "text": "You are a fixture agent.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ],
+            "tools": [
+              {
+                "name": "Bash",
+                "description": "execute shell commands",
+                "input_schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "command": {
+                      "description": "The command to execute",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Optional timeout in milliseconds (max 600000)",
+                      "type": "number"
+                    },
+                    "description": {
+                      "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"",
+                      "type": "string"
+                    },
+                    "run_in_background": {
+                      "description": "Set to true to run this command in the background.",
+                      "type": "boolean"
+                    },
+                    "dangerouslyDisableSandbox": {
+                      "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "command"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ],
+            "metadata": {
+              "user_id": "{\"device_id\":\"device_capture_001\",\"account_uuid\":\"\",\"session_id\":\"session_capture_001\"}"
+            },
+            "max_tokens": 32000,
+            "thinking": {
+              "type": "adaptive"
+            },
+            "context_management": {
+              "edits": [
+                {
+                  "type": "clear_thinking_20251015",
+                  "keep": "all"
+                }
+              ]
+            },
+            "output_config": {
+              "effort": "high"
+            },
+            "stream": true
+          }
+        },
+        "metadata": {
+          "user_id": "{\"device_id\":\"device_capture_001\",\"account_uuid\":\"\",\"session_id\":\"session_capture_001\"}"
+        }
+      },
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "harness",
+        "trust": "untrusted"
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "kind": "continuation",
+      "parent_request_id": "req_capture_initial",
+      "request": {
+        "model": "claude-sonnet-4-6",
+        "instructions": [
+          {
+            "source_role": "system",
+            "source_location": "/system/0",
+            "order": 0,
+            "content": [
+              {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.231.2bf; cc_entrypoint=sdk-cli;",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "source_role": "system",
+            "source_location": "/system/1",
+            "order": 1,
+            "content": [
+              {
+                "type": "text",
+                "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                },
+                "extensions": {
+                  "anthropic-messages.native_block": {
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "source_role": "system",
+            "source_location": "/system/2",
+            "order": 2,
+            "content": [
+              {
+                "type": "text",
+                "text": "You are a fixture agent.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                },
+                "extensions": {
+                  "anthropic-messages.native_block": {
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-08-18.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              },
+              {
+                "type": "text",
+                "text": "Use the Bash tool to run exactly: printf fixture-ok. Then report the result.",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "harness",
+                  "trust": "untrusted"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_call",
+                "call_id": "toolu_capture_001",
+                "name": "Bash",
+                "arguments_raw": "{\"command\":\"printf fixture-ok\"}",
+                "sensitivity": "public",
+                "provenance": {
+                  "origin": "provider",
+                  "trust": "untrusted"
+                },
+                "arguments_json": {
+                  "command": "printf fixture-ok"
+                }
+              }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "provider",
+              "trust": "untrusted"
+            }
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "call_id": "toolu_capture_001",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "fixture-ok",
+                    "sensitivity": "public",
+                    "provenance": {
+                      "origin": "tool",
+                      "trust": "untrusted"
+                    }
+                  }
+                ],
+            "is_error": false,
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "tool",
+              "trust": "untrusted"
+            },
+            "extensions": {
+              "anthropic-messages.native_block": {
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            }
+          }
+            ],
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "Bash",
+            "description": "execute shell commands",
+            "input_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "properties": {
+                "command": {
+                  "description": "The command to execute",
+                  "type": "string"
+                },
+                "timeout": {
+                  "description": "Optional timeout in milliseconds (max 600000)",
+                  "type": "number"
+                },
+                "description": {
+                  "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"",
+                  "type": "string"
+                },
+                "run_in_background": {
+                  "description": "Set to true to run this command in the background.",
+                  "type": "boolean"
+                },
+                "dangerouslyDisableSandbox": {
+                  "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            },
+            "sensitivity": "public",
+            "provenance": {
+              "origin": "harness",
+              "trust": "untrusted"
+            }
+          }
+        ],
+        "generation": {
+          "max_output_tokens": 32000,
+          "extensions": {
+            "anthropic-messages.generation": {
+              "thinking": {
+                "type": "adaptive"
+              },
+              "context_management": {
+                "edits": [
+                  {
+                    "type": "clear_thinking_20251015",
+                    "keep": "all"
+                  }
+                ]
+              },
+              "output_config": {
+                "effort": "high"
+              }
+            }
+          }
+        },
+        "stream": true,
+        "sensitivity": "public",
+        "provenance": {
+          "origin": "harness",
+          "trust": "untrusted"
+        },
+        "extensions": {
+          "anthropic-messages.native_request": {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-08-18.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"
+                  },
+                  {
+                    "type": "text",
+                    "text": "Use the Bash tool to run exactly: printf fixture-ok. Then report the result."
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "tool_use",
+                    "id": "toolu_capture_001",
+                    "name": "Bash",
+                    "input": {
+                      "command": "printf fixture-ok"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "tool_use_id": "toolu_capture_001",
+                    "type": "tool_result",
+                    "content": "fixture-ok",
+                    "is_error": false,
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              }
+            ],
+            "system": [
+              {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.231.2bf; cc_entrypoint=sdk-cli;"
+              },
+              {
+                "type": "text",
+                "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              },
+              {
+                "type": "text",
+                "text": "You are a fixture agent.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ],
+            "tools": [
+              {
+                "name": "Bash",
+                "description": "execute shell commands",
+                "input_schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "command": {
+                      "description": "The command to execute",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Optional timeout in milliseconds (max 600000)",
+                      "type": "number"
+                    },
+                    "description": {
+                      "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"",
+                      "type": "string"
+                    },
+                    "run_in_background": {
+                      "description": "Set to true to run this command in the background.",
+                      "type": "boolean"
+                    },
+                    "dangerouslyDisableSandbox": {
+                      "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "command"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ],
+            "metadata": {
+              "user_id": "{\"device_id\":\"device_capture_001\",\"account_uuid\":\"\",\"session_id\":\"session_capture_001\"}"
+            },
+            "max_tokens": 32000,
+            "thinking": {
+              "type": "adaptive"
+            },
+            "context_management": {
+              "edits": [
+                {
+                  "type": "clear_thinking_20251015",
+                  "keep": "all"
+                }
+              ]
+            },
+            "output_config": {
+              "effort": "high"
+            },
+            "stream": true
+          }
+        },
+        "metadata": {
+          "user_id": "{\"device_id\":\"device_capture_001\",\"account_uuid\":\"\",\"session_id\":\"session_capture_001\"}"
+        }
+      },
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "harness",
+        "trust": "untrusted"
+      }
+    }
+  ],
+  "events": [
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 0,
+      "type": "tool_call.started",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_tool",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "toolu_capture_001",
+      "name": "Bash"
+    },
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 1,
+      "type": "tool_call.arguments.delta",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_tool",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "toolu_capture_001",
+      "delta": "{\"command\":\"printf fixture-ok\"}",
+      "extensions": {
+        "anthropic-messages.native_event": {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "input_json_delta",
+            "partial_json": "{\"command\":\"printf fixture-ok\"}"
+          }
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 2,
+      "type": "tool_call.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_tool",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "toolu_capture_001",
+      "name": "Bash",
+      "arguments_raw": "{\"command\":\"printf fixture-ok\"}",
+      "extensions": {
+        "anthropic-messages.native_event": {
+          "type": "content_block_stop",
+          "index": 0
+        }
+      },
+      "arguments_json": {
+        "command": "printf fixture-ok"
+      }
+    },
+    {
+      "request_id": "req_capture_initial",
+      "sequence": 3,
+      "type": "response.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_tool",
+      "finish_reason": "tool_use",
+      "usage": {
+        "source": "provider",
+        "input_tokens": 64,
+        "output_tokens": 12,
+        "total_tokens": 76
+      },
+      "extensions": {
+        "anthropic-messages.native_stream": [
+          {
+            "event": "message_start",
+            "data": {
+              "type": "message_start",
+              "message": {
+                "id": "msg_capture_tool",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 64,
+                  "output_tokens": 0
+                }
+              }
+            }
+          },
+          {
+            "event": "content_block_start",
+            "data": {
+              "type": "content_block_start",
+              "index": 0,
+              "content_block": {
+                "type": "tool_use",
+                "id": "toolu_capture_001",
+                "name": "Bash",
+                "input": {}
+              }
+            }
+          },
+          {
+            "event": "content_block_delta",
+            "data": {
+              "type": "content_block_delta",
+              "index": 0,
+              "delta": {
+                "type": "input_json_delta",
+                "partial_json": "{\"command\":\"printf fixture-ok\"}"
+              }
+            }
+          },
+          {
+            "event": "content_block_stop",
+            "data": {
+              "type": "content_block_stop",
+              "index": 0
+            }
+          },
+          {
+            "event": "message_delta",
+            "data": {
+              "type": "message_delta",
+              "delta": {
+                "stop_reason": "tool_use",
+                "stop_sequence": null
+              },
+              "usage": {
+                "output_tokens": 12
+              }
+            }
+          },
+          {
+            "event": "message_stop",
+            "data": {
+              "type": "message_stop"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 4,
+      "type": "tool_result",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "tool",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "tool_result_capture_001",
+      "tool_call_index": 0,
+      "parallel_group_id": "parallel_capture_001",
+      "call_id": "toolu_capture_001",
+      "content": [
+        {
+          "type": "text",
+          "text": "fixture-ok",
+          "sensitivity": "public",
+          "provenance": {
+            "origin": "tool",
+            "trust": "untrusted"
+          }
+        }
+      ],
+      "is_error": false,
+      "extensions": {
+        "anthropic-messages.native_tool_result": {
+          "tool_use_id": "toolu_capture_001",
+          "type": "tool_result",
+          "content": "fixture-ok",
+          "is_error": false,
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 5,
+      "type": "content.started",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_final",
+      "content_index": 0,
+      "content_type": "text"
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 6,
+      "type": "content.delta",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_final",
+      "content_index": 0,
+      "delta": "The tool returned fixture-ok.",
+      "extensions": {
+        "anthropic-messages.native_event": {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "The tool returned fixture-ok."
+          }
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 7,
+      "type": "content.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_final",
+      "content_index": 0,
+      "content": {
+        "type": "text",
+        "text": "The tool returned fixture-ok.",
+        "sensitivity": "public",
+        "provenance": {
+          "origin": "provider",
+          "trust": "untrusted"
+        }
+      },
+      "extensions": {
+        "anthropic-messages.native_event": {
+          "type": "content_block_stop",
+          "index": 0
+        }
+      }
+    },
+    {
+      "request_id": "req_capture_continuation",
+      "sequence": 8,
+      "type": "response.completed",
+      "sensitivity": "public",
+      "provenance": {
+        "origin": "provider",
+        "trust": "untrusted"
+      },
+      "choice_index": 0,
+      "output_id": "msg_capture_final",
+      "finish_reason": "end_turn",
+      "usage": {
+        "source": "provider",
+        "input_tokens": 64,
+        "output_tokens": 8,
+        "total_tokens": 72
+      },
+      "extensions": {
+        "anthropic-messages.native_stream": [
+          {
+            "event": "message_start",
+            "data": {
+              "type": "message_start",
+              "message": {
+                "id": "msg_capture_final",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 64,
+                  "output_tokens": 0
+                }
+              }
+            }
+          },
+          {
+            "event": "content_block_start",
+            "data": {
+              "type": "content_block_start",
+              "index": 0,
+              "content_block": {
+                "type": "text",
+                "text": ""
+              }
+            }
+          },
+          {
+            "event": "content_block_delta",
+            "data": {
+              "type": "content_block_delta",
+              "index": 0,
+              "delta": {
+                "type": "text_delta",
+                "text": "The tool returned fixture-ok."
+              }
+            }
+          },
+          {
+            "event": "content_block_stop",
+            "data": {
+              "type": "content_block_stop",
+              "index": 0
+            }
+          },
+          {
+            "event": "message_delta",
+            "data": {
+              "type": "message_delta",
+              "delta": {
+                "stop_reason": "end_turn",
+                "stop_sequence": null
+              },
+              "usage": {
+                "output_tokens": 8
+              }
+            }
+          },
+          {
+            "event": "message_stop",
+            "data": {
+              "type": "message_stop"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "sensitivity": "public",
+  "provenance": {
+    "origin": "harness",
+    "trust": "untrusted"
+  }
+}
