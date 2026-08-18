@@ -99,8 +99,10 @@ They add the related tool results without removal or reorder of prior semantic c
 Existing routing or policy keys in `metadata` MUST keep the same values.
 A continuation MAY add request-local diagnostic metadata that does not affect routing, authorization, retention, or provider behavior.
 
-A continuation MAY replace an exact native-body evidence extension with the sanitized body for that request.
-It MUST keep all other required extensions unchanged.
+A continuation MAY replace a `native_request` evidence extension with the body for that request.
+It MUST keep the same `native_request` evidence keys.
+It MAY replace or remove `native_block` evidence when the matching native content block changes.
+It MUST keep all semantic and required extensions unchanged.
 Any other change causes `continuation_contract_changed` before provider transport starts.
 
 ## Content blocks
@@ -174,7 +176,9 @@ The final tool call uses the same `call_id` as all related events.
 `tool_call.completed` adds `name`, `arguments_raw`, and optional `arguments_json`.
 
 `tool_result` also contains ordered `content` and `is_error`.
-The call ID, choice index, output ID, tool index, and parallel group remain stable for one call.
+The call ID, choice index, tool index, and parallel group remain stable for one call.
+The tool-call lifecycle keeps one output ID.
+A tool result can use its own source output ID.
 
 A stream ends with exactly one of these terminal events for each output choice:
 
