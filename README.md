@@ -1,6 +1,8 @@
 # ppmlx
 
-**Run LLMs on your Mac.** OpenAI-compatible API powered by Apple Silicon.
+**Keep the harness. Change the model.** Local MLX inference and one model switchboard for coding agents.
+
+ppmlx runs language models on Apple Silicon today. It gives Claude Code, Codex, OpenCode, Pi, and other clients one local endpoint while each client keeps the protocol it expects.
 
 [![CI](https://github.com/wydrox/ppmlx/actions/workflows/tests.yml/badge.svg)](https://github.com/wydrox/ppmlx/actions)
 [![PyPI](https://img.shields.io/pypi/v/ppmlx)](https://pypi.org/project/ppmlx/)
@@ -16,7 +18,7 @@ uv tool install ppmlx
 
 > Requires macOS on Apple Silicon (M1+) and Python 3.11+
 >
-> Privacy note: `ppmlx` never sends prompts, responses, file contents, paths, or tokens anywhere. Optional anonymous usage analytics can be disabled with `ppmlx config --no-analytics`.
+> Privacy note for v0.6.0: local inference does not send prompts, responses, file contents, paths, or tokens to a model provider. Optional anonymous usage analytics can be disabled with `ppmlx config --no-analytics`.
 
 ## Get Started
 
@@ -25,6 +27,25 @@ ppmlx pull qwen3.5:9b      # download a model
 ppmlx run qwen3.5:9b       # chat in the terminal
 ppmlx serve                 # start API server on :6767
 ```
+
+## One Endpoint for Every Coding Agent
+
+Your coding agent should not decide which provider owns the request. It should send its native protocol to ppmlx. The routing policy can then select a local model or an approved provider without changing the harness.
+
+```text
+Claude Code ── Anthropic Messages ─┐
+Codex ──────── Responses API ──────┼── localhost:6767 ── Local MLX
+OpenCode / Pi ─ Chat Completions ──┘                 └── Approved provider
+```
+
+The switchboard has four rules:
+
+- Keep the native protocol at each edge.
+- Preserve tool-call meaning across model formats.
+- Keep provider credentials inside ppmlx.
+- Let the harness read scoped memory through explicit tools.
+
+> v0.6.0 serves local MLX models. The [proxy architecture decisions](docs/architecture/README.md) define the contracts for provider routing, tool normalization, authentication, fallback, and memory.
 
 ### curl | sh (one-liner)
 
@@ -129,7 +150,16 @@ print(response.choices[0].message.content)
 
 ## Connect Your Tools
 
-Point any OpenAI-compatible client at `http://localhost:6767/v1` with any API key:
+Connect each client to `http://localhost:6767`. Use any non-empty API key for local inference.
+
+| Client or SDK | Protocol | Endpoint |
+|---|---|---|
+| Claude Code | Anthropic Messages | `/v1/messages` |
+| Codex | OpenAI Responses | `/v1/responses` |
+| OpenCode and Pi | OpenAI Chat Completions | `/v1/chat/completions` |
+| OpenAI SDKs, LangChain, and LlamaIndex | OpenAI-compatible | `/v1` |
+
+Other OpenAI-compatible tools can use the same local server:
 
 - **Cursor** — Settings > AI > OpenAI-compatible
 - **Continue** — config.json: provider `openai`, apiBase above
@@ -282,7 +312,11 @@ When the server is running, interactive API docs are available at:
 
 ## Architecture
 
-The [proxy architecture decisions](docs/architecture/README.md) define the target contracts for routing, tool use, provider authentication, memory, privacy, and harness compatibility.
+The [proxy architecture decisions](docs/architecture/README.md) define the contracts for routing, tool use, provider authentication, memory, privacy, and harness compatibility.
+
+The design has three steps. ppmlx converts the request to a lossless agent representation. The policy selects a route. ppmlx returns the format that the original harness expects.
+
+ppmlx does not silently repair a tool call. It does not reuse credentials from another application. It does not change providers after output starts.
 
 ## Requirements
 
