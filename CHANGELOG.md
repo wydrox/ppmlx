@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-18
+
 ### Added
 - Strict typed models and lossless JSON helpers for the `agent-ir/v1` request, content, tool, and event contract.
 - Agent IR validation for continuation links, stable tool calls, event order, terminal states, sensitivity, and protocol extensions.
