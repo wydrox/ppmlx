@@ -126,7 +126,7 @@
     "extensions": {
       "type": "object",
       "propertyNames": {
-        "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        "pattern": "^[a-z0-9][a-z0-9_-]*(?:\\.[a-z0-9][a-z0-9_-]*)+$"
       },
       "additionalProperties": true
     },
@@ -641,7 +641,11 @@
         "type": {
           "const": "reasoning"
         },
-        "data": true,
+        "data": {
+          "not": {
+            "type": "null"
+          }
+        },
         "sensitivity": {
           "$ref": "#/$defs/sensitivity"
         },
@@ -676,7 +680,11 @@
         "arguments_raw": {
           "type": "string"
         },
-        "arguments_json": true,
+        "arguments_json": {
+          "not": {
+            "type": "null"
+          }
+        },
         "sensitivity": {
           "$ref": "#/$defs/sensitivity"
         },
@@ -764,9 +772,13 @@
         },
         "namespace": {
           "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+          "pattern": "^[a-z0-9][a-z0-9_-]*(?:\\.[a-z0-9][a-z0-9_-]*)+$"
         },
-        "data": true,
+        "data": {
+          "not": {
+            "type": "null"
+          }
+        },
         "required": {
           "type": "boolean"
         },
@@ -1159,7 +1171,11 @@
         "arguments_raw": {
           "type": "string"
         },
-        "arguments_json": true,
+        "arguments_json": {
+          "not": {
+            "type": "null"
+          }
+        },
         "sensitivity": {
           "$ref": "#/$defs/sensitivity"
         },

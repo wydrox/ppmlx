@@ -86,7 +86,9 @@ It uses these terminal states:
 
 Call identity rules also apply:
 
-- The ledger MUST match the original `choice_index`, `output_id`, `tool_call_index`, and `call_id`.
+- The tool-call lifecycle MUST match the original `choice_index`, `output_id`, `tool_call_index`, and `call_id`.
+- A tool result MUST match the original `choice_index`, `tool_call_index`, and `call_id`.
+- The ledger records a separate source `output_id` for a tool result when the source supplies one.
 - A missing or different identity field MUST cause `tool_conversation_mismatch`.
 
 ### Concurrency and duplicates
