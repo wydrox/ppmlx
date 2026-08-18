@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-18
+
 ### Added
 - Accepted architecture decisions for the local model router, lossless tool-use normalization, provider authentication, routing, memory, retention, and harness compatibility.
 - Sanitized streamed tool-use contract fixtures for Claude Code, Codex, OpenCode, and Pi.
