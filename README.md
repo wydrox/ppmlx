@@ -16,7 +16,7 @@ uv tool install ppmlx
 
 > Requires macOS on Apple Silicon (M1+) and Python 3.11+
 >
-> Privacy note: `ppmlx` never sends prompts, responses, file contents, paths, or tokens anywhere. Optional anonymous usage analytics can be disabled with `ppmlx config --no-analytics`.
+> Privacy: local MLX inference stays on your Mac. Model downloads, optional analytics, enabled logging or memory, and future remote-provider routes use separate data paths. See [Privacy and data paths](docs/privacy.md).
 
 ## Get Started
 
