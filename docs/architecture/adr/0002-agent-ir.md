@@ -238,7 +238,7 @@ ppmlx MUST NOT use a raw request body as the only semantic representation.
 - An adapter or model profile MUST keep `arguments_raw` exactly after Agent IR accepts the value.
 - Invalid JSON MUST NOT be repaired without an explicit error or the bounded policy in ADR 0009.
 - A repair under ADR 0009 MUST add its sanitized namespaced extension before egress encoding.
-- Names in `extensions` MUST use a protocol or provider namespace.
+- Names in `extensions` MUST use a protocol, provider, or ppmlx namespace.
 - An egress adapter MUST preserve an extension when the target supports the same meaning.
 - The router MUST NOT inspect or change opaque reasoning content.
 - An adapter MUST preserve sensitivity and provenance without a silent downgrade.
