@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-20
+
 ### Changed
 - Keep strict local generation on one dedicated MLX thread while request parsing, health checks, and exact retry joins remain concurrent.
 - Refresh the locked dependency set to versions with no known advisories in the release audit.
