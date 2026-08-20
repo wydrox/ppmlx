@@ -1,0 +1,46 @@
+{
+  "schema_version": "tool-profile-matrix/v1",
+  "case_set_version": "2026-08-20.v1",
+  "publication_gate": {
+    "fixed_run_count": 3,
+    "deterministic_fixture_rate": 1.0,
+    "correlation_rate": 1.0,
+    "stable_minimum_each_run": 0.98,
+    "preview_minimum_each_run": 0.95,
+    "preview_maximum_each_run": 0.979999
+  },
+  "profiles": [
+    {
+      "normalization_profile": "grok-openai-chat-v1",
+      "capability_level": "template_structured",
+      "repair_policy": null,
+      "support_status": "disabled",
+      "evaluated_models": [],
+      "reason_code": "no_exact_three_run_evidence"
+    },
+    {
+      "normalization_profile": "kimi-k2-v1",
+      "capability_level": "template_structured",
+      "repair_policy": null,
+      "support_status": "disabled",
+      "evaluated_models": [],
+      "reason_code": "no_exact_three_run_evidence"
+    },
+    {
+      "normalization_profile": "deepseek-v3-v1",
+      "capability_level": "template_structured",
+      "repair_policy": null,
+      "support_status": "disabled",
+      "evaluated_models": [],
+      "reason_code": "no_exact_three_run_evidence"
+    },
+    {
+      "normalization_profile": "qwen-json-v1",
+      "capability_level": "template_structured",
+      "repair_policy": null,
+      "support_status": "disabled",
+      "evaluated_models": [],
+      "reason_code": "no_exact_three_run_evidence"
+    }
+  ]
+}
