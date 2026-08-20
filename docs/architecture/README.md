@@ -21,6 +21,14 @@ The following accepted decisions complete the Phase 1 contract:
 - [ADR 0007: Retention and Redaction](adr/0007-retention-and-redaction.md)
 - [ADR 0008: Compatibility](adr/0008-compatibility.md)
 
+The following decision updates the Phase 4 tool-normalization contract:
+
+- [ADR 0009: Bounded Local Tool-Argument Repair](adr/0009-bounded-local-tool-argument-repair.md)
+
+ADR 0009 is the explicit repair policy permitted by ADR 0002.
+It partially supersedes only the `Automatic argument repair` rejection in ADR 0003.
+The remaining tool-ownership and identifier rules in ADR 0003 stay active.
+
 The [contract fixture manifest](../../tests/fixtures/contracts/manifest.json) records the exact harness and protocol versions for Phase 1.
 The [Agent IR v1 JSON Schema](schema/agent-ir-v1.schema.json) defines the normalized request and event shapes.
 The [local Agent IR runtime guide](local-agent-runtime.md) defines the Phase 4 implementation boundary and its limits.
@@ -30,7 +38,7 @@ The [local Agent IR runtime guide](local-agent-runtime.md) defines the Phase 4 i
 - These ADRs define contracts.
 - They do not add proxy runtime behavior.
 - A later phase must add contract tests before it changes a frozen contract.
-- A new ADR must replace an accepted decision.
+- A new ADR must explicitly amend, supersede, or replace an accepted decision.
 - An implementation must not silently change an accepted decision.
 
 Protocol rules apply to all adapters:
