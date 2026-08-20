@@ -199,7 +199,7 @@ def test_valid_arguments_remain_byte_exact_with_policy_enabled() -> None:
             "repair_ineligible",
         ),
         (
-            '<tool_call>{"name":"read","arguments":{"path":"a","path":"b",}}</tool_call>',
+            '<tool_call>{"name":"read","arguments":{"path":"a","path":"b"}}</tool_call>',
             "duplicate_json_key",
         ),
         (
