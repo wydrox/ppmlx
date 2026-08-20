@@ -15,6 +15,7 @@ from typing import Callable, NoReturn
 from .tool_argument_repair import (
     ToolArgumentRepairBudget,
     ToolArgumentRepairError,
+    ToolArgumentRepairKind,
     ToolArgumentRepairMetadata,
     ToolArgumentRepairPolicy,
     repair_json_object,
@@ -542,28 +543,33 @@ def _parse_qwen(
         except ToolNormalizationError as error:
             if repair_policy is None or error.code != "malformed_arguments":
                 raise
-            name, arguments_raw = _parse_qwen_repair_fields(
+            name, repairable_arguments = _parse_qwen_repair_fields(
                 source,
                 profile=profile,
             )
-            return _call(
+            call = _call(
                 index=index,
                 name=name,
-                arguments_raw=arguments_raw,
+                arguments_raw=repairable_arguments,
                 profile=profile,
                 limits=limits,
                 repair_policy=repair_policy,
                 repair_budget=repair_budget,
             )
+            if (
+                call.repair is not None
+                and call.repair.kind is ToolArgumentRepairKind.MISSING_FINAL_DELIMITER
+            ):
+                _raise(profile, "repair_ambiguous")
+            return call
         if set(value) != {"name", "arguments"}:
             _raise(profile, "invalid_tool_call_shape")
-        arguments_raw = fields.get("arguments")
-        if arguments_raw is None:
+        if "arguments" not in fields:
             _raise(profile, "invalid_tool_call_shape")
         return _call(
             index=index,
             name=value["name"],
-            arguments_raw=arguments_raw,
+            arguments_raw=fields["arguments"],
             profile=profile,
             limits=limits,
             repair_policy=repair_policy,
