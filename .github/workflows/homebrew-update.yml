@@ -4,21 +4,55 @@ on:
   workflow_run:
     workflows: ["Release"]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Released ppmlx version to recover, without the v prefix
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+env:
+  TAP_REPO: the-focus-company/homebrew-ppmlx
+
 jobs:
   update-tap:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve released source ref
+        id: release-ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_VERSION: ${{ inputs.version || '' }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ ! "$MANUAL_VERSION" =~ ^[0-9]+(\.[0-9]+){2}([a-zA-Z0-9.]+)?$ ]]; then
+              echo "::error title=Invalid recovery version::Use a released version such as 0.9.1 without the v prefix."
+              exit 1
+            fi
+            RELEASE_REF="refs/tags/v${MANUAL_VERSION}"
+          else
+            if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error title=Invalid release commit::The completed Release workflow did not provide a valid commit SHA."
+              exit 1
+            fi
+            RELEASE_REF="$RELEASE_SHA"
+          fi
+          echo "ref=${RELEASE_REF}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ steps.release-ref.outputs.ref }}
 
-      - name: Get version from pyproject.toml
+      - name: Get version from the released source
         id: version
+        env:
+          MANUAL_VERSION: ${{ inputs.version || '' }}
         run: |
           python3 - <<'PY'
           import os
@@ -30,9 +64,32 @@ jobs:
               version = tomllib.load(source)["project"]["version"]
           if re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}(?:[a-zA-Z0-9.]+)?", version) is None:
               raise SystemExit(f"The release version is invalid: {version!r}.")
+          requested = os.environ["MANUAL_VERSION"].strip()
+          if requested and requested != version:
+              raise SystemExit(
+                  f"The requested recovery version {requested!r} does not match "
+                  f"the checked out release version {version!r}."
+              )
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
               output.write(f"version={version}\n")
           PY
+
+      - name: Verify Homebrew tap credentials
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error title=Missing Homebrew tap token::Set the HOMEBREW_TAP_TOKEN Actions secret with write access to ${TAP_REPO}."
+            exit 1
+          fi
+
+          gh auth status --hostname github.com
+          CAN_PUSH="$(gh api "repos/${TAP_REPO}" --jq '.permissions.push // false')"
+          if [[ "$CAN_PUSH" != "true" ]]; then
+            echo "::error title=Homebrew tap token lacks write access::HOMEBREW_TAP_TOKEN cannot push to ${TAP_REPO}."
+            exit 1
+          fi
 
       - name: Get sdist URL and SHA256 from PyPI
         id: sha
@@ -78,24 +135,50 @@ jobs:
           VERSION="$RELEASE_VERSION"
           SHA="$RELEASE_SHA256"
           URL="$RELEASE_URL"
-          TAP_REPO="the-focus-company/homebrew-ppmlx"
+          BRANCH="auto/v${VERSION}"
 
           [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){2}([a-zA-Z0-9.]+)?$ ]]
           [[ "$SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$URL" == https://files.pythonhosted.org/* ]]
 
+          EXISTING_PR="$(
+            gh pr list \
+              --repo "$TAP_REPO" \
+              --state open \
+              --head "$BRANCH" \
+              --json url \
+              --jq '.[0].url // empty'
+          )"
+          if [[ -n "$EXISTING_PR" ]]; then
+            echo "::notice title=Homebrew update already open::$EXISTING_PR"
+            exit 0
+          fi
+
           gh repo clone "$TAP_REPO" tap -- --depth 1
           cd tap
+
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$BRANCH"
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -b "$BRANCH"
+          fi
 
           sed -i "s|url \".*\"|url \"${URL}\"|" Formula/ppmlx.rb
           sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/ppmlx.rb
 
-          BRANCH="auto/v${VERSION}"
-          git checkout -b "$BRANCH"
-          git add Formula/ppmlx.rb
-          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
-            commit -m "ppmlx ${VERSION}"
-          git push origin "$BRANCH"
+          if ! git diff --quiet -- Formula/ppmlx.rb; then
+            git add Formula/ppmlx.rb
+            git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
+              commit -m "ppmlx ${VERSION}"
+            git push --set-upstream origin "$BRANCH"
+          fi
+
+          DEFAULT_BRANCH="$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')"
+          if git diff --quiet "origin/${DEFAULT_BRANCH}"..."$BRANCH"; then
+            echo "::notice title=Homebrew formula already current::No tap pull request is required for ppmlx ${VERSION}."
+            exit 0
+          fi
 
           gh pr create \
             --repo "$TAP_REPO" \
