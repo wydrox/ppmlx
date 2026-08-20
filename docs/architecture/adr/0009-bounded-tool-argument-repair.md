@@ -4,6 +4,7 @@
 - Date: 2026-08-20
 - Amends: ADR 0003
 - Clarifies: ADR 0002
+- Implementation status: Contract only. ppmlx 0.9.1 remains strict.
 
 ## Context
 
@@ -26,7 +27,7 @@ After this boundary, `arguments_raw` is the exact argument text that ppmlx valid
 ppmlx does not change that accepted text later in the request.
 
 The malformed model output is provider evidence, not accepted Agent IR content.
-ppmlx records sanitized repair metadata and content digests.
+ppmlx records sanitized repair metadata that contains no argument-derived content or digest.
 It does not store the malformed argument text for this purpose.
 
 ## Capability levels
@@ -120,20 +121,16 @@ The related completed tool-call event includes this namespaced extension:
   "ppmlx.tool_argument_repair": {
     "policy": "bounded-json-v1",
     "kind": "trailing_comma",
-    "profile": "qwen-json-v1",
-    "source_sha256": "<64 lowercase hexadecimal characters>",
-    "effective_sha256": "<64 lowercase hexadecimal characters>"
+    "profile": "qwen-json-v1"
   }
 }
 ```
 
-The extension must not include raw model output, raw arguments, secrets, prompts, or tool results.
-The digests support correlation only.
-They do not make the malformed source part of durable memory.
+The extension must not include raw model output, raw arguments, argument-derived hashes, secrets, prompts, or tool results.
+A harness must never need the extension to link a result to the call.
 
 Adapters must preserve this extension when the target protocol supports equivalent metadata.
 Otherwise, the extension remains internal diagnostic data.
-A harness must never need the extension to link a result to the call.
 
 ## Errors and diagnostics
 
@@ -145,10 +142,9 @@ Logs and traces can contain:
 - request, output, and call identifiers;
 - model profile and capability level;
 - repair policy and repair kind;
-- source and effective digests;
-- sanitized error code.
+- sanitized outcome or error code.
 
-They must not contain the malformed argument text or a repaired value that can include secrets.
+They must not contain the malformed argument text, a repaired value that can include secrets, or an argument-derived hash.
 
 Profile evaluation must report repair counts and repair rates.
 A high repair rate can prevent a profile from receiving stable status even when its final valid-call rate passes the numeric threshold.
@@ -161,6 +157,8 @@ Repair does not increase its trust or sensitivity classification.
 The repair implementation must use bounded scanning and parsing.
 It must obey the same byte, depth, node, string, call-count, and time limits as strict normalization.
 It must not resolve external schema references or fetch remote data.
+It must not create a durable content fingerprint from malformed or repaired arguments.
+ADR 0007 prohibits an unsalted hash of a credential because it can still identify a low-entropy secret.
 
 The harness remains the only tool executor.
 Repair does not grant tool permission and does not bypass harness approval.
