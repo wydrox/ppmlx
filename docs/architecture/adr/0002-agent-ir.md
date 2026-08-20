@@ -1,6 +1,6 @@
 # ADR 0002: Agent IR
 
-- Status: Accepted
+- Status: Accepted; clarified by [ADR 0009](0009-bounded-tool-argument-repair.md)
 - Date: 2026-08-18
 
 ## Context
@@ -15,7 +15,11 @@ It also makes identifier loss and stream-order defects difficult to find.
 
 ppmlx uses one versioned Agent IR between ingress adapters, the router, and egress adapters.
 The Agent IR is lossless for the accepted ppmlx protocol surface.
-It keeps source order, stable identifiers, raw tool arguments, and supported vendor data.
+It keeps source order, stable identifiers, accepted raw tool arguments, and supported vendor data.
+
+For a native harness or provider protocol, the accepted surface starts after the ingress adapter decodes the native value.
+For a local `template_structured` or `prompt_emulated` model profile, the accepted surface starts after the versioned profile applies strict normalization and any repair permitted by ADR 0009.
+ppmlx must not change an accepted Agent IR argument value later in the request.
 
 The first contract version is `agent-ir/v1`.
 The representation contains a conversation envelope, linked requests, ordered blocks, tool definitions, events, usage, and errors.
@@ -124,9 +128,12 @@ It also defines these action and control block kinds:
 A `tool_call` contains `call_id`, `name`, `arguments_raw`, and optional `arguments_json`.
 A `tool_result` contains `call_id`, ordered result content, and `is_error`.
 
-`arguments_raw` is the exact complete argument text after the ingress adapter decodes the source protocol.
-`arguments_json` exists only when the complete text is valid JSON.
+`arguments_raw` is the exact complete argument text after the accepted normalization boundary.
+For a native protocol, this is the text after the ingress adapter decodes the source value.
+For a local model profile, this is the text after strict normalization and any bounded repair permitted by ADR 0009.
+`arguments_json` exists only when the accepted complete text is valid JSON.
 The raw value remains authoritative for round-trip conversion.
+A repaired call records sanitized repair metadata in a namespaced extension.
 
 ## Sensitivity and provenance
 
@@ -165,10 +172,10 @@ Tool calls and results use these lifecycle events:
 - `tool_call.completed`
 - `tool_result`
 
-Tool argument deltas keep their source order.
+Tool argument deltas keep their accepted order.
 Each tool event contains `tool_call_index` and the related `call_id`.
 Parallel tool events can contain `parallel_group_id`.
-The adapter must assemble the deltas without changing their character sequence.
+The adapter must assemble the accepted deltas without changing their character sequence.
 The final tool call uses the same `call_id` as all related events.
 
 `tool_call.started` also contains `name`.
@@ -228,8 +235,9 @@ ppmlx MUST NOT use a raw request body as the only semantic representation.
 
 ### Values and extensions
 
-- An adapter MUST keep `arguments_raw` exactly after the source stream completes.
-- An adapter MUST NOT repair invalid JSON without an explicit error or policy decision.
+- An adapter or model profile MUST keep `arguments_raw` exactly after Agent IR accepts the value.
+- Invalid JSON MUST NOT be repaired without an explicit error or the bounded policy in ADR 0009.
+- A repair under ADR 0009 MUST add its sanitized namespaced extension before egress encoding.
 - Names in `extensions` MUST use a protocol or provider namespace.
 - An egress adapter MUST preserve an extension when the target supports the same meaning.
 - The router MUST NOT inspect or change opaque reasoning content.
@@ -251,6 +259,7 @@ It must stay in memory unless a separate retention policy permits storage.
 
 The `extensions` field must not become a path around redaction or route policy.
 Adapters must classify sensitive extension data before diagnostics store it.
+Repair metadata must not contain raw malformed arguments, repaired secret values, prompts, or tool results.
 Opaque reasoning content must not enter logs or memory by default.
 
 Absent classification and provenance data cause the fail-closed defaults.
@@ -265,9 +274,10 @@ Each harness protocol needs one ingress and one response adapter.
 Each provider needs one egress and one response adapter.
 The design avoids a converter for each harness-provider pair.
 
-The exact raw and normalized values need more memory during a request.
+The exact accepted raw and normalized values need more memory during a request.
+A repaired local call also needs bounded, sanitized repair metadata until retention rules remove it.
 Phase 1 fixtures prove four successful tool round trips.
-Future fixtures must prove parallel calls, mixed content, refusals, cancellations, provider errors, and unsupported-state rejection.
+Future fixtures must prove parallel calls, mixed content, refusals, cancellations, provider errors, unsupported-state rejection, and bounded repair behavior.
 
 ## Compatibility effects
 
@@ -295,6 +305,7 @@ It also encourages silent loss of content blocks and identifiers.
 
 This option removes whitespace, duplicate keys, number spelling, and invalid source text.
 It prevents a lossless round trip and can change provider behavior.
+ADR 0009 permits only a bounded, disclosed repair before Agent IR accepts a local call.
 
 ### Store the complete raw request only
 
