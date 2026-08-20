@@ -227,6 +227,7 @@ class TextEngine:
     def _apply_chat_template(
         self, lm: LoadedModel, messages: list[dict],
         enable_thinking: bool = True, tools: list[dict] | None = None,
+        strict_tools: bool = False,
     ) -> str:
         """Apply the model's chat template to produce a prompt string."""
         tokenizer = lm.tokenizer
@@ -249,6 +250,10 @@ class TextEngine:
             except TypeError:
                 # Tokenizer doesn't support 'tools' kwarg — retry without it
                 if tools and "tools" in kwargs:
+                    if strict_tools:
+                        raise RuntimeError(
+                            "The selected local model cannot accept tool definitions"
+                        ) from None
                     log.warning(
                         "Tokenizer for %s does not support 'tools' kwarg — "
                         "%d tools dropped from chat template. "
@@ -285,6 +290,7 @@ class TextEngine:
         enable_thinking: bool = True,
         tools: list[dict] | None = None,
         reasoning_budget: int | None = None,
+        strict_tools: bool = False,
     ) -> GenerateResult:
         """
         Generate a response.
@@ -302,7 +308,13 @@ class TextEngine:
         lm = self._get_or_load(repo_id)
         if max_tokens is None:
             max_tokens = _auto_max_tokens(lm)
-        prompt = self._apply_chat_template(lm, messages, enable_thinking=enable_thinking, tools=tools)
+        prompt = self._apply_chat_template(
+            lm,
+            messages,
+            enable_thinking=enable_thinking,
+            tools=tools,
+            strict_tools=strict_tools,
+        )
 
         try:
             from mlx_lm.sample_utils import make_sampler
@@ -351,7 +363,11 @@ class TextEngine:
             if text == "" and reasoning is not None and enable_thinking:
                 log.info("Empty answer after thinking — retrying with enable_thinking=False")
                 retry_prompt = self._apply_chat_template(
-                    lm, messages, enable_thinking=False, tools=tools,
+                    lm,
+                    messages,
+                    enable_thinking=False,
+                    tools=tools,
+                    strict_tools=strict_tools,
                 )
                 retry_kwargs = {**kwargs, "prompt": retry_prompt}
                 text = mlx_generate(lm.model, lm.tokenizer, **retry_kwargs)
@@ -380,6 +396,7 @@ class TextEngine:
         strip_thinking: bool = True,
         tools: list[dict] | None = None,
         reasoning_budget: int | None = None,
+        strict_tools: bool = False,
     ) -> Iterator[str]:
         """
         Stream token-by-token generation.
@@ -395,7 +412,13 @@ class TextEngine:
         lm = self._get_or_load(repo_id)
         if max_tokens is None:
             max_tokens = _auto_max_tokens(lm)
-        prompt = self._apply_chat_template(lm, messages, enable_thinking=enable_thinking, tools=tools)
+        prompt = self._apply_chat_template(
+            lm,
+            messages,
+            enable_thinking=enable_thinking,
+            tools=tools,
+            strict_tools=strict_tools,
+        )
 
         try:
             from mlx_lm.sample_utils import make_sampler

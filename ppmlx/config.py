@@ -21,6 +21,8 @@ class ServerConfig:
     max_request_body_mb: int = 10
     max_tokens_cap: int = 32768
     max_tools_tokens: int = 12000
+    agent_runtime: str = "legacy"  # legacy | agent_ir
+    continuation_ttl_seconds: int = 86400
 
 
 @dataclass
@@ -196,6 +198,15 @@ def _normalize_tool_awareness_mode(value: Any) -> str:
     return aliases.get(raw, "no_tools_only")
 
 
+def _normalize_agent_runtime(value: Any) -> str:
+    raw = str(value).strip().lower().replace("-", "_")
+    return raw if raw in {"legacy", "agent_ir"} else "invalid"
+
+
+def _normalize_continuation_ttl(value: Any) -> int:
+    return _clamped_int(value, default=86400, min_value=1, max_value=604800)
+
+
 def _normalize_analytics_host(value: Any) -> str:
     host = str(value).strip().rstrip("/")
     if host in LEGACY_ANALYTICS_HOSTS:
@@ -240,6 +251,11 @@ def _apply_toml(cfg: Config, data: dict) -> None:
         if "max_request_body_mb" in s: cfg.server.max_request_body_mb = int(s["max_request_body_mb"])
         if "max_tokens_cap" in s: cfg.server.max_tokens_cap = int(s["max_tokens_cap"])
         if "max_tools_tokens" in s: cfg.server.max_tools_tokens = int(s["max_tools_tokens"])
+        if "agent_runtime" in s: cfg.server.agent_runtime = _normalize_agent_runtime(s["agent_runtime"])
+        if "continuation_ttl_seconds" in s:
+            cfg.server.continuation_ttl_seconds = _normalize_continuation_ttl(
+                s["continuation_ttl_seconds"]
+            )
     if "defaults" in data:
         d = data["defaults"]
         if "model" in d: cfg.defaults.model = str(d["model"])
@@ -305,6 +321,10 @@ def _apply_env(cfg: Config) -> None:
         "PPMLX_CORS": ("server", "cors", _parse_bool),
         "PPMLX_MAX_LOADED_MODELS": ("server", "max_loaded_models", int),
         "PPMLX_MAX_TOOLS_TOKENS": ("server", "max_tools_tokens", int),
+        "PPMLX_AGENT_RUNTIME": ("server", "agent_runtime", _normalize_agent_runtime),
+        "PPMLX_CONTINUATION_TTL_SECONDS": (
+            "server", "continuation_ttl_seconds", _normalize_continuation_ttl
+        ),
         "PPMLX_DEFAULT_MODEL": ("defaults", "model", str),
         "PPMLX_DEFAULT_EMBED_MODEL": ("defaults", "embed_model", str),
         "PPMLX_TEMP": ("defaults", "temperature", float),

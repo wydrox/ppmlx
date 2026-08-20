@@ -154,6 +154,22 @@ provider = "posthog"
 respect_do_not_track = true
 ```
 
+### Strict local tool runtime
+
+The strict Agent IR runtime is opt-in. It supports buffered, streamed tool turns for Claude Code, Codex over Responses HTTP, OpenCode, and Pi. The harness runs each tool. ppmlx does not run a harness tool.
+
+```toml
+[server]
+agent_runtime = "agent_ir"          # legacy | agent_ir
+continuation_ttl_seconds = 86400
+```
+
+You can also set `PPMLX_AGENT_RUNTIME=agent_ir`. The strict path applies only to requests that use `stream=true` and provide tools. It supports the Chat Completions, Responses HTTP, and Anthropic Messages paths. It buffers one local model turn, validates it, and then sends SSE data. It does not provide live token streaming for a tool turn.
+
+The first release supports named output profiles for Grok, Kimi K2, DeepSeek V3, and Qwen models. ppmlx rejects an unknown profile, an unsupported tool schema, an invalid result link, or a request that can lose tool data. In strict mode, tool requests cannot use the legacy path. Responses WebSocket tool requests are rejected until that transport uses the same Agent IR runtime.
+
+For this opt-in release, strict tool traffic must come from the loopback listener. A reverse proxy or a LAN client cannot use this path yet. See the [local Agent IR runtime guide](docs/architecture/local-agent-runtime.md) for the full boundary.
+
 ### Experimental local memory
 
 Shadow-mode memory capture stores request/response events and high-precision memory candidates locally in `~/.ppmlx/memory.db`. It does **not** inject memory into prompts yet.

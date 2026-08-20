@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+- An opt-in, buffered Agent IR runtime for streamed tool turns on Chat Completions, Responses HTTP, and Anthropic Messages.
+- Versioned local output profiles for Grok, Kimi K2, DeepSeek V3, and Qwen tool-call formats.
+- A scoped continuation ledger that keeps call identity, route pins, retries, parallel groups, expiry, and tombstones without tool arguments or results.
+
+### Changed
+- The MLX engine can now reject a tokenizer that drops tool definitions instead of silently retrying without tools.
+- Request body limits now count received HTTP chunks when `Content-Length` is absent.
+- The strict runtime now applies parallel-tool, usage, storage, and Claude Code thinking options before local generation.
+
+### Security
+- Validate local tool arguments against a bounded JSON Schema subset and apply time limits to string patterns.
+- Reject strict-runtime tool traffic that could fall back to a legacy path, including Responses WebSocket tool requests.
+- Restrict the opt-in strict runtime to loopback clients and isolate continuation state by principal, project, harness, conversation, and call.
+- Bound local generation, output normalization, active conversations, retained Agent IR bytes, and replay responses.
+- Apply hard continuation-ledger backpressure, keep credential values out of scope identifiers, and join exact concurrent retries without a second generation.
+
 ## [0.8.0] - 2026-08-18
 
 ### Added

@@ -25,6 +25,8 @@ class TestDefaultValues:
         assert cfg.port == 6767
         assert cfg.cors is True
         assert cfg.max_loaded_models == 2
+        assert cfg.agent_runtime == "legacy"
+        assert cfg.continuation_ttl_seconds == 86400
 
     def test_defaults_config_defaults(self):
         cfg = DefaultsConfig()
@@ -105,6 +107,8 @@ host = "0.0.0.0"
 port = 8080
 cors = false
 max_loaded_models = 4
+agent_runtime = "agent-ir"
+continuation_ttl_seconds = 3600
 
 [defaults]
 model = "llama3:8b"
@@ -157,6 +161,8 @@ respect_do_not_track = true
         assert cfg.server.port == 8080
         assert cfg.server.cors is False
         assert cfg.server.max_loaded_models == 4
+        assert cfg.server.agent_runtime == "agent_ir"
+        assert cfg.server.continuation_ttl_seconds == 3600
         assert cfg.defaults.model == "llama3:8b"
         assert cfg.defaults.embed_model == "embed:custom"
         assert cfg.defaults.temperature == 0.5
@@ -242,6 +248,22 @@ class TestEnvVarOverrides:
         monkeypatch.setenv("PPMLX_MAX_LOADED_MODELS", "5")
         cfg = load_config()
         assert cfg.server.max_loaded_models == 5
+
+    def test_agent_runtime_env_var(self, tmp_home, monkeypatch):
+        monkeypatch.setenv("PPMLX_AGENT_RUNTIME", "agent-ir")
+        monkeypatch.setenv("PPMLX_CONTINUATION_TTL_SECONDS", "999999999")
+        cfg = load_config()
+        assert cfg.server.agent_runtime == "agent_ir"
+        assert cfg.server.continuation_ttl_seconds == 604800
+
+    def test_invalid_agent_runtime_does_not_enable_legacy_tool_fallback(
+        self, tmp_home, monkeypatch
+    ):
+        monkeypatch.setenv("PPMLX_AGENT_RUNTIME", "agent-ur")
+
+        cfg = load_config()
+
+        assert cfg.server.agent_runtime == "invalid"
 
     def test_default_model_env_var(self, tmp_home, monkeypatch):
         monkeypatch.setenv("PPMLX_DEFAULT_MODEL", "mistral:7b")
