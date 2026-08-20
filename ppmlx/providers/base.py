@@ -212,11 +212,11 @@ class ProviderCallReference:
     parallel_group_id: str | None = None
 
     def __post_init__(self) -> None:
-        for value in (self.call_id, self.name, self.output_id):
-            if not _valid_model_id(value):
+        for text_value in (self.call_id, self.name, self.output_id):
+            if not _valid_model_id(text_value):
                 raise ValueError("Provider call reference is invalid")
-        for value in (self.choice_index, self.tool_call_index):
-            if type(value) is not int or value < 0:
+        for index_value in (self.choice_index, self.tool_call_index):
+            if type(index_value) is not int or index_value < 0:
                 raise ValueError("Provider call index is invalid")
         if self.parallel_group_id is not None and not _valid_model_id(
             self.parallel_group_id
