@@ -34,18 +34,15 @@ def test_qwen_repairs_one_trailing_comma_inside_arguments() -> None:
     assert call.repair.profile == "qwen-json-v1"
 
 
-def test_qwen_repairs_one_missing_inner_final_delimiter() -> None:
-    output = normalize_tool_output(
-        '<tool_call>{"name":"read","arguments":{"path":"main.py"}</tool_call>',
-        profile="qwen-json-v1",
-        repair_policy="bounded-json-v1",
-    )
+def test_qwen_rejects_ambiguous_missing_inner_or_outer_delimiter() -> None:
+    with pytest.raises(ToolNormalizationError) as captured:
+        normalize_tool_output(
+            '<tool_call>{"name":"read","arguments":{"path":"main.py"}</tool_call>',
+            profile="qwen-json-v1",
+            repair_policy="bounded-json-v1",
+        )
 
-    call = output.tool_calls[0]
-    assert call.arguments_raw == '{"path":"main.py"}'
-    assert call.arguments_json == {"path": "main.py"}
-    assert call.repair is not None
-    assert call.repair.kind is ToolArgumentRepairKind.MISSING_FINAL_DELIMITER
+    assert captured.value.code == "repair_ambiguous"
 
 
 def test_qwen_repairs_one_double_encoded_object() -> None:
