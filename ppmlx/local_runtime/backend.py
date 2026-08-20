@@ -40,6 +40,7 @@ from .normalization import (
     ToolOutputLimits,
     normalize_tool_output,
 )
+from .tool_profiles import get_tool_profile_contract
 
 
 class LocalRuntimeError(ValueError):
@@ -437,7 +438,15 @@ def execute_local_request(
 
     if engine_request.tools:
         assert profile is not None
-        normalized = normalize_tool_output(generation.text, profile=profile, limits=limits)
+        profile_contract = get_tool_profile_contract(profile)
+        if profile_contract is None:
+            raise LocalRuntimeError("tool_profile_required")
+        normalized = normalize_tool_output(
+            generation.text,
+            profile=profile,
+            limits=limits,
+            repair_policy=profile_contract.repair_policy,
+        )
     else:
         normalized = None
 
@@ -517,6 +526,14 @@ def execute_local_request(
         }
         if tool_call.arguments_json is not None:
             completed["arguments_json"] = tool_call.arguments_json
+        if tool_call.repair is not None:
+            completed["extensions"] = {
+                "ppmlx.tool_argument_repair": {
+                    "policy": tool_call.repair.policy.value,
+                    "kind": tool_call.repair.kind.value,
+                    "profile": tool_call.repair.profile,
+                }
+            }
         events.append(ToolCallCompletedEvent.model_validate(completed))
         sequence += 1
         calls.append(
