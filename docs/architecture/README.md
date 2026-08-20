@@ -21,13 +21,12 @@ The following accepted decisions complete the Phase 1 contract:
 - [ADR 0007: Retention and Redaction](adr/0007-retention-and-redaction.md)
 - [ADR 0008: Compatibility](adr/0008-compatibility.md)
 
-## Accepted amendments
+The following accepted decision amends the contract for Phase 4:
 
-- [Amendment 0001: Bounded Tool-Argument Repair](amendments/0001-bounded-tool-argument-repair.md)
+- [ADR 0009: Bounded Tool-Argument Repair](adr/0009-bounded-tool-argument-repair.md)
 
-Amendment 0001 resolves the Phase 4 repair policy.
-It amends ADR 0003 and clarifies the Agent IR acceptance boundary in ADR 0002.
-A later accepted amendment takes precedence only for the rules that it explicitly changes.
+ADR 0009 amends ADR 0003 and clarifies the Agent IR acceptance boundary in ADR 0002.
+A later accepted ADR takes precedence only for the rules that it explicitly amends.
 
 The [contract fixture manifest](../../tests/fixtures/contracts/manifest.json) records the exact harness and protocol versions for Phase 1.
 The [Agent IR v1 JSON Schema](schema/agent-ir-v1.schema.json) defines the normalized request and event shapes.
@@ -35,10 +34,10 @@ The [local Agent IR runtime guide](local-agent-runtime.md) defines the Phase 4 i
 
 ## Contract rules
 
-- These ADRs and amendments define contracts.
-- A contract document does not add runtime behavior by itself.
+- These ADRs define contracts.
+- An ADR does not add runtime behavior by itself.
 - A later phase must add contract tests before it changes a frozen contract.
-- A new contract decision must replace or explicitly amend an accepted decision.
+- A new ADR must replace or amend an accepted decision.
 - An implementation must not silently change an accepted decision.
 - An amendment must name the decisions and rules that it changes.
 
