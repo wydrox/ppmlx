@@ -6,14 +6,22 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import threading
+from types import SimpleNamespace
 from typing import Mapping
+from unittest.mock import MagicMock
 
 import pytest
 
 from ppmlx import continuation as continuation_module
 from ppmlx.local_runtime import runtime as runtime_module
 from ppmlx.local_runtime.backend import LocalEngineRequest, LocalGeneration
-from ppmlx.local_runtime.runtime import AgentRuntimeError, LocalAgentRuntime, RuntimeResponse, RuntimeScope
+from ppmlx.local_runtime.runtime import (
+    AgentRuntimeError,
+    LocalAgentRuntime,
+    RuntimeResponse,
+    RuntimeScope,
+    default_model_resolver,
+)
 from ppmlx.continuation import CallState, ContinuationLedger, ContinuationTicket, LedgerKey
 from ppmlx.protocols.sse import SSEFrame, parse_sse
 
@@ -138,6 +146,77 @@ def _runtime(case: RuntimeCase) -> tuple[LocalAgentRuntime, StubGenerator]:
         resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
     )
     return runtime, generator
+
+
+def test_default_model_resolver_uses_configured_local_model_for_remote_request(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ppmlx.engine.get_engine",
+        MagicMock(side_effect=AssertionError("legacy engine queried")),
+    )
+    monkeypatch.setattr(
+        "ppmlx.models.resolve_alias",
+        lambda value: "mlx-community/Qwen3" if value == "qwen" else value,
+    )
+    monkeypatch.setattr(
+        "ppmlx.models.get_model_path",
+        lambda value: Path("/safe/model") if value == "mlx-community/Qwen3" else None,
+    )
+    monkeypatch.setattr(
+        "ppmlx.config.load_config",
+        lambda: SimpleNamespace(defaults=SimpleNamespace(model="qwen")),
+    )
+
+    assert default_model_resolver("provider/remote-model", "openai-chat") == "mlx-community/Qwen3"
+    assert default_model_resolver("/etc", "openai-chat") == "mlx-community/Qwen3"
+
+
+def test_default_model_resolver_accepts_downloaded_local_model(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ppmlx.models.resolve_alias",
+        lambda value: "mlx-community/Qwen3" if value == "qwen" else value,
+    )
+    monkeypatch.setattr(
+        "ppmlx.models.get_model_path",
+        lambda value: Path("/safe/model") if value == "mlx-community/Qwen3" else None,
+    )
+
+    assert default_model_resolver("qwen", "openai-responses") == "mlx-community/Qwen3"
+
+
+def test_default_model_resolver_rejects_unavailable_model(monkeypatch) -> None:
+    monkeypatch.setattr("ppmlx.models.resolve_alias", lambda value: value)
+    monkeypatch.setattr("ppmlx.models.get_model_path", lambda _value: None)
+    monkeypatch.setattr(
+        "ppmlx.config.load_config",
+        lambda: SimpleNamespace(defaults=SimpleNamespace(model="missing-default")),
+    )
+
+    with pytest.raises(AgentRuntimeError) as caught:
+        default_model_resolver("provider/remote-model", "anthropic-messages")
+
+    assert caught.value.code == "local_model_unavailable"
+    assert caught.value.status_code == 503
+
+
+def test_runtime_enforces_total_conversation_budget() -> None:
+    case = CASES[0]
+    generator = StubGenerator(case)
+    runtime = LocalAgentRuntime(
+        generate=generator,
+        resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
+        max_total_conversation_bytes=1,
+    )
+
+    with pytest.raises(AgentRuntimeError) as caught:
+        runtime.execute(
+            _json(case, "initial-request.json"),
+            protocol=case.protocol,
+            scope=SCOPE,
+        )
+
+    assert caught.value.code == "conversation_capacity_exceeded"
+    assert runtime._conversation_bytes == 0
+    assert not runtime._conversations
 
 
 def _frames(response: RuntimeResponse) -> tuple[SSEFrame, ...]:
@@ -560,6 +639,78 @@ def test_exact_concurrent_retry_joins_one_continuation() -> None:
 
     assert joined_response == owner_response
     assert len(generator.requests) == 2
+
+
+def test_local_generation_uses_one_dedicated_thread() -> None:
+    case = CASES[0]
+    thread_ids: list[int] = []
+
+    class ThreadRecordingGenerator(StubGenerator):
+        def __call__(self, request: LocalEngineRequest) -> LocalGeneration:
+            thread_ids.append(threading.get_ident())
+            return super().__call__(request)
+
+    generator = ThreadRecordingGenerator(case)
+    runtime = LocalAgentRuntime(
+        generate=generator,
+        resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
+    )
+    first = runtime.execute(
+        _json(case, "initial-request.json"),
+        protocol=case.protocol,
+        scope=SCOPE,
+    )
+    runtime.execute(
+        _continuation(case, first),
+        protocol=case.protocol,
+        scope=SCOPE,
+    )
+
+    assert len(thread_ids) == 2
+    assert len(set(thread_ids)) == 1
+    assert thread_ids[0] != threading.get_ident()
+
+
+def test_default_generator_uses_isolated_engine_on_dedicated_thread(monkeypatch) -> None:
+    case = CASES[0]
+    thread_ids: list[int] = []
+    runtime_module.reset_local_agent_runtime()
+
+    class StrictEngine:
+        def __init__(self, *, max_loaded: int) -> None:
+            assert max_loaded == 1
+            thread_ids.append(threading.get_ident())
+
+        def generate(self, *args, **kwargs):
+            thread_ids.append(threading.get_ident())
+            arguments = json.dumps(case.arguments, separators=(",", ":"))
+            return SimpleNamespace(
+                text=f'<tool_call>{{"name":"{case.tool_name}","arguments":{arguments}}}</tool_call>',
+                prompt_tokens=1,
+                completion_tokens=1,
+            )
+
+        def unload_all(self) -> None:
+            thread_ids.append(threading.get_ident())
+
+    monkeypatch.setattr("ppmlx.engine.TextEngine", StrictEngine)
+    runtime = LocalAgentRuntime(
+        resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
+    )
+
+    try:
+        runtime.execute(
+            _json(case, "initial-request.json"),
+            protocol=case.protocol,
+            scope=SCOPE,
+        )
+
+    finally:
+        runtime_module.reset_local_agent_runtime()
+
+    assert len(thread_ids) == 3
+    assert len(set(thread_ids)) == 1
+    assert thread_ids[0] != threading.get_ident()
 
 
 def test_responses_echoes_disabled_parallel_tool_calls() -> None:

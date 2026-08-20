@@ -49,7 +49,7 @@ class VisionEngine:
     ) -> list[str | bytes]:
         """
         Extract image references from message content.
-        Returns list of: URLs (str) or temp file paths from base64 data.
+        Returns local paths or decoded image bytes.
 
         When ``allow_local_paths`` is False (default, for API requests),
         ``file://`` URLs and bare filesystem paths are rejected to prevent
@@ -64,14 +64,9 @@ class VisionEngine:
                         image_url = part.get("image_url", {})
                         url = image_url.get("url", "") if isinstance(image_url, dict) else ""
                         if url.startswith("data:image/"):
-                            # base64 data URI -> decode to bytes, save to temp file
                             try:
-                                header, data = url.split(",", 1)
-                                img_bytes = base64.b64decode(data)
-                                tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                                tmp.write(img_bytes)
-                                tmp.close()
-                                images.append(tmp.name)
+                                _, data = url.split(",", 1)
+                                images.append(base64.b64decode(data, validate=True))
                             except Exception:
                                 pass
                         elif url.startswith("file://"):
@@ -83,7 +78,7 @@ class VisionEngine:
                                 images.append(str(Path(url).expanduser()))
                             # else: silently skip
                         elif url and (url.startswith("http://") or url.startswith("https://")):
-                            images.append(url)  # HTTP(S) URL — pass through to mlx-vlm
+                            raise ValueError("Remote image URLs are not supported")
                         # else: skip unknown schemes
         return images
 
@@ -117,15 +112,21 @@ class VisionEngine:
                         text_parts.append(part.get("text", ""))
         prompt = "\n".join(text_parts)
 
-        output = vlm_generate(
-            model,
-            processor,
-            prompt=prompt,
-            image=images[0] if images else None,
-            max_tokens=max_tokens,
-            temp=temperature,
-            verbose=False,
-        )
+        with tempfile.TemporaryDirectory(prefix="ppmlx-vlm-") as temp_dir:
+            image = images[0] if images else None
+            if isinstance(image, bytes):
+                image_path = Path(temp_dir) / "image.jpg"
+                image_path.write_bytes(image)
+                image = str(image_path)
+            output = vlm_generate(
+                model,
+                processor,
+                prompt=prompt,
+                image=image,
+                max_tokens=max_tokens,
+                temp=temperature,
+                verbose=False,
+            )
 
         prompt_tokens = len(prompt.split())
         completion_tokens = len(str(output).split())

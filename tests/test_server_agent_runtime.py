@@ -184,6 +184,54 @@ def test_strict_responses_websocket_rejects_tools_before_legacy(
     assert not legacy_engine.called
 
 
+def test_strict_responses_websocket_rejects_mixed_nested_and_outer_fields(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "_get_agent_runtime_config", lambda: ("agent_ir", 600))
+    legacy_engine = MagicMock(side_effect=AssertionError("legacy engine called"))
+    monkeypatch.setattr(engine_module, "get_engine", legacy_engine)
+    nested = _json(CASES[2], "initial-request.json")
+    tools = nested.pop("tools")
+
+    with client.websocket_connect("/v1/responses") as websocket:
+        websocket.send_json(
+            {
+                "type": "response.create",
+                "response": nested,
+                "tools": tools,
+            }
+        )
+        event = websocket.receive_json()
+
+    assert event == {
+        "type": "error",
+        "error": {
+            "type": "invalid_request",
+            "code": "mixed_response_create_fields",
+        },
+    }
+    assert not legacy_engine.called
+
+
+def test_responses_websocket_limit_counts_utf8_bytes(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "_get_max_request_body_bytes", lambda: 65)
+    raw = '{"type":"response.create","pad":"' + ("ą" * 20) + '"}'
+    assert len(raw) < 65 < len(raw.encode("utf-8"))
+
+    with client.websocket_connect("/v1/responses") as websocket:
+        websocket.send_text(raw)
+        event = websocket.receive_json()
+
+    assert event == {
+        "type": "error",
+        "error": {"type": "invalid_request", "message": "Message too large"},
+    }
+
+
 def test_invalid_runtime_mode_rejects_websocket_tools_before_legacy(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -338,6 +386,30 @@ def test_http_passes_configured_max_tokens_cap_to_runtime_getter(
         continuation_ttl_seconds=321,
         max_tokens_cap=777,
     )
+
+
+def test_http_uses_nonblocking_runtime_entrypoint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = CASES[0]
+    runtime, _ = _runtime(case)
+    sync_execute = MagicMock(side_effect=AssertionError("blocking execute called"))
+    monkeypatch.setattr(runtime, "execute", sync_execute)
+    monkeypatch.setattr(server, "_get_agent_runtime_config", lambda: ("agent_ir", 600))
+    monkeypatch.setattr(
+        runtime_module,
+        "get_local_agent_runtime",
+        lambda *, continuation_ttl_seconds, max_tokens_cap: runtime,
+    )
+
+    response = client.post(
+        ENDPOINTS[case.protocol],
+        json=_json(case, "initial-request.json"),
+    )
+
+    assert response.status_code == 200
+    assert not sync_execute.called
 
 
 @pytest.mark.parametrize(

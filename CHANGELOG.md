@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Changed
+- Keep strict local generation on one dedicated MLX thread while request parsing, health checks, and exact retry joins remain concurrent.
+- Refresh the locked dependency set to versions with no known advisories in the release audit.
+- Require vision API clients to send image data URIs. Remote HTTP image URLs are no longer accepted.
+
+### Fixed
+- Remove dead continuation state and combine the model-profile selector with the tool-output normalizer.
+- Delete decoded vision image files after each request.
+
+### Security
+- Prevent strict Responses WebSocket requests from mixing nested and outer tool fields.
+- Restrict strict runtime model selection to loaded or locally downloaded models. A request can no longer start a network model download or select an arbitrary filesystem path.
+- Bound the total retained Agent IR conversation data, WebSocket frame bytes, and continuation retry identity state.
+- Reject remote vision image fetches to prevent access to loopback, link-local, and private network services.
+
 ## [0.9.0] - 2026-08-20
 
 ### Added

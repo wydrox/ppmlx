@@ -7,10 +7,10 @@ import json
 import threading
 import time
 import uuid
-from concurrent.futures import TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
 from ppmlx import __version__
 from ppmlx.agent_ir import (
@@ -57,8 +57,14 @@ from .backend import (
     TerminalReasons,
     execute_local_request,
 )
-from .normalization import NormalizationProfile, ToolNormalizationError
-from .profiles import select_normalization_profile
+from .normalization import (
+    NormalizationProfile,
+    ToolNormalizationError,
+    select_normalization_profile,
+)
+
+if TYPE_CHECKING:
+    from ppmlx.engine import TextEngine
 
 
 SUPPORTED_PROTOCOLS = frozenset(
@@ -111,6 +117,7 @@ class _ConversationRecord:
     requests: list[RequestEnvelope]
     events: list[AgentEvent]
     expires_at: float
+    size_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,7 +156,11 @@ _CONTINUATION_JOIN_SECONDS = 120.0
 _MAX_RESPONSE_CACHE_ITEMS = 64
 _DEFAULT_MAX_ACTIVE_CONVERSATIONS = 128
 _DEFAULT_MAX_CONVERSATION_BYTES = 8 * 1024 * 1024
+_DEFAULT_MAX_TOTAL_CONVERSATION_BYTES = 64 * 1024 * 1024
 _ANTHROPIC_CACHE_CONTROL = "anthropic-messages.cache_control"
+_MLX_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ppmlx-mlx")
+_STRICT_ENGINE: TextEngine | None = None
+_STRICT_ENGINE_LOCK = threading.Lock()
 
 
 def _canonical_json(value: object) -> bytes:
@@ -421,9 +432,14 @@ def probe_tool_result_ids(
 def default_local_generator(request: LocalEngineRequest) -> LocalGeneration:
     """Run the current MLX text engine through its strict tool surface."""
 
-    from ppmlx.engine import get_engine
+    global _STRICT_ENGINE
+    if _STRICT_ENGINE is None:
+        with _STRICT_ENGINE_LOCK:
+            if _STRICT_ENGINE is None:
+                from ppmlx.engine import TextEngine
 
-    engine = get_engine()
+                _STRICT_ENGINE = TextEngine(max_loaded=1)
+    engine = _STRICT_ENGINE
     result = engine.generate(
         request.model,
         [dict(message) for message in request.messages],
@@ -445,30 +461,36 @@ def default_local_generator(request: LocalEngineRequest) -> LocalGeneration:
 
 
 def default_model_resolver(model: str, protocol: str) -> str:
-    """Resolve a native model name to one local MLX route."""
+    """Resolve a request to a model that is already present on this host."""
 
-    if protocol == "anthropic-messages" and model.startswith(("claude-", "anthropic/")):
-        try:
-            from ppmlx.engine import get_engine
-
-            loaded = get_engine().list_loaded()
-            if loaded:
-                return loaded[-1]
-        except Exception:
-            pass
-        try:
-            from ppmlx.config import load_config
-            from ppmlx.models import resolve_alias
-
-            return resolve_alias(load_config().defaults.model)
-        except Exception:
-            raise AgentRuntimeError("local_model_unavailable", status_code=503) from None
+    if protocol not in SUPPORTED_PROTOCOLS:
+        raise AgentRuntimeError("unsupported_protocol")
     try:
-        from ppmlx.models import resolve_alias
-
-        return resolve_alias(model)
+        from ppmlx.models import get_model_path, resolve_alias
     except Exception:
-        return model
+        raise AgentRuntimeError("local_model_unavailable", status_code=503) from None
+
+    def local_model(candidate: str) -> str | None:
+        try:
+            resolved = resolve_alias(candidate)
+            if get_model_path(resolved) is not None:
+                return resolved
+        except Exception:
+            return None
+        return None
+
+    requested = local_model(model)
+    if requested is not None:
+        return requested
+    try:
+        from ppmlx.config import load_config
+
+        configured = local_model(load_config().defaults.model)
+    except Exception:
+        configured = None
+    if configured is not None:
+        return configured
+    raise AgentRuntimeError("local_model_unavailable", status_code=503)
 
 
 class LocalAgentRuntime:
@@ -484,6 +506,7 @@ class LocalAgentRuntime:
         conversation_ttl_seconds: int = 86_400,
         max_active_conversations: int = _DEFAULT_MAX_ACTIVE_CONVERSATIONS,
         max_conversation_bytes: int = _DEFAULT_MAX_CONVERSATION_BYTES,
+        max_total_conversation_bytes: int = _DEFAULT_MAX_TOTAL_CONVERSATION_BYTES,
         max_concurrent_generations: int = 1,
     ) -> None:
         for value in (
@@ -491,6 +514,7 @@ class LocalAgentRuntime:
             conversation_ttl_seconds,
             max_active_conversations,
             max_conversation_bytes,
+            max_total_conversation_bytes,
             max_concurrent_generations,
         ):
             if type(value) is not int or value < 1:
@@ -504,6 +528,7 @@ class LocalAgentRuntime:
         self._conversation_ttl_seconds = conversation_ttl_seconds
         self._max_active_conversations = max_active_conversations
         self._max_conversation_bytes = max_conversation_bytes
+        self._max_total_conversation_bytes = max_total_conversation_bytes
         self._response_cache_seconds = min(
             _RESPONSE_CACHE_SECONDS,
             float(conversation_ttl_seconds),
@@ -511,6 +536,7 @@ class LocalAgentRuntime:
         self._generation_gate = threading.BoundedSemaphore(max_concurrent_generations)
         self._lock = threading.RLock()
         self._conversations: dict[tuple[str, str, str, str], _ConversationRecord] = {}
+        self._conversation_bytes = 0
         self._response_cache: dict[str, tuple[float, RuntimeResponse]] = {}
         self._pending_conversations = 0
 
@@ -617,7 +643,6 @@ class LocalAgentRuntime:
         slot_reserved = False
         result_digests: dict[str, str] = {}
         response_cache_key: str | None = None
-        continuation_preflight = False
 
         if native_call_ids:
             request_id = _continuation_request_id(protocol, native)
@@ -645,7 +670,7 @@ class LocalAgentRuntime:
             tool_results = tuple(
                 event for event in decoded.tool_results if str(event.call_id) in call_ids
             )
-            request_envelope, continuation_preflight = self._preflight_continuation(
+            request_envelope = self._preflight_continuation(
                 protocol=protocol,
                 harness=harness,
                 scope=scope,
@@ -661,8 +686,6 @@ class LocalAgentRuntime:
                 event = events_by_call[call_id]
                 digest = _result_digest(event)
                 result_digests[call_id] = digest
-            if not continuation_preflight:
-                raise AgentRuntimeError("tool_continuation_expired", status_code=409)
             for call_id in call_ids:
                 event = events_by_call[call_id]
                 digest = result_digests[call_id]
@@ -781,9 +804,8 @@ class LocalAgentRuntime:
                 )
             elif call_ids:
                 with self._lock:
-                    self._conversations.pop(
-                        (scope.principal_id, scope.project_id, harness, conversation_id),
-                        None,
+                    self._drop_conversation(
+                        (scope.principal_id, scope.project_id, harness, conversation_id)
                     )
             if response_cache_key is not None:
                 self._cache_response(response_cache_key, response)
@@ -820,9 +842,8 @@ class LocalAgentRuntime:
                 except ContinuationLedgerError:
                     pass
                 with self._lock:
-                    self._conversations.pop(
-                        (scope.principal_id, scope.project_id, harness, conversation_id),
-                        None,
+                    self._drop_conversation(
+                        (scope.principal_id, scope.project_id, harness, conversation_id)
                     )
             raise
         finally:
@@ -897,13 +918,13 @@ class LocalAgentRuntime:
         route_pin: RoutePin,
         request: RequestEnvelope,
         tool_results: Sequence[ToolResultEvent],
-    ) -> tuple[RequestEnvelope, bool]:
+    ) -> RequestEnvelope:
         key = (scope.principal_id, scope.project_id, harness, conversation_id)
         with self._lock:
             self._prune_conversations()
             current = self._conversations.get(key)
             if current is None:
-                return request, False
+                raise AgentRuntimeError("tool_continuation_expired", status_code=409)
             if current.route_pin != route_pin:
                 raise AgentRuntimeError("route_pin_changed")
             inherited = (
@@ -918,7 +939,7 @@ class LocalAgentRuntime:
                 events=[*current.events, *tool_results],
                 error_code="continuation_contract_mismatch",
             )
-            return inherited, True
+            return inherited
 
     def _validate_conversation(
         self,
@@ -951,7 +972,7 @@ class LocalAgentRuntime:
                 source = current.source
                 requests = [*current.requests, request]
                 events = [*current.events, *tool_results, *execution.events]
-            self._validate_agent_ir(
+            size_bytes = self._validate_agent_ir(
                 conversation_id=conversation_id,
                 source=source,
                 requests=requests,
@@ -964,6 +985,7 @@ class LocalAgentRuntime:
                 requests=requests,
                 events=events,
                 expires_at=time.monotonic() + self._conversation_ttl_seconds,
+                size_bytes=size_bytes,
             )
             return record
 
@@ -975,7 +997,7 @@ class LocalAgentRuntime:
         requests: Sequence[RequestEnvelope],
         events: Sequence[AgentEvent],
         error_code: str,
-    ) -> None:
+    ) -> int:
         payload = {
             "ir_version": "agent-ir/v1",
             "conversation_id": conversation_id,
@@ -983,12 +1005,14 @@ class LocalAgentRuntime:
             "requests": [item.model_dump(mode="json", exclude_unset=True) for item in requests],
             "events": [item.model_dump(mode="json", exclude_unset=True) for item in events],
         }
-        if len(_canonical_json(payload)) > self._max_conversation_bytes:
+        size_bytes = len(_canonical_json(payload))
+        if size_bytes > self._max_conversation_bytes:
             raise AgentRuntimeError("conversation_limit_exceeded")
         try:
             AgentIR.model_validate(payload)
         except ValueError:
             raise AgentRuntimeError(error_code) from None
+        return size_bytes
 
     def _execute_generation(
         self,
@@ -1005,7 +1029,8 @@ class LocalAgentRuntime:
         if not self._generation_gate.acquire(blocking=False):
             raise AgentRuntimeError("agent_runtime_busy", status_code=503)
         try:
-            return execute_local_request(
+            future = _MLX_EXECUTOR.submit(
+                execute_local_request,
                 request,
                 model=model,
                 generate=self._generate,
@@ -1017,6 +1042,7 @@ class LocalAgentRuntime:
                 enable_thinking=enable_thinking,
                 parallel_tool_calls=parallel_tool_calls,
             )
+            return future.result()
         finally:
             self._generation_gate.release()
 
@@ -1051,6 +1077,11 @@ class LocalAgentRuntime:
             self._prune_conversations()
             if key not in self._conversations and len(self._conversations) >= self._max_active_conversations:
                 raise AgentRuntimeError("conversation_capacity_exceeded", status_code=503)
+            previous = self._conversations.get(key)
+            previous_size = previous.size_bytes if previous is not None else 0
+            projected_bytes = self._conversation_bytes - previous_size + record.size_bytes
+            if projected_bytes > self._max_total_conversation_bytes:
+                raise AgentRuntimeError("conversation_capacity_exceeded", status_code=503)
             self._register_calls(
                 scope=scope,
                 harness=harness,
@@ -1060,6 +1091,7 @@ class LocalAgentRuntime:
                 execution=execution,
             )
             self._conversations[key] = record
+            self._conversation_bytes = projected_bytes
 
     def _register_calls(
         self,
@@ -1121,8 +1153,13 @@ class LocalAgentRuntime:
         now = time.monotonic()
         for key, record in tuple(self._conversations.items()):
             if now >= record.expires_at:
-                self._conversations.pop(key, None)
+                self._drop_conversation(key)
         self._ledger.cleanup()
+
+    def _drop_conversation(self, key: tuple[str, str, str, str]) -> None:
+        record = self._conversations.pop(key, None)
+        if record is not None:
+            self._conversation_bytes -= record.size_bytes
 
     def _cache_response(self, key: str, response: RuntimeResponse) -> None:
         with self._lock:
@@ -1177,6 +1214,15 @@ def reset_local_agent_runtime() -> None:
     global _runtime
     with _runtime_lock:
         _runtime = None
+    _MLX_EXECUTOR.submit(_reset_strict_engine).result()
+
+
+def _reset_strict_engine() -> None:
+    global _STRICT_ENGINE
+    with _STRICT_ENGINE_LOCK:
+        if _STRICT_ENGINE is not None:
+            _STRICT_ENGINE.unload_all()
+            _STRICT_ENGINE = None
 
 
 __all__ = [
