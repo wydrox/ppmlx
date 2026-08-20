@@ -294,5 +294,5 @@ def test_mlx_provider_sanitizes_registry_and_generation_failures() -> None:
 
     assert registry_error.value.code == "model_registry_unavailable"
     assert "registry secret" not in str(registry_error.value)
-    assert generation_error.value.code == "provider_invoke_failed"
+    assert generation_error.value.code == "generation_failed"
     assert "model output secret" not in str(generation_error.value)
