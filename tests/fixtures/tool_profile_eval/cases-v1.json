@@ -1,0 +1,317 @@
+{
+  "schema_version": "tool-profile-cases/v1",
+  "case_set_version": "2026-08-20.v1",
+  "cases": [
+    {
+      "id": "weather-one-call",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Get the current temperature in Warsaw in Celsius."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "description": "Get current weather for one city.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "city": {"type": "string"},
+                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+              },
+              "required": ["city", "unit"],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "expected_calls": [
+        {
+          "name": "get_weather",
+          "arguments": {"city": "Warsaw", "unit": "celsius"}
+        }
+      ]
+    },
+    {
+      "id": "unicode-file-path",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Read line 7 from src/żółć.py."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "read_file",
+            "description": "Read one line from a UTF-8 text file.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {"type": "string"},
+                "line": {"type": "integer", "minimum": 1}
+              },
+              "required": ["path", "line"],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "expected_calls": [
+        {
+          "name": "read_file",
+          "arguments": {"path": "src/żółć.py", "line": 7}
+        }
+      ]
+    },
+    {
+      "id": "nested-search-options",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Search for ToolCallCompletedEvent in Python and Markdown files. Match case exactly."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "search_repo",
+            "description": "Search repository files with explicit options.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "query": {"type": "string"},
+                "options": {
+                  "type": "object",
+                  "properties": {
+                    "extensions": {
+                      "type": "array",
+                      "items": {"type": "string"},
+                      "minItems": 1
+                    },
+                    "case_sensitive": {"type": "boolean"}
+                  },
+                  "required": ["extensions", "case_sensitive"],
+                  "additionalProperties": false
+                }
+              },
+              "required": ["query", "options"],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "expected_calls": [
+        {
+          "name": "search_repo",
+          "arguments": {
+            "query": "ToolCallCompletedEvent",
+            "options": {
+              "extensions": [".py", ".md"],
+              "case_sensitive": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "ordered-parallel-files",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Read README.md and SECURITY.md. Return two tool calls in that order."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "read_document",
+            "description": "Read one complete project document.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {"type": "string"}
+              },
+              "required": ["path"],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "expected_calls": [
+        {"name": "read_document", "arguments": {"path": "README.md"}},
+        {"name": "read_document", "arguments": {"path": "SECURITY.md"}}
+      ]
+    },
+    {
+      "id": "array-labels",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Create issue 'Repair regression' with labels bug, phase-4, and security."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "create_issue",
+            "description": "Create one issue with an ordered label list.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "title": {"type": "string"},
+                "labels": {
+                  "type": "array",
+                  "items": {"type": "string"},
+                  "minItems": 1
+                }
+              },
+              "required": ["title", "labels"],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "expected_calls": [
+        {
+          "name": "create_issue",
+          "arguments": {
+            "title": "Repair regression",
+            "labels": ["bug", "phase-4", "security"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "nullable-assignee",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Schedule the audit for 2026-08-21 with no assignee."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "schedule_audit",
+            "description": "Schedule an audit with an optional assignee.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "date": {"type": "string"},
+                "assignee": {"type": ["string", "null"]}
+              },
+              "required": ["date", "assignee"],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "expected_calls": [
+        {
+          "name": "schedule_audit",
+          "arguments": {"date": "2026-08-21", "assignee": null}
+        }
+      ]
+    },
+    {
+      "id": "empty-object-status",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Get gateway status."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "gateway_status",
+            "description": "Get gateway status without input values.",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "expected_calls": [
+        {"name": "gateway_status", "arguments": {}}
+      ]
+    },
+    {
+      "id": "numeric-threshold",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Set the preview failure threshold to 0.025 and sample size to 120."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "set_evaluation_threshold",
+            "description": "Set numeric evaluation controls.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "failure_rate": {"type": "number", "minimum": 0, "maximum": 1},
+                "sample_size": {"type": "integer", "minimum": 1}
+              },
+              "required": ["failure_rate", "sample_size"],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "expected_calls": [
+        {
+          "name": "set_evaluation_threshold",
+          "arguments": {"failure_rate": 0.025, "sample_size": 120}
+        }
+      ]
+    },
+    {
+      "id": "escaped-command",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Run a command that prints the two lines alpha and beta."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "run_command",
+            "description": "Run one command string.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {"type": "string"}
+              },
+              "required": ["command"],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "expected_calls": [
+        {
+          "name": "run_command",
+          "arguments": {"command": "printf 'alpha\\nbeta\\n'"}
+        }
+      ]
+    }
+  ]
+}
