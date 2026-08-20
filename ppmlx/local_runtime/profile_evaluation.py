@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
@@ -66,7 +66,7 @@ class ToolEvaluationCaseSet:
 
 @dataclass(frozen=True, slots=True)
 class AttemptEvaluation:
-    """The safe result of one strict or repair-enabled normalization attempt."""
+    """The safe result of one normalization attempt."""
 
     expected_calls: int
     valid_calls: int
@@ -86,6 +86,32 @@ class CaseEvaluation:
 
 
 @dataclass(frozen=True, slots=True)
+class _RunMetrics:
+    expected_calls: int
+    strict_valid_calls: int
+    repaired_valid_calls: int
+    effective_valid_calls: int
+    correlated_calls: int
+    repair_attempts: dict[str, int]
+
+    @property
+    def strict_rate(self) -> float:
+        return _rate(self.strict_valid_calls, self.expected_calls)
+
+    @property
+    def repaired_rate(self) -> float:
+        return _rate(self.repaired_valid_calls, self.expected_calls)
+
+    @property
+    def effective_rate(self) -> float:
+        return _rate(self.effective_valid_calls, self.expected_calls)
+
+    @property
+    def correlation_rate(self) -> float:
+        return _rate(self.correlated_calls, self.expected_calls)
+
+
+@dataclass(frozen=True, slots=True)
 class RunEvaluation:
     """Aggregated safe metrics for one fixed run."""
 
@@ -93,30 +119,46 @@ class RunEvaluation:
     seed: int
     cases: tuple[CaseEvaluation, ...]
 
-    def to_dict(self) -> dict[str, object]:
-        expected = sum(case.effective.expected_calls for case in self.cases)
-        strict_valid = sum(case.strict.valid_calls for case in self.cases)
-        effective_valid = sum(case.effective.valid_calls for case in self.cases)
-        repaired_valid = sum(case.effective.repaired_valid_calls for case in self.cases)
-        correlated = sum(case.effective.correlated_calls for case in self.cases)
-        repair_attempts: dict[str, int] = {}
+    def _metrics(self) -> _RunMetrics:
+        attempts: dict[str, int] = {}
         for case in self.cases:
             for kind in case.effective.repair_attempts:
-                repair_attempts[kind] = repair_attempts.get(kind, 0) + 1
+                attempts[kind] = attempts.get(kind, 0) + 1
+        return _RunMetrics(
+            expected_calls=sum(
+                case.effective.expected_calls for case in self.cases
+            ),
+            strict_valid_calls=sum(
+                case.strict.valid_calls for case in self.cases
+            ),
+            repaired_valid_calls=sum(
+                case.effective.repaired_valid_calls for case in self.cases
+            ),
+            effective_valid_calls=sum(
+                case.effective.valid_calls for case in self.cases
+            ),
+            correlated_calls=sum(
+                case.effective.correlated_calls for case in self.cases
+            ),
+            repair_attempts=attempts,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        metrics = self._metrics()
         return {
             "run_index": self.run_index,
             "seed": self.seed,
             "case_count": len(self.cases),
-            "expected_call_count": expected,
-            "strict_valid_call_count": strict_valid,
-            "strict_valid_call_rate": _rate(strict_valid, expected),
-            "repaired_valid_call_count": repaired_valid,
-            "repaired_valid_call_rate": _rate(repaired_valid, expected),
-            "effective_valid_call_count": effective_valid,
-            "effective_valid_call_rate": _rate(effective_valid, expected),
-            "correlated_call_count": correlated,
-            "correlation_rate": _rate(correlated, expected),
-            "repair_attempts_by_kind": repair_attempts,
+            "expected_call_count": metrics.expected_calls,
+            "strict_valid_call_count": metrics.strict_valid_calls,
+            "strict_valid_call_rate": metrics.strict_rate,
+            "repaired_valid_call_count": metrics.repaired_valid_calls,
+            "repaired_valid_call_rate": metrics.repaired_rate,
+            "effective_valid_call_count": metrics.effective_valid_calls,
+            "effective_valid_call_rate": metrics.effective_rate,
+            "correlated_call_count": metrics.correlated_calls,
+            "correlation_rate": metrics.correlation_rate,
+            "repair_attempts_by_kind": metrics.repair_attempts,
             "cases": [_case_result_dict(case) for case in self.cases],
         }
 
@@ -144,8 +186,10 @@ def _reject_constant(_: str) -> NoReturn:
     raise ProfileEvaluationError("invalid_case_number")
 
 
-def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
+def _reject_duplicate_pairs(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
             raise ProfileEvaluationError("duplicate_case_key")
@@ -153,7 +197,7 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object
     return result
 
 
-def _load_json(path: Path) -> tuple[object, str]:
+def _load_json(path: Path) -> tuple[Any, str]:
     try:
         raw = path.read_bytes()
         value = json.loads(
@@ -168,13 +212,19 @@ def _load_json(path: Path) -> tuple[object, str]:
     return value, hashlib.sha256(raw).hexdigest()
 
 
-def _plain_dict(value: object, *, code: str) -> dict[str, object]:
-    if not isinstance(value, dict) or any(type(key) is not str for key in value):
+def _plain_dict(value: Any, *, code: str) -> dict[str, object]:
+    if not isinstance(value, dict):
         raise ProfileEvaluationError(code)
-    return dict(value)
+    if any(type(key) is not str for key in value):
+        raise ProfileEvaluationError(code)
+    return cast(dict[str, object], dict(value))
 
 
-def _plain_dict_tuple(value: object, *, code: str) -> tuple[dict[str, object], ...]:
+def _plain_dict_tuple(
+    value: Any,
+    *,
+    code: str,
+) -> tuple[dict[str, object], ...]:
     if not isinstance(value, list):
         raise ProfileEvaluationError(code)
     return tuple(_plain_dict(item, code=code) for item in value)
@@ -193,19 +243,32 @@ def _contains_external_ref(value: object) -> bool:
     return False
 
 
-def _tool_definitions(tools: Sequence[Mapping[str, object]]) -> dict[str, dict[str, object]]:
+def _tool_definitions(
+    tools: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
     definitions: dict[str, dict[str, object]] = {}
     for tool in tools:
-        if set(tool) != {"type", "function"} or tool.get("type") != "function":
+        if set(tool) != {"type", "function"}:
             raise ProfileEvaluationError("invalid_case_tool")
-        function = _plain_dict(tool.get("function"), code="invalid_case_tool")
+        if tool.get("type") != "function":
+            raise ProfileEvaluationError("invalid_case_tool")
+        function = _plain_dict(
+            tool.get("function"),
+            code="invalid_case_tool",
+        )
         if set(function) != {"name", "description", "parameters"}:
             raise ProfileEvaluationError("invalid_case_tool")
-        name = function.get("name")
+        name_value = function.get("name")
         description = function.get("description")
-        if type(name) is not str or not name or type(description) is not str:
+        if type(name_value) is not str or not name_value:
             raise ProfileEvaluationError("invalid_case_tool")
-        schema = _plain_dict(function.get("parameters"), code="invalid_case_schema")
+        if type(description) is not str:
+            raise ProfileEvaluationError("invalid_case_tool")
+        name = cast(str, name_value)
+        schema = _plain_dict(
+            function.get("parameters"),
+            code="invalid_case_schema",
+        )
         if _contains_external_ref(schema):
             raise ProfileEvaluationError("external_case_schema_ref")
         try:
@@ -225,17 +288,15 @@ def load_case_set(path: Path) -> ToolEvaluationCaseSet:
     root = _plain_dict(loaded, code="invalid_case_set")
     if set(root) != {"schema_version", "case_set_version", "cases"}:
         raise ProfileEvaluationError("invalid_case_set")
-    schema_version_value = root.get("schema_version")
-    case_set_version_value = root.get("case_set_version")
+    schema_value = root.get("schema_version")
+    version_value = root.get("case_set_version")
     raw_cases = root.get("cases")
-    if schema_version_value != "tool-profile-cases/v1":
+    if schema_value != "tool-profile-cases/v1":
         raise ProfileEvaluationError("unsupported_case_schema")
-    if type(case_set_version_value) is not str or not case_set_version_value:
+    if type(version_value) is not str or not version_value:
         raise ProfileEvaluationError("invalid_case_set_version")
     if not isinstance(raw_cases, list) or not raw_cases:
         raise ProfileEvaluationError("empty_case_set")
-    schema_version = cast(str, schema_version_value)
-    case_set_version = cast(str, case_set_version_value)
 
     cases: list[ToolEvaluationCase] = []
     identifiers: set[str] = set()
@@ -244,38 +305,53 @@ def load_case_set(path: Path) -> ToolEvaluationCaseSet:
         if set(case) != {"id", "messages", "tools", "expected_calls"}:
             raise ProfileEvaluationError("invalid_case")
         case_id_value = case.get("id")
-        if (
-            type(case_id_value) is not str
-            or not case_id_value
-            or case_id_value in identifiers
-        ):
+        if type(case_id_value) is not str or not case_id_value:
             raise ProfileEvaluationError("invalid_case_id")
         case_id = cast(str, case_id_value)
+        if case_id in identifiers:
+            raise ProfileEvaluationError("invalid_case_id")
         identifiers.add(case_id)
-        messages = _plain_dict_tuple(case.get("messages"), code="invalid_case_messages")
-        tools = _plain_dict_tuple(case.get("tools"), code="invalid_case_tool")
+
+        messages = _plain_dict_tuple(
+            case.get("messages"),
+            code="invalid_case_messages",
+        )
+        tools = _plain_dict_tuple(
+            case.get("tools"),
+            code="invalid_case_tool",
+        )
         definitions = _tool_definitions(tools)
         raw_expected = case.get("expected_calls")
         if not isinstance(raw_expected, list) or not raw_expected:
             raise ProfileEvaluationError("invalid_expected_calls")
+
         expected_calls: list[ExpectedToolCall] = []
         for raw_call in raw_expected:
-            expected = _plain_dict(raw_call, code="invalid_expected_call")
+            expected = _plain_dict(
+                raw_call,
+                code="invalid_expected_call",
+            )
             if set(expected) != {"name", "arguments"}:
                 raise ProfileEvaluationError("invalid_expected_call")
             name_value = expected.get("name")
+            if type(name_value) is not str:
+                raise ProfileEvaluationError("unknown_expected_tool")
+            name = cast(str, name_value)
+            if name not in definitions:
+                raise ProfileEvaluationError("unknown_expected_tool")
             arguments = _plain_dict(
                 expected.get("arguments"),
                 code="invalid_expected_arguments",
             )
-            if type(name_value) is not str or name_value not in definitions:
-                raise ProfileEvaluationError("unknown_expected_tool")
-            name = cast(str, name_value)
             try:
                 Draft202012Validator(definitions[name]).validate(arguments)
             except ValidationError:
-                raise ProfileEvaluationError("invalid_expected_arguments") from None
-            expected_calls.append(ExpectedToolCall(name=name, arguments=arguments))
+                raise ProfileEvaluationError(
+                    "invalid_expected_arguments"
+                ) from None
+            expected_calls.append(
+                ExpectedToolCall(name=name, arguments=arguments)
+            )
         cases.append(
             ToolEvaluationCase(
                 case_id=case_id,
@@ -284,9 +360,10 @@ def load_case_set(path: Path) -> ToolEvaluationCaseSet:
                 expected_calls=tuple(expected_calls),
             )
         )
+
     return ToolEvaluationCaseSet(
-        schema_version=schema_version,
-        case_set_version=case_set_version,
+        schema_version=cast(str, schema_value),
+        case_set_version=cast(str, version_value),
         sha256=digest,
         cases=tuple(cases),
     )
@@ -316,13 +393,21 @@ def _attempt(
             error_code=error.code,
         )
 
-    definitions = _tool_definitions(case.tools)
     repair_attempts = tuple(
         call.repair.kind.value
         for call in normalized.tool_calls
         if call.repair is not None
     )
-    if len(normalized.tool_calls) != expected_count or normalized.remaining_text.strip():
+    if len(normalized.tool_calls) != expected_count:
+        return AttemptEvaluation(
+            expected_calls=expected_count,
+            valid_calls=0,
+            correlated_calls=0,
+            repair_attempts=repair_attempts,
+            repaired_valid_calls=0,
+            error_code="call_sequence_mismatch",
+        )
+    if normalized.remaining_text.strip():
         return AttemptEvaluation(
             expected_calls=expected_count,
             valid_calls=0,
@@ -332,19 +417,23 @@ def _attempt(
             error_code="call_sequence_mismatch",
         )
 
+    definitions = _tool_definitions(case.tools)
     valid_calls = 0
     repaired_valid_calls = 0
     identifiers: list[str] = []
     for index, (actual, expected) in enumerate(
         zip(normalized.tool_calls, case.expected_calls, strict=True)
     ):
-        valid = actual.name == expected.name and actual.arguments_json == expected.arguments
+        valid = actual.name == expected.name
+        valid = valid and actual.arguments_json == expected.arguments
         schema = definitions.get(actual.name)
         if schema is None:
             valid = False
         else:
             try:
-                Draft202012Validator(schema).validate(actual.arguments_json)
+                Draft202012Validator(schema).validate(
+                    actual.arguments_json
+                )
             except ValidationError:
                 valid = False
         if valid:
@@ -355,15 +444,14 @@ def _attempt(
 
     unique_identifiers = len(identifiers) == len(set(identifiers))
     correlated_calls = valid_calls if unique_identifiers else 0
+    success = valid_calls == expected_count and unique_identifiers
     return AttemptEvaluation(
         expected_calls=expected_count,
         valid_calls=valid_calls,
         correlated_calls=correlated_calls,
         repair_attempts=repair_attempts,
         repaired_valid_calls=repaired_valid_calls,
-        error_code=None
-        if valid_calls == expected_count and unique_identifiers
-        else "call_mismatch",
+        error_code=None if success else "call_mismatch",
     )
 
 
@@ -378,33 +466,21 @@ def evaluate_generated_output(
 
     if type(output) is not str:
         raise ProfileEvaluationError("invalid_generated_output")
-    strict = _attempt(
-        output,
-        case=case,
-        profile=profile,
-        repair_policy=None,
+    return CaseEvaluation(
+        case_id=case.case_id,
+        strict=_attempt(
+            output,
+            case=case,
+            profile=profile,
+            repair_policy=None,
+        ),
+        effective=_attempt(
+            output,
+            case=case,
+            profile=profile,
+            repair_policy=repair_policy,
+        ),
     )
-    effective = _attempt(
-        output,
-        case=case,
-        profile=profile,
-        repair_policy=repair_policy,
-    )
-    return CaseEvaluation(case_id=case.case_id, strict=strict, effective=effective)
-
-
-def _metric_int(data: Mapping[str, object], key: str) -> int:
-    value = data.get(key)
-    if type(value) is not int:
-        raise ProfileEvaluationError("invalid_run_metrics")
-    return value
-
-
-def _metric_float(data: Mapping[str, object], key: str) -> float:
-    value = data.get(key)
-    if type(value) not in {int, float}:
-        raise ProfileEvaluationError("invalid_run_metrics")
-    return float(value)
 
 
 def classify_support_status(
@@ -416,19 +492,23 @@ def classify_support_status(
 
     if len(runs) != 3:
         raise ProfileEvaluationError("three_runs_required")
-    run_data = [run.to_dict() for run in runs]
-    if not deterministic_fixtures_passed or any(
-        _metric_float(data, "correlation_rate") != 1.0 for data in run_data
-    ):
+    metrics = [run._metrics() for run in runs]
+    if not deterministic_fixtures_passed:
         return SupportStatus.DISABLED
-    minimum_rate = min(
-        _metric_float(data, "effective_valid_call_rate") for data in run_data
-    )
+    if any(metric.correlation_rate != 1.0 for metric in metrics):
+        return SupportStatus.DISABLED
+    minimum_rate = min(metric.effective_rate for metric in metrics)
     if minimum_rate >= 0.98:
         return SupportStatus.STABLE
     if minimum_rate >= 0.95:
         return SupportStatus.PREVIEW
     return SupportStatus.EXPERIMENTAL
+
+
+def _validate_text(value: str, *, code: str) -> str:
+    if type(value) is not str or not value:
+        raise ProfileEvaluationError(code)
+    return value
 
 
 def build_report(
@@ -455,45 +535,32 @@ def build_report(
 
     if len(runs) != 3:
         raise ProfileEvaluationError("three_runs_required")
-    text_fields = (
-        ppmlx_version,
-        ppmlx_commit,
-        model_repository,
-        model_revision,
-        tokenizer_revision,
-        quantization,
-        capability_level,
-        apple_chip,
-        macos_version,
-        architecture,
-    )
-    if any(type(value) is not str or not value for value in text_fields):
-        raise ProfileEvaluationError("incomplete_report_metadata")
+    _validate_text(ppmlx_version, code="incomplete_report_metadata")
+    _validate_text(ppmlx_commit, code="incomplete_report_metadata")
+    _validate_text(model_repository, code="incomplete_report_metadata")
+    _validate_text(model_revision, code="incomplete_report_metadata")
+    _validate_text(tokenizer_revision, code="incomplete_report_metadata")
+    _validate_text(quantization, code="incomplete_report_metadata")
+    _validate_text(capability_level, code="incomplete_report_metadata")
+    _validate_text(apple_chip, code="incomplete_report_metadata")
+    _validate_text(macos_version, code="incomplete_report_metadata")
+    _validate_text(architecture, code="incomplete_report_metadata")
     if type(memory_gb) is not int or memory_gb < 1:
         raise ProfileEvaluationError("invalid_environment_metadata")
 
-    run_data = [run.to_dict() for run in runs]
-    expected = sum(_metric_int(run, "expected_call_count") for run in run_data)
-    strict_valid = sum(
-        _metric_int(run, "strict_valid_call_count") for run in run_data
-    )
+    metrics = [run._metrics() for run in runs]
+    expected = sum(metric.expected_calls for metric in metrics)
+    strict_valid = sum(metric.strict_valid_calls for metric in metrics)
     repaired_valid = sum(
-        _metric_int(run, "repaired_valid_call_count") for run in run_data
+        metric.repaired_valid_calls for metric in metrics
     )
     effective_valid = sum(
-        _metric_int(run, "effective_valid_call_count") for run in run_data
+        metric.effective_valid_calls for metric in metrics
     )
-    correlated = sum(
-        _metric_int(run, "correlated_call_count") for run in run_data
-    )
+    correlated = sum(metric.correlated_calls for metric in metrics)
     attempts: dict[str, int] = {}
-    for run in run_data:
-        values = run.get("repair_attempts_by_kind")
-        if not isinstance(values, dict):
-            raise ProfileEvaluationError("invalid_run_metrics")
-        for kind, count in values.items():
-            if type(kind) is not str or type(count) is not int:
-                raise ProfileEvaluationError("invalid_run_metrics")
+    for metric in metrics:
+        for kind, count in metric.repair_attempts.items():
             attempts[kind] = attempts.get(kind, 0) + count
 
     status = classify_support_status(
@@ -502,7 +569,10 @@ def build_report(
     )
     return {
         "schema_version": "tool-profile-report/v1",
-        "ppmlx": {"version": ppmlx_version, "commit": ppmlx_commit},
+        "ppmlx": {
+            "version": ppmlx_version,
+            "commit": ppmlx_commit,
+        },
         "model": {
             "repository": model_repository,
             "revision": model_revision,
@@ -512,7 +582,9 @@ def build_report(
         "profile": {
             "normalization_profile": normalization_profile.value,
             "capability_level": capability_level,
-            "repair_policy": repair_policy.value if repair_policy is not None else None,
+            "repair_policy": (
+                repair_policy.value if repair_policy is not None else None
+            ),
         },
         "environment": {
             "apple_chip": apple_chip,
@@ -527,22 +599,29 @@ def build_report(
             "case_count": len(case_set.cases),
             "sha256": case_set.sha256,
         },
-        "deterministic_fixtures_passed": deterministic_fixtures_passed,
-        "runs": run_data,
+        "deterministic_fixtures_passed": (
+            deterministic_fixtures_passed
+        ),
+        "runs": [run.to_dict() for run in runs],
         "aggregate": {
             "expected_call_count": expected,
             "strict_valid_call_count": strict_valid,
             "strict_valid_call_rate": _rate(strict_valid, expected),
             "repaired_valid_call_count": repaired_valid,
-            "repaired_valid_call_rate": _rate(repaired_valid, expected),
+            "repaired_valid_call_rate": _rate(
+                repaired_valid,
+                expected,
+            ),
             "effective_valid_call_count": effective_valid,
-            "effective_valid_call_rate": _rate(effective_valid, expected),
+            "effective_valid_call_rate": _rate(
+                effective_valid,
+                expected,
+            ),
             "correlated_call_count": correlated,
             "correlation_rate": _rate(correlated, expected),
             "repair_attempts_by_kind": attempts,
             "minimum_run_effective_valid_call_rate": min(
-                _metric_float(run, "effective_valid_call_rate")
-                for run in run_data
+                metric.effective_rate for metric in metrics
             ),
             "support_status": status.value,
         },
