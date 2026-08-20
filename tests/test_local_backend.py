@@ -18,8 +18,10 @@ from ppmlx.local_runtime.backend import (
     execute_local_request,
     prepare_local_request,
 )
-from ppmlx.local_runtime.normalization import NormalizationProfile
-from ppmlx.local_runtime.profiles import select_normalization_profile
+from ppmlx.local_runtime.normalization import (
+    NormalizationProfile,
+    select_normalization_profile,
+)
 from ppmlx.protocols import DecodeContext, openai_chat_adapter
 
 

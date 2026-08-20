@@ -337,14 +337,14 @@ def test_result_can_link_to_an_existing_continuation_request() -> None:
     )
 
 
-def test_later_retry_can_use_a_new_linked_request_id() -> None:
+def test_later_retry_rejects_a_different_request_id() -> None:
     ledger, call = ready_ledger()
     ledger.accept_result(call.key, result_identity())
 
-    retry = ledger.accept_result(call.key, result_identity(request_id="request-c"))
+    with pytest.raises(ResultConflictError, match="tool_result_conflict"):
+        ledger.accept_result(call.key, result_identity(request_id="request-c"))
 
-    assert retry.disposition == "retry"
-    assert retry.snapshot.continuation_request_ids == ("request-b", "request-c")
+    assert ledger.get(call.key).continuation_request_ids == ("request-b",)
 
 
 def test_retry_must_keep_the_result_output_id() -> None:

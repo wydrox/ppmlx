@@ -2891,9 +2891,6 @@ async def _nonstream_anthropic(
 # ── WebSocket transport for Responses API (Codex) ────────────────────
 
 
-_WS_MAX_MESSAGE_BYTES = 10 * 1024 * 1024  # 10 MB limit per WS message
-
-
 @app.websocket("/v1/responses")
 async def responses_ws(websocket: WebSocket):
     """WebSocket transport for the Responses API (used by Codex CLI)."""
@@ -2901,7 +2898,7 @@ async def responses_ws(websocket: WebSocket):
     try:
         while True:
             raw = await websocket.receive_text()
-            if len(raw) > _WS_MAX_MESSAGE_BYTES:
+            if len(raw.encode("utf-8")) > _get_max_request_body_bytes():
                 await websocket.send_json({
                     "type": "error",
                     "error": {"type": "invalid_request", "message": "Message too large"},
@@ -2915,6 +2912,15 @@ async def responses_ws(websocket: WebSocket):
                     "error": {"type": "invalid_request", "message": "Invalid JSON"},
                 })
                 continue
+            if not isinstance(body, dict):
+                await websocket.send_json({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request",
+                        "code": "invalid_response_create",
+                    },
+                })
+                continue
             msg_type = body.get("type", "")
             if msg_type != "response.create":
                 await websocket.send_json({
@@ -2924,7 +2930,19 @@ async def responses_ws(websocket: WebSocket):
                 continue
 
             # Extract fields from the response.create message
-            response_body = body.get("response", body)
+            if "response" in body:
+                response_body = body["response"]
+                if not isinstance(response_body, dict) or set(body) - {"type", "response"}:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request",
+                            "code": "mixed_response_create_fields",
+                        },
+                    })
+                    continue
+            else:
+                response_body = body
             runtime_mode = _get_agent_runtime_config()[0]
             if (
                 runtime_mode != "legacy"
@@ -2946,18 +2964,17 @@ async def responses_ws(websocket: WebSocket):
                     }
                 )
                 continue
-            model_name = response_body.get("model", body.get("model", ""))
-            input_data = response_body.get("input", body.get("input", ""))
-            temperature = response_body.get("temperature", body.get("temperature", 0.7))
-            top_p = response_body.get("top_p", body.get("top_p", 1.0))
+            model_name = response_body.get("model", "")
+            input_data = response_body.get("input", "")
+            temperature = response_body.get("temperature", 0.7)
+            top_p = response_body.get("top_p", 1.0)
             max_tokens = _clamp_max_tokens(
                 response_body.get("max_output_tokens")
-                or body.get("max_output_tokens")
                 or response_body.get("max_tokens")
-                or body.get("max_tokens", 4096)
+                or 4096
             )
-            instructions = response_body.get("instructions", body.get("instructions"))
-            tools = response_body.get("tools", body.get("tools")) or None
+            instructions = response_body.get("instructions")
+            tools = response_body.get("tools") or None
 
             messages = _responses_input_to_messages(input_data)
             if instructions:

@@ -1,6 +1,7 @@
 """Tests for ppmlx/engine_vlm.py"""
 from __future__ import annotations
 import base64
+from pathlib import Path
 import sys
 import pytest
 
@@ -27,9 +28,8 @@ def test_extract_images_url():
             ],
         }
     ]
-    result = engine._extract_images(messages)
-    assert len(result) == 1
-    assert result[0] == "https://example.com/image.jpg"
+    with pytest.raises(ValueError, match="Remote image URLs are not supported"):
+        engine._extract_images(messages)
 
 
 def test_extract_images_base64():
@@ -52,9 +52,35 @@ def test_extract_images_base64():
     ]
     result = engine._extract_images(messages)
     assert len(result) == 1
-    # Should be a temp file path (str), not a URL
-    assert isinstance(result[0], str)
-    assert not result[0].startswith("data:")
+    assert result == [fake_bytes]
+
+
+def test_generate_removes_decoded_image_file(monkeypatch):
+    mlx_vlm_mod = sys.modules["mlx_vlm"]
+    mlx_vlm_mod.load = lambda path: (object(), object())
+    observed_path = None
+
+    def mock_generate(model, processor, prompt, image, max_tokens, temp, verbose):
+        nonlocal observed_path
+        observed_path = image
+        assert isinstance(image, str)
+        assert Path(image).read_bytes() == b"\xff\xd8\xff"
+        return "A cat."
+
+    mlx_vlm_mod.generate = mock_generate
+    payload = base64.b64encode(b"\xff\xd8\xff").decode()
+    messages = [{
+        "role": "user",
+        "content": [{
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{payload}"},
+        }],
+    }]
+
+    VisionEngine().generate("test/model", messages)
+
+    assert observed_path is not None
+    assert not Path(observed_path).exists()
 
 
 def test_generate_calls_vlm(monkeypatch):

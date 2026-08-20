@@ -982,6 +982,7 @@ def serve(
         port=effective_port,
         log_level="info",
         reload=False,
+        ws_max_size=max(1, cfg.server.max_request_body_mb) * 1024 * 1024,
     )
 
 

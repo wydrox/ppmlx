@@ -164,7 +164,6 @@ class CallRegistration:
     output_id: str
     tool_call_index: int
     route_pin: RoutePin
-    result_output_id: str | None = None
     prior_continuation_request_ids: tuple[str, ...] = ()
     parallel_group_id: str | None = None
 
@@ -180,8 +179,6 @@ class CallRegistration:
             raise ValueError("A call registration key is invalid")
         if not isinstance(self.route_pin, RoutePin):
             raise ValueError("A call route pin is invalid")
-        if self.result_output_id is not None:
-            _require_identifier(self.result_output_id)
         if type(self.prior_continuation_request_ids) is not tuple:
             raise ValueError("Prior continuation request identifiers must be a tuple")
         for request_id in self.prior_continuation_request_ids:
@@ -504,9 +501,6 @@ class ContinuationLedger:
                 for entry in entries:
                     call_id = entry.registration.key.call_id
                     supplied = supplied_output_ids.get(call_id)
-                    recorded = entry.registration.result_output_id
-                    if supplied is not None and recorded is not None and supplied != recorded:
-                        raise ConversationMismatchError
                     accepted_output_id = (
                         entry.result_identity.source_output_id
                         if entry.result_identity is not None
@@ -514,13 +508,13 @@ class ContinuationLedger:
                     )
                     known_outputs = {
                         output_id
-                        for output_id in (recorded, supplied, accepted_output_id)
+                        for output_id in (supplied, accepted_output_id)
                         if output_id is not None
                     }
                     if len(known_outputs) > 1:
                         raise ConversationMismatchError
                     candidate_outputs[call_id] = (
-                        recorded or supplied or accepted_output_id or new_output_id()
+                        supplied or accepted_output_id or new_output_id()
                     )
                 if len(set(candidate_outputs.values())) != len(candidate_outputs):
                     raise ConversationMismatchError
@@ -570,11 +564,11 @@ class ContinuationLedger:
             if entry.result_digest is not None:
                 if entry.result_digest != identity.result_digest:
                     raise ResultConflictError
-                if identity.request_id not in entry.continuation_request_ids:
-                    entry.continuation_request_ids = (
-                        *entry.continuation_request_ids,
-                        identity.request_id,
-                    )
+                if (
+                    entry.result_identity is None
+                    or identity.request_id != entry.result_identity.request_id
+                ):
+                    raise ResultConflictError
                 return ResultReceipt(disposition="retry", snapshot=self._snapshot(entry))
 
             if entry.state is not CallState.WAITING_FOR_RESULT:
@@ -856,9 +850,8 @@ class ContinuationLedger:
             or identity.choice_index != registration.choice_index
             or identity.tool_call_index != registration.tool_call_index
             or (
-                (registration.result_output_id or accepted_output_id) is not None
-                and identity.source_output_id
-                != (registration.result_output_id or accepted_output_id)
+                accepted_output_id is not None
+                and identity.source_output_id != accepted_output_id
             )
         ):
             raise ConversationMismatchError
