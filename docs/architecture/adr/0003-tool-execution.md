@@ -1,6 +1,6 @@
 # ADR 0003: Tool Execution
 
-- Status: Accepted; amended by [ADR 0009](0009-bounded-tool-argument-repair.md)
+- Status: Accepted; amended by [Amendment 0001](../amendments/0001-bounded-tool-argument-repair.md)
 - Date: 2026-08-18
 
 ## Context
@@ -17,7 +17,7 @@ The harness is the tool owner and the only tool executor in the Phase 1 contract
 ppmlx transports tool definitions, tool calls, and tool results through the Agent IR.
 It does not run a harness tool.
 
-ADR 0009 permits one bounded, profile-declared syntax repair before Agent IR accepts a local model tool call.
+Amendment 0001 permits one bounded, profile-declared syntax repair before Agent IR accepts a local model tool call.
 That repair does not change tool ownership, call identity, result linking, or harness approval.
 
 One tool round trip has four ordered states:
@@ -66,7 +66,7 @@ It uses these terminal states:
 - ppmlx MUST NOT execute a tool that a harness supplies.
 - ppmlx MUST NOT interpret a tool schema as permission to run that tool.
 - ppmlx MUST preserve the tool name, description, input schema, order, and selection rule.
-- ppmlx MUST preserve `arguments_raw` after the model profile accepts it under ADR 0002 and ADR 0009.
+- ppmlx MUST preserve `arguments_raw` after the model profile accepts it under ADR 0002 and Amendment 0001.
 - ppmlx MUST emit a tool call only after its name and stable `call_id` are known.
 - Each accepted argument delta MUST keep source order.
 
@@ -121,7 +121,7 @@ Retry rules also apply:
 
 - A required tool call MUST NOT become a plain-text suggestion.
 - Plain text that resembles a tool call MUST NOT become a tool call without a documented parser contract.
-- A model profile that permits argument repair MUST follow ADR 0009.
+- A model profile that permits argument repair MUST follow Amendment 0001.
 - A provider adapter MUST declare support for tools, parallel calls, strict schemas, and streamed arguments.
 - Routing MUST reject a tool request when the selected route lacks a required tool capability.
 
@@ -155,7 +155,7 @@ ppmlx avoids a second tool runtime and a second permission model.
 The proxy needs a conversation and continuation ledger that spans multiple HTTP requests.
 Adapters need strict stream state machines and explicit capability data.
 The system cannot hide provider defects with a lossy plain-text fallback.
-Any bounded repair must be explicit, deterministic, profile-specific, and auditable under ADR 0009.
+Any bounded repair must be explicit, deterministic, profile-specific, and auditable under Amendment 0001.
 
 ## Compatibility effects
 
@@ -188,4 +188,4 @@ It makes result matching and trace diagnosis unreliable.
 
 This option changes malformed arguments without an explicit profile, one-repair budget, or audit record.
 It hides provider defects and breaks reproducible transport.
-ADR 0009 permits only one bounded syntax repair before Agent IR acceptance.
+Amendment 0001 permits only one bounded syntax repair before Agent IR acceptance.
