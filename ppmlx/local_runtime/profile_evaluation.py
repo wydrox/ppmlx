@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import cast
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
@@ -124,6 +125,18 @@ def _rate(numerator: int, denominator: int) -> float:
     if denominator < 1:
         raise ProfileEvaluationError("empty_evaluation")
     return round(numerator / denominator, 6)
+
+
+def _metric_int(value: object) -> int:
+    if type(value) is not int:
+        raise ProfileEvaluationError("invalid_run")
+    return cast(int, value)
+
+
+def _metric_float(value: object) -> float:
+    if type(value) not in {int, float}:
+        raise ProfileEvaluationError("invalid_run")
+    return float(cast(int | float, value))
 
 
 def _case_result_dict(case: CaseEvaluation) -> dict[str, object]:
@@ -270,8 +283,8 @@ def load_case_set(path: Path) -> ToolEvaluationCaseSet:
             )
         )
     return ToolEvaluationCaseSet(
-        schema_version=schema_version,
-        case_set_version=case_set_version,
+        schema_version=cast(str, schema_version),
+        case_set_version=cast(str, case_set_version),
         cases=tuple(cases),
     )
 
@@ -391,11 +404,15 @@ def classify_support_status(
         raise ProfileEvaluationError("three_runs_required")
     data = [run.to_dict() for run in runs]
     if not deterministic_fixtures_passed or any(
-        run["correlation_rate"] != 1.0 for run in data
+        _metric_float(run["correlation_rate"]) != 1.0 for run in data
     ):
         return SupportStatus.DISABLED
-    minimum = min(float(run["effective_valid_call_rate"]) for run in data)
-    maximum_repair = max(float(run["repaired_valid_call_rate"]) for run in data)
+    minimum = min(
+        _metric_float(run["effective_valid_call_rate"]) for run in data
+    )
+    maximum_repair = max(
+        _metric_float(run["repaired_valid_call_rate"]) for run in data
+    )
     if minimum >= 0.98 and maximum_repair <= 0.02:
         return SupportStatus.STABLE
     if minimum >= 0.95:
@@ -443,18 +460,26 @@ def build_report(
         raise ProfileEvaluationError("invalid_environment_metadata")
 
     run_data = [run.to_dict() for run in runs]
-    expected = sum(int(run["expected_call_count"]) for run in run_data)
-    strict_valid = sum(int(run["strict_valid_call_count"]) for run in run_data)
-    repaired_valid = sum(int(run["repaired_valid_call_count"]) for run in run_data)
-    effective_valid = sum(int(run["effective_valid_call_count"]) for run in run_data)
-    correlated = sum(int(run["correlated_call_count"]) for run in run_data)
+    expected = sum(_metric_int(run["expected_call_count"]) for run in run_data)
+    strict_valid = sum(
+        _metric_int(run["strict_valid_call_count"]) for run in run_data
+    )
+    repaired_valid = sum(
+        _metric_int(run["repaired_valid_call_count"]) for run in run_data
+    )
+    effective_valid = sum(
+        _metric_int(run["effective_valid_call_count"]) for run in run_data
+    )
+    correlated = sum(
+        _metric_int(run["correlated_call_count"]) for run in run_data
+    )
     attempts: dict[str, int] = {}
     for run in run_data:
         values = run["repair_attempts_by_kind"]
         if not isinstance(values, Mapping):
             raise ProfileEvaluationError("invalid_run")
         for kind, count in values.items():
-            attempts[str(kind)] = attempts.get(str(kind), 0) + int(count)
+            attempts[str(kind)] = attempts.get(str(kind), 0) + _metric_int(count)
     status = classify_support_status(
         runs,
         deterministic_fixtures_passed=deterministic_fixtures_passed,
@@ -498,7 +523,8 @@ def build_report(
             "correlation_rate": _rate(correlated, expected),
             "repair_attempts_by_kind": attempts,
             "minimum_run_effective_valid_call_rate": min(
-                float(run["effective_valid_call_rate"]) for run in run_data
+                _metric_float(run["effective_valid_call_rate"])
+                for run in run_data
             ),
             "support_status": status.value,
         },
