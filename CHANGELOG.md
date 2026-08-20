@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-20
+
 ### Added
 - An opt-in, buffered Agent IR runtime for streamed tool turns on Chat Completions, Responses HTTP, and Anthropic Messages.
 - Versioned local output profiles for Grok, Kimi K2, DeepSeek V3, and Qwen tool-call formats.
