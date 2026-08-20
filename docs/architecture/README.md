@@ -21,17 +21,25 @@ The following accepted decisions complete the Phase 1 contract:
 - [ADR 0007: Retention and Redaction](adr/0007-retention-and-redaction.md)
 - [ADR 0008: Compatibility](adr/0008-compatibility.md)
 
+The following accepted amendment resolves the Phase 4 repair policy:
+
+- [ADR 0009: Bounded Tool-Argument Repair](adr/0009-bounded-tool-argument-repair.md)
+
+ADR 0009 amends ADR 0003 and clarifies the Agent IR acceptance boundary in ADR 0002.
+A later accepted ADR takes precedence only for the rules that it explicitly amends.
+
 The [contract fixture manifest](../../tests/fixtures/contracts/manifest.json) records the exact harness and protocol versions for Phase 1.
 The [Agent IR v1 JSON Schema](schema/agent-ir-v1.schema.json) defines the normalized request and event shapes.
 The [local Agent IR runtime guide](local-agent-runtime.md) defines the Phase 4 implementation boundary and its limits.
 
-## Phase 1 rules
+## Contract rules
 
 - These ADRs define contracts.
-- They do not add proxy runtime behavior.
+- An ADR does not add runtime behavior by itself.
 - A later phase must add contract tests before it changes a frozen contract.
-- A new ADR must replace an accepted decision.
+- A new ADR must replace or amend an accepted decision.
 - An implementation must not silently change an accepted decision.
+- An amendment must name the decisions and rules that it changes.
 
 Protocol rules apply to all adapters:
 
@@ -49,6 +57,8 @@ Protocol rules apply to all adapters:
 **Adapter** means a component that maps one protocol to or from the Agent IR.
 
 **Agent IR** means the internal, protocol-neutral representation in ADR 0002.
+
+**Model profile** means a versioned contract for model capabilities, tokenizer behavior, output normalization, and optional bounded repair.
 
 **Local endpoint** means one ppmlx base URL and listener. It can expose multiple compatible HTTP paths.
 
