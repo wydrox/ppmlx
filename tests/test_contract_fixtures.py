@@ -40,6 +40,7 @@ ADR_FILES = [
     "0006-memory-capture-and-read.md",
     "0007-retention-and-redaction.md",
     "0008-compatibility.md",
+    "0009-bounded-tool-argument-repair.md",
 ]
 
 
@@ -806,6 +807,7 @@ def test_fixture_has_a_complete_streamed_tool_round_trip(fixture: dict[str, Any]
     assert terminal_events[0]["usage"] == native_usage(protocol, tool_frames)
     assert terminal_events[1]["usage"] == native_usage(protocol, final_frames)
 
+
 def test_contract_fixtures_are_sanitized_and_have_provenance():
     forbidden = [
         re.compile(r"/Users/", re.IGNORECASE),
@@ -831,7 +833,7 @@ def test_contract_fixtures_are_sanitized_and_have_provenance():
                     assert not pattern.search(text), f"{path} contains forbidden fixture data: {pattern.pattern}"
 
 
-def test_phase_one_has_eight_accepted_architecture_decisions():
+def test_accepted_architecture_decision_set_is_complete():
     assert sorted(path.name for path in ADR_ROOT.glob("*.md")) == ADR_FILES
     required_sections = [
         "Context",

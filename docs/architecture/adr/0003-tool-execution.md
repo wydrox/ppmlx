@@ -1,6 +1,6 @@
 # ADR 0003: Tool Execution
 
-- Status: Accepted
+- Status: Accepted; amended by [Amendment 0001](../amendments/0001-bounded-tool-argument-repair.md)
 - Date: 2026-08-18
 
 ## Context
@@ -9,13 +9,16 @@ Agent harnesses already control files, shells, network access, sandboxes, and us
 Providers emit tool calls in different formats and stream their arguments in different event types.
 
 If ppmlx executes harness tools, it bypasses the harness security model.
-If ppmlx changes call identifiers or arguments, the harness cannot return a valid result.
+If ppmlx changes call identifiers or accepted arguments after model-profile normalization, the harness cannot return a valid result.
 
 ## Decision
 
 The harness is the tool owner and the only tool executor in the Phase 1 contract.
 ppmlx transports tool definitions, tool calls, and tool results through the Agent IR.
 It does not run a harness tool.
+
+Amendment 0001 permits one bounded, profile-declared syntax repair before Agent IR accepts a local model tool call.
+That repair does not change tool ownership, call identity, result linking, or harness approval.
 
 One tool round trip has four ordered states:
 
@@ -63,9 +66,9 @@ It uses these terminal states:
 - ppmlx MUST NOT execute a tool that a harness supplies.
 - ppmlx MUST NOT interpret a tool schema as permission to run that tool.
 - ppmlx MUST preserve the tool name, description, input schema, order, and selection rule.
-- ppmlx MUST preserve `arguments_raw` until the tool call is complete.
+- ppmlx MUST preserve `arguments_raw` after the model profile accepts it under ADR 0002 and Amendment 0001.
 - ppmlx MUST emit a tool call only after its name and stable `call_id` are known.
-- Each argument delta MUST keep source order.
+- Each accepted argument delta MUST keep source order.
 
 ### Call state
 
@@ -118,6 +121,7 @@ Retry rules also apply:
 
 - A required tool call MUST NOT become a plain-text suggestion.
 - Plain text that resembles a tool call MUST NOT become a tool call without a documented parser contract.
+- A model profile that permits argument repair MUST follow Amendment 0001.
 - A provider adapter MUST declare support for tools, parallel calls, strict schemas, and streamed arguments.
 - Routing MUST reject a tool request when the selected route lacks a required tool capability.
 
@@ -137,6 +141,7 @@ ppmlx must preserve its role as a tool result and must not promote it to a syste
 
 The harness remains responsible for sandbox controls, path controls, network controls, and user approval.
 ppmlx must not claim that a provider request grants local tool permission.
+A bounded syntax repair does not increase trust or grant tool permission.
 
 Tool arguments and results can contain secrets.
 Diagnostics must redact them by default and use only request and call identifiers.
@@ -150,6 +155,7 @@ ppmlx avoids a second tool runtime and a second permission model.
 The proxy needs a conversation and continuation ledger that spans multiple HTTP requests.
 Adapters need strict stream state machines and explicit capability data.
 The system cannot hide provider defects with a lossy plain-text fallback.
+Any bounded repair must be explicit, deterministic, profile-specific, and auditable under Amendment 0001.
 
 ## Compatibility effects
 
@@ -159,7 +165,7 @@ The system cannot hide provider defects with a lossy plain-text fallback.
 - **Pi:** Assistant `tool_calls[].id` maps to `call_id`. Pi runs the tool and returns the matching tool message.
 
 Each harness keeps its native approval user interface.
-An adapter can change event shape, but it cannot change call identity, order, arguments, or result status.
+An adapter can change event shape, but it cannot change call identity, order, accepted arguments, or result status.
 
 ## Rejected alternatives
 
@@ -178,7 +184,8 @@ It loses structured identity and creates unsafe ambiguity.
 This option creates a different call identifier at each protocol boundary.
 It makes result matching and trace diagnosis unreliable.
 
-### Automatic argument repair
+### Unbounded or hidden automatic argument repair
 
-This option changes malformed arguments before the harness sees them.
-It hides provider defects and breaks lossless transport.
+This option changes malformed arguments without an explicit profile, one-repair budget, or audit record.
+It hides provider defects and breaks reproducible transport.
+Amendment 0001 permits only one bounded syntax repair before Agent IR acceptance.
