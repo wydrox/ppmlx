@@ -19,17 +19,40 @@ env:
 
 jobs:
   update-tap:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve released source ref
+        id: release-ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_VERSION: ${{ inputs.version || '' }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ ! "$MANUAL_VERSION" =~ ^[0-9]+(\.[0-9]+){2}([a-zA-Z0-9.]+)?$ ]]; then
+              echo "::error title=Invalid recovery version::Use a released version such as 0.9.1 without the v prefix."
+              exit 1
+            fi
+            RELEASE_REF="refs/tags/v${MANUAL_VERSION}"
+          else
+            if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error title=Invalid release commit::The completed Release workflow did not provide a valid commit SHA."
+              exit 1
+            fi
+            RELEASE_REF="$RELEASE_SHA"
+          fi
+          echo "ref=${RELEASE_REF}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.event.workflow_run.head_sha }}
+          ref: ${{ steps.release-ref.outputs.ref }}
 
       - name: Get version from the released source
         id: version
         env:
-          MANUAL_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
+          MANUAL_VERSION: ${{ inputs.version || '' }}
         run: |
           python3 - <<'PY'
           import os
