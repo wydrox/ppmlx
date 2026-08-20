@@ -1,6 +1,6 @@
 # ADR 0002: Agent IR
 
-- Status: Accepted; clarified by [Amendment 0001](../amendments/0001-bounded-tool-argument-repair.md)
+- Status: Accepted; clarified by [ADR 0009](0009-bounded-tool-argument-repair.md)
 - Date: 2026-08-18
 
 ## Context
@@ -18,7 +18,7 @@ The Agent IR is lossless for the accepted ppmlx protocol surface.
 It keeps source order, stable identifiers, accepted raw tool arguments, and supported vendor data.
 
 For a native harness or provider protocol, the accepted surface starts after the ingress adapter decodes the native value.
-For a local `template_structured` or `prompt_emulated` model profile, the accepted surface starts after the versioned profile applies strict normalization and any repair permitted by Amendment 0001.
+For a local `template_structured` or `prompt_emulated` model profile, the accepted surface starts after the versioned profile applies strict normalization and any repair permitted by ADR 0009.
 ppmlx must not change an accepted Agent IR argument value later in the request.
 
 The first contract version is `agent-ir/v1`.
@@ -130,7 +130,7 @@ A `tool_result` contains `call_id`, ordered result content, and `is_error`.
 
 `arguments_raw` is the exact complete argument text after the accepted normalization boundary.
 For a native protocol, this is the text after the ingress adapter decodes the source value.
-For a local model profile, this is the text after strict normalization and any bounded repair permitted by Amendment 0001.
+For a local model profile, this is the text after strict normalization and any bounded repair permitted by ADR 0009.
 `arguments_json` exists only when the accepted complete text is valid JSON.
 The raw value remains authoritative for round-trip conversion.
 A repaired call records sanitized repair metadata in a namespaced extension.
@@ -236,8 +236,8 @@ ppmlx MUST NOT use a raw request body as the only semantic representation.
 ### Values and extensions
 
 - An adapter or model profile MUST keep `arguments_raw` exactly after Agent IR accepts the value.
-- Invalid JSON MUST NOT be repaired without an explicit error or the bounded policy in Amendment 0001.
-- A repair under Amendment 0001 MUST add its sanitized namespaced extension before egress encoding.
+- Invalid JSON MUST NOT be repaired without an explicit error or the bounded policy in ADR 0009.
+- A repair under ADR 0009 MUST add its sanitized namespaced extension before egress encoding.
 - Names in `extensions` MUST use a protocol or provider namespace.
 - An egress adapter MUST preserve an extension when the target supports the same meaning.
 - The router MUST NOT inspect or change opaque reasoning content.
@@ -305,7 +305,7 @@ It also encourages silent loss of content blocks and identifiers.
 
 This option removes whitespace, duplicate keys, number spelling, and invalid source text.
 It prevents a lossless round trip and can change provider behavior.
-Amendment 0001 permits only a bounded, disclosed repair before Agent IR accepts a local call.
+ADR 0009 permits only a bounded, disclosed repair before Agent IR accepts a local call.
 
 ### Store the complete raw request only
 
