@@ -99,6 +99,7 @@ class EncodeContext:
     created_at: int = 0
     response_id: str | None = None
     parallel_tool_calls: bool = True
+    include_usage: bool = True
     metadata: Mapping[str, JsonValue] = field(
         default_factory=lambda: MappingProxyType({})
     )

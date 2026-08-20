@@ -1,5 +1,7 @@
 from __future__ import annotations
 import asyncio
+import hashlib
+import ipaddress
 import json
 import logging
 import re
@@ -15,9 +17,8 @@ if not log.handlers:
     _h.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
     log.addHandler(_h)
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response as StarletteResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +32,11 @@ _start_time = time.time()
 _DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB
 _DEFAULT_MAX_TOKENS_CAP = 32_768
 _MAX_EMBED_INPUTS = 256
+_AGENT_RUNTIME_PRINCIPAL = "local-listener"
+_AGENT_RUNTIME_DEFAULT_PROJECT = "default"
+_AGENT_RUNTIME_PROJECT_DIGEST_LENGTH = 32
+_AGENT_RUNTIME_SCOPE_HEADER_BYTES = 1024
+_SAFE_AGENT_RUNTIME_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 _cached_server_config = None
@@ -77,27 +83,210 @@ def _get_max_tokens_cap() -> int:
     return _DEFAULT_MAX_TOKENS_CAP
 
 
-class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+def _get_agent_runtime_config() -> tuple[str, int]:
+    """Return the strict Agent IR runtime mode and continuation TTL."""
+    srv = _load_server_config()
+    mode = getattr(srv, "agent_runtime", "legacy") if srv is not None else "legacy"
+    ttl = getattr(srv, "continuation_ttl_seconds", 86400) if srv is not None else 86400
+    if mode not in {"legacy", "agent_ir"}:
+        mode = "invalid"
+    if type(ttl) is not int or ttl < 1:
+        ttl = 86400
+    return mode, ttl
+
+
+def _agent_runtime_scope(request: Request, *, protocol: str):
+    """Build a bounded local scope without retaining raw header values."""
+    from ppmlx.local_runtime.runtime import AgentRuntimeError, RuntimeScope
+
+    client_host = request.client.host if request.client is not None else ""
+    try:
+        is_loopback = ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        is_loopback = client_host in {"localhost", "testclient"}
+    if not is_loopback:
+        raise AgentRuntimeError("agent_runtime_loopback_required", status_code=403)
+
+    def bounded_header(name: str) -> str | None:
+        value = request.headers.get(name)
+        if value is not None and len(value.encode("utf-8")) > _AGENT_RUNTIME_SCOPE_HEADER_BYTES:
+            raise AgentRuntimeError("invalid_runtime_scope")
+        return value
+
+    raw_project = bounded_header("x-ppmlx-project")
+    project_id = _AGENT_RUNTIME_DEFAULT_PROJECT
+    if raw_project:
+        digest = hashlib.sha256(raw_project.encode("utf-8")).hexdigest()
+        project_id = f"project_{digest[:_AGENT_RUNTIME_PROJECT_DIGEST_LENGTH]}"
+
+    bounded_header("authorization")
+    principal_id = _AGENT_RUNTIME_PRINCIPAL
+
+    harness_value = (
+        bounded_header("x-ppmlx-harness-id")
+        or bounded_header("user-agent")
+        or protocol
+    )
+    harness_digest = hashlib.sha256(harness_value.encode("utf-8")).hexdigest()
+    return RuntimeScope(
+        principal_id=principal_id,
+        project_id=project_id,
+        harness_id=f"harness_{harness_digest[:_AGENT_RUNTIME_PROJECT_DIGEST_LENGTH]}",
+    )
+
+
+def _native_has_tool_flow(protocol: str, body: dict[str, object]) -> bool:
+    """Detect a native tool request or result without recursive input walks."""
+    if "tools" in body and body["tools"] != []:
+        return True
+    tool_choice = body.get("tool_choice")
+    if tool_choice not in (None, "auto", "none"):
+        return True
+    if protocol == "openai-responses":
+        items = body.get("input")
+        return isinstance(items, list) and any(
+            isinstance(item, dict)
+            and item.get("type") in {"function_call", "function_call_output"}
+            for item in items
+        )
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if protocol == "openai-chat" and (
+            message.get("role") == "tool" or bool(message.get("tool_calls"))
+        ):
+            return True
+        if protocol == "anthropic-messages":
+            content = message.get("content")
+            if isinstance(content, list) and any(
+                isinstance(block, dict)
+                and block.get("type") in {"tool_use", "tool_result"}
+                for block in content
+            ):
+                return True
+    return False
+
+
+def _agent_runtime_error_response(error) -> JSONResponse:
+    """Convert only safe strict-runtime fields to an HTTP response."""
+    code = getattr(error, "code", None)
+    status_code = getattr(error, "status_code", None)
+    if type(code) is not str or _SAFE_AGENT_RUNTIME_ERROR_CODE.fullmatch(code) is None:
+        code = "agent_runtime_error"
+    if type(status_code) is not int or not 400 <= status_code <= 599:
+        status_code = 500
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"code": code}},
+    )
+
+
+async def _strict_agent_runtime_response(
+    request: Request,
+    body: object,
+    *,
+    protocol: str,
+) -> StarletteResponse | None:
+    """Run an eligible request through the buffered strict local runtime."""
+    mode, continuation_ttl_seconds = _get_agent_runtime_config()
+    if mode == "legacy" or not isinstance(body, dict):
+        return None
+    if not _native_has_tool_flow(protocol, body):
+        return None
+    if mode != "agent_ir":
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"code": "agent_runtime_configuration_invalid"}},
+        )
+    if body.get("stream") is not True or not body.get("tools"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "agent_runtime_requires_streamed_tools"}},
+        )
+
+    from ppmlx.local_runtime.runtime import AgentRuntimeError, get_local_agent_runtime
+
+    try:
+        scope = _agent_runtime_scope(request, protocol=protocol)
+        runtime = get_local_agent_runtime(
+            continuation_ttl_seconds=continuation_ttl_seconds,
+            max_tokens_cap=_get_max_tokens_cap(),
+        )
+        response = await runtime.execute_async(
+            body,
+            protocol=protocol,
+            scope=scope,
+        )
+    except AgentRuntimeError as error:
+        return _agent_runtime_error_response(error)
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"code": "agent_runtime_error"}},
+        )
+    return StarletteResponse(
+        content=response.sse,
+        media_type="text/event-stream",
+    )
+
+
+class _RequestBodyTooLarge(Exception):
+    pass
+
+
+class RequestSizeLimitMiddleware:
     """Reject request bodies that exceed a configurable size limit."""
 
-    def __init__(self, app, max_bytes: int = 10 * 1024 * 1024):
-        super().__init__(app)
+    def __init__(self, app: ASGIApp, max_bytes: int = 10 * 1024 * 1024):
+        self.app = app
         self.max_bytes = max_bytes
 
-    async def dispatch(
-        self, request: StarletteRequest, call_next
-    ) -> StarletteResponse:
-        content_length = request.headers.get("content-length")
-        if content_length:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers", []))
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
             try:
-                if int(content_length) > self.max_bytes:
-                    return JSONResponse(
-                        status_code=413,
-                        content={"error": {"message": "Request body too large", "type": "invalid_request_error"}},
-                    )
-            except (ValueError, TypeError):
-                pass
-        return await call_next(request)
+                declared_length = int(content_length)
+            except ValueError:
+                declared_length = -1
+            if declared_length < 0 or declared_length > self.max_bytes:
+                await self._reject(scope, receive, send)
+                return
+
+        received_bytes = 0
+
+        async def limited_receive() -> Message:
+            nonlocal received_bytes
+            message = await receive()
+            if message["type"] == "http.request":
+                received_bytes += len(message.get("body", b""))
+                if received_bytes > self.max_bytes:
+                    raise _RequestBodyTooLarge
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except _RequestBodyTooLarge:
+            await self._reject(scope, receive, send)
+
+    @staticmethod
+    async def _reject(scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse(
+            status_code=413,
+            content={
+                "error": {
+                    "message": "Request body too large",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+        await response(scope, receive, send)
 
 
 @asynccontextmanager
@@ -837,6 +1026,10 @@ async def health(request: Request):
             "memory_total_gb": round(ram_gb, 1),
         },
         "registry": registry_info,
+        "agent_runtime": {
+            "mode": _get_agent_runtime_config()[0],
+            "streamed_tool_requests": _get_agent_runtime_config()[0] == "agent_ir",
+        },
     }
 
 
@@ -909,6 +1102,11 @@ async def list_models():
 async def chat_completions(request: Request):
     """OpenAI-compatible chat completions endpoint."""
     body = await request.json()
+    strict_response = await _strict_agent_runtime_response(
+        request, body, protocol="openai-chat"
+    )
+    if strict_response is not None:
+        return strict_response
     from ppmlx.schema import ChatCompletionRequest as _CCReq; _CCReq.model_validate(body)
 
     model_name = body.get("model", "")
@@ -1710,6 +1908,11 @@ def _responses_input_to_messages(input_data) -> list[dict]:
 async def responses(request: Request):
     """OpenAI Responses API endpoint (used by Codex and newer OpenAI tools)."""
     body = await request.json()
+    strict_response = await _strict_agent_runtime_response(
+        request, body, protocol="openai-responses"
+    )
+    if strict_response is not None:
+        return strict_response
     _track_usage(
         "api_responses",
         {
@@ -2243,6 +2446,11 @@ def _anthropic_sse(data: dict) -> str:
 async def anthropic_messages(request: Request):
     """Anthropic Messages API endpoint (used by Claude Code)."""
     body = await request.json()
+    strict_response = await _strict_agent_runtime_response(
+        request, body, protocol="anthropic-messages"
+    )
+    if strict_response is not None:
+        return strict_response
     model_name = body.get("model", "")
     messages = body.get("messages", [])
     stream = body.get("stream", False)
@@ -2717,6 +2925,27 @@ async def responses_ws(websocket: WebSocket):
 
             # Extract fields from the response.create message
             response_body = body.get("response", body)
+            runtime_mode = _get_agent_runtime_config()[0]
+            if (
+                runtime_mode != "legacy"
+                and isinstance(response_body, dict)
+                and _native_has_tool_flow("openai-responses", response_body)
+            ):
+                code = (
+                    "agent_ir_websocket_tools_unsupported"
+                    if runtime_mode == "agent_ir"
+                    else "agent_runtime_configuration_invalid"
+                )
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request",
+                            "code": code,
+                        },
+                    }
+                )
+                continue
             model_name = response_body.get("model", body.get("model", ""))
             input_data = response_body.get("input", body.get("input", ""))
             temperature = response_body.get("temperature", body.get("temperature", 0.7))

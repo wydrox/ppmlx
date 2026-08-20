@@ -329,6 +329,23 @@ def test_chat_template_applied():
     )
 
 
+def test_strict_tool_template_does_not_silently_drop_tools():
+    from ppmlx.engine import LoadedModel, TextEngine
+
+    tokenizer = MagicMock()
+    tokenizer.apply_chat_template.side_effect = TypeError("tools are unsupported")
+    engine = TextEngine(max_loaded=1)
+    loaded = LoadedModel(repo_id="test/model", model=MagicMock(), tokenizer=tokenizer)
+
+    with pytest.raises(RuntimeError, match="cannot accept tool definitions"):
+        engine._apply_chat_template(
+            loaded,
+            [{"role": "user", "content": "Use the tool."}],
+            tools=[{"type": "function", "function": {"name": "bash"}}],
+            strict_tools=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # 15. stream_generate strips <think> blocks by default
 # ---------------------------------------------------------------------------

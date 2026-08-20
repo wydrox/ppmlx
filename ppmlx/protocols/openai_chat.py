@@ -649,6 +649,8 @@ def _encode_stream(events: Sequence[AgentEvent], *, context: EncodeContext) -> s
         raise _error("response_id_too_large")
     if type(context.parallel_tool_calls) is not bool:
         raise _error("invalid_parallel_tool_calls")
+    if type(context.include_usage) is not bool:
+        raise _error("invalid_include_usage")
     if context.metadata:
         raise _error("unsupported_encode_metadata")
     if any(
@@ -856,7 +858,7 @@ def _encode_stream(events: Sequence[AgentEvent], *, context: EncodeContext) -> s
                 choice_index=choice_index,
                 delta={},
                 finish_reason=terminal.finish_reason,
-                usage=terminal.usage,
+                usage=terminal.usage if context.include_usage else None,
             ),
         )
     )

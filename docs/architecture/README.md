@@ -23,6 +23,7 @@ The following accepted decisions complete the Phase 1 contract:
 
 The [contract fixture manifest](../../tests/fixtures/contracts/manifest.json) records the exact harness and protocol versions for Phase 1.
 The [Agent IR v1 JSON Schema](schema/agent-ir-v1.schema.json) defines the normalized request and event shapes.
+The [local Agent IR runtime guide](local-agent-runtime.md) defines the Phase 4 implementation boundary and its limits.
 
 ## Phase 1 rules
 

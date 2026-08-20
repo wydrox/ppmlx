@@ -1,0 +1,557 @@
+"""Strict normalization of local model tool output.
+
+Each profile accepts one documented format. The normalizer does not infer a
+profile, repair malformed output, or execute a tool.
+"""
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from enum import Enum
+from typing import Callable, NoReturn
+
+
+class NormalizationProfile(str, Enum):
+    """Versioned local model output formats."""
+
+    GROK_OPENAI_CHAT_V1 = "grok-openai-chat-v1"
+    KIMI_K2_V1 = "kimi-k2-v1"
+    DEEPSEEK_V3_V1 = "deepseek-v3-v1"
+    QWEN_JSON_V1 = "qwen-json-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOutputLimits:
+    """Resource limits for one model output."""
+
+    max_output_bytes: int = 2 * 1024 * 1024
+    max_calls: int = 128
+    max_arguments_bytes: int = 1024 * 1024
+    max_name_bytes: int = 256
+    max_call_id_bytes: int = 512
+    max_json_depth: int = 64
+    max_json_nodes: int = 100_000
+    max_json_string_bytes: int = 1024 * 1024
+
+    def __post_init__(self) -> None:
+        values = (
+            self.max_output_bytes,
+            self.max_calls,
+            self.max_arguments_bytes,
+            self.max_name_bytes,
+            self.max_call_id_bytes,
+            self.max_json_depth,
+            self.max_json_nodes,
+            self.max_json_string_bytes,
+        )
+        if any(type(value) is not int or value < 0 for value in values):
+            raise ValueError("Tool output limits must be nonnegative integers")
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedToolCall:
+    """A model tool call with source argument text."""
+
+    index: int
+    name: str
+    arguments_raw: str
+    arguments_json: dict[str, object]
+    call_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedToolOutput:
+    """Normalized calls and text outside the accepted tool envelope."""
+
+    profile: NormalizationProfile
+    tool_calls: tuple[NormalizedToolCall, ...]
+    remaining_text: str
+
+
+class ToolNormalizationError(ValueError):
+    """A safe error that does not include model output."""
+
+    def __init__(self, *, profile: str, code: str) -> None:
+        self.profile = profile
+        self.code = code
+        super().__init__(f"local tool normalization error {code}")
+
+
+class _DuplicateJsonKey(ValueError):
+    pass
+
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_$./:-]*$")
+_CALL_ID_RE = re.compile(r"^\S+$")
+_KIMI_ID_RE = re.compile(r"^functions\.([A-Za-z0-9_$][A-Za-z0-9_$./-]*):([0-9]+)$")
+
+_QWEN_START = "<tool_call>"
+_QWEN_END = "</tool_call>"
+
+_KIMI_SECTION_START = "<|tool_calls_section_begin|>"
+_KIMI_SECTION_END = "<|tool_calls_section_end|>"
+_KIMI_CALL_START = "<|tool_call_begin|>"
+_KIMI_CALL_END = "<|tool_call_end|>"
+_KIMI_ARGUMENT_START = "<|tool_call_argument_begin|>"
+
+_DEEPSEEK_SECTION_START = "<｜tool▁calls▁begin｜>"
+_DEEPSEEK_SECTION_END = "<｜tool▁calls▁end｜>"
+_DEEPSEEK_CALL_START = "<｜tool▁call▁begin｜>"
+_DEEPSEEK_CALL_END = "<｜tool▁call▁end｜>"
+_DEEPSEEK_SEPARATOR = "<｜tool▁sep｜>"
+
+
+def normalize_tool_output(
+    text: str,
+    *,
+    profile: NormalizationProfile | str,
+    limits: ToolOutputLimits = ToolOutputLimits(),
+) -> NormalizedToolOutput:
+    """Normalize one output with an explicit, versioned profile."""
+    profile_name = profile.value if isinstance(profile, NormalizationProfile) else "local-tool-output"
+    try:
+        selected = profile if isinstance(profile, NormalizationProfile) else NormalizationProfile(profile)
+        if type(text) is not str:
+            _raise(selected.value, "invalid_output_type")
+        if not isinstance(limits, ToolOutputLimits):
+            _raise(selected.value, "invalid_limits")
+        if len(text.encode("utf-8")) > limits.max_output_bytes:
+            _raise(selected.value, "output_limit_exceeded")
+        parser = _PARSERS[selected]
+        return parser(text, limits)
+    except ToolNormalizationError as error:
+        details = (error.profile, error.code)
+    except (LookupError, TypeError, ValueError):
+        details = (profile_name, "invalid_tool_output")
+    except Exception:
+        details = (profile_name, "invalid_tool_output")
+    raise ToolNormalizationError(profile=details[0], code=details[1]) from None
+
+
+def _raise(profile: str, code: str) -> NoReturn:
+    raise ToolNormalizationError(profile=profile, code=code)
+
+
+def _reject_constant(_: str) -> None:
+    raise ValueError("invalid JSON constant")
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonKey
+        result[key] = value
+    return result
+
+
+_JSON_DECODER = json.JSONDecoder(
+    object_pairs_hook=_reject_duplicate_pairs,
+    parse_constant=_reject_constant,
+)
+
+
+def _parse_json(source: str, *, profile: str, limits: ToolOutputLimits) -> object:
+    try:
+        value, end = _JSON_DECODER.raw_decode(source)
+        if source[end:].strip():
+            _raise(profile, "malformed_arguments")
+    except ToolNormalizationError:
+        raise
+    except _DuplicateJsonKey:
+        _raise(profile, "duplicate_json_key")
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
+        _raise(profile, "malformed_arguments")
+    _check_json_limits(value, profile=profile, limits=limits)
+    return value
+
+
+def _check_json_limits(value: object, *, profile: str, limits: ToolOutputLimits) -> None:
+    stack: list[tuple[object, int]] = [(value, 1)]
+    nodes = 0
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if nodes > limits.max_json_nodes:
+            _raise(profile, "json_node_limit_exceeded")
+        if depth > limits.max_json_depth:
+            _raise(profile, "json_depth_limit_exceeded")
+        if isinstance(item, str):
+            if len(item.encode("utf-8")) > limits.max_json_string_bytes:
+                _raise(profile, "json_string_limit_exceeded")
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                if len(key.encode("utf-8")) > limits.max_json_string_bytes:
+                    _raise(profile, "json_string_limit_exceeded")
+                stack.append((child, depth + 1))
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+
+
+def _parse_json_object_with_fields(
+    source: str,
+    *,
+    profile: str,
+    limits: ToolOutputLimits,
+) -> tuple[dict[str, object], dict[str, str]]:
+    """Parse one JSON object and retain each top-level value lexeme."""
+    value = _parse_json(source, profile=profile, limits=limits)
+    if not isinstance(value, dict):
+        _raise(profile, "arguments_not_object")
+
+    fields: dict[str, str] = {}
+    position = _skip_space(source, 0)
+    if position >= len(source) or source[position] != "{":
+        _raise(profile, "malformed_arguments")
+    position = _skip_space(source, position + 1)
+    if position < len(source) and source[position] == "}":
+        return value, fields
+
+    while position < len(source):
+        try:
+            key, key_end = json.JSONDecoder().raw_decode(source, position)
+        except (json.JSONDecodeError, ValueError):
+            _raise(profile, "malformed_arguments")
+        if type(key) is not str:
+            _raise(profile, "malformed_arguments")
+        position = _skip_space(source, key_end)
+        if position >= len(source) or source[position] != ":":
+            _raise(profile, "malformed_arguments")
+        value_start = _skip_space(source, position + 1)
+        try:
+            _, value_end = _JSON_DECODER.raw_decode(source, value_start)
+        except (_DuplicateJsonKey, json.JSONDecodeError, TypeError, ValueError, RecursionError):
+            _raise(profile, "malformed_arguments")
+        fields[key] = source[value_start:value_end]
+        position = _skip_space(source, value_end)
+        if position < len(source) and source[position] == ",":
+            position = _skip_space(source, position + 1)
+            continue
+        if position < len(source) and source[position] == "}":
+            position = _skip_space(source, position + 1)
+            if position != len(source):
+                _raise(profile, "malformed_arguments")
+            return value, fields
+        _raise(profile, "malformed_arguments")
+    _raise(profile, "malformed_arguments")
+
+
+def _skip_space(source: str, position: int) -> int:
+    while position < len(source) and source[position] in " \t\r\n":
+        position += 1
+    return position
+
+
+def _validate_name(name: object, *, profile: str, limits: ToolOutputLimits) -> str:
+    if (
+        type(name) is not str
+        or not name
+        or len(name.encode("utf-8")) > limits.max_name_bytes
+        or _NAME_RE.fullmatch(name) is None
+    ):
+        _raise(profile, "invalid_tool_name")
+    return name
+
+
+def _validate_call_id(call_id: object, *, profile: str, limits: ToolOutputLimits) -> str:
+    if (
+        type(call_id) is not str
+        or not call_id
+        or len(call_id.encode("utf-8")) > limits.max_call_id_bytes
+        or _CALL_ID_RE.fullmatch(call_id) is None
+    ):
+        _raise(profile, "invalid_call_id")
+    return call_id
+
+
+def _arguments(
+    raw: str,
+    *,
+    profile: str,
+    limits: ToolOutputLimits,
+) -> dict[str, object]:
+    if len(raw.encode("utf-8")) > limits.max_arguments_bytes:
+        _raise(profile, "arguments_limit_exceeded")
+    value = _parse_json(raw, profile=profile, limits=limits)
+    if not isinstance(value, dict):
+        _raise(profile, "arguments_not_object")
+    return value
+
+
+def _call(
+    *,
+    index: int,
+    name: object,
+    arguments_raw: str,
+    profile: str,
+    limits: ToolOutputLimits,
+    call_id: object | None = None,
+) -> NormalizedToolCall:
+    normalized_name = _validate_name(name, profile=profile, limits=limits)
+    normalized_call_id = None
+    if call_id is not None:
+        normalized_call_id = _validate_call_id(call_id, profile=profile, limits=limits)
+    return NormalizedToolCall(
+        index=index,
+        name=normalized_name,
+        arguments_raw=arguments_raw,
+        arguments_json=_arguments(arguments_raw, profile=profile, limits=limits),
+        call_id=normalized_call_id,
+    )
+
+
+def _check_calls(
+    calls: list[NormalizedToolCall],
+    *,
+    profile: str,
+    limits: ToolOutputLimits,
+) -> tuple[NormalizedToolCall, ...]:
+    if not calls:
+        _raise(profile, "empty_tool_section")
+    if len(calls) > limits.max_calls:
+        _raise(profile, "call_limit_exceeded")
+    identifiers = [call.call_id for call in calls if call.call_id is not None]
+    if len(identifiers) != len(set(identifiers)):
+        _raise(profile, "duplicate_call_id")
+    return tuple(calls)
+
+
+def _single_section(
+    text: str,
+    *,
+    profile: str,
+    start: str,
+    end: str,
+) -> tuple[str, str]:
+    start_count = text.count(start)
+    end_count = text.count(end)
+    if start_count == 0 and end_count == 0:
+        return text, ""
+    if start_count != 1 or end_count != 1:
+        _raise(profile, "ambiguous_tool_section")
+    before, section_and_after = text.split(start, 1)
+    section, after = section_and_after.split(end, 1)
+    if after.strip():
+        _raise(profile, "text_after_tool_section")
+    return before, section
+
+
+def _parse_delimited_calls(
+    section: str,
+    *,
+    profile: str,
+    call_start: str,
+    call_end: str,
+    limits: ToolOutputLimits,
+    parse_body: Callable[[str, int], NormalizedToolCall],
+) -> tuple[NormalizedToolCall, ...]:
+    calls: list[NormalizedToolCall] = []
+    rest = section
+    while rest.strip():
+        rest = rest.lstrip()
+        if not rest.startswith(call_start):
+            _raise(profile, "malformed_tool_section")
+        after_start = rest[len(call_start):]
+        end_position = after_start.find(call_end)
+        if end_position < 0:
+            _raise(profile, "unterminated_tool_call")
+        body = after_start[:end_position]
+        if call_start in body:
+            _raise(profile, "nested_tool_call")
+        calls.append(parse_body(body, len(calls)))
+        if len(calls) > limits.max_calls:
+            _raise(profile, "call_limit_exceeded")
+        rest = after_start[end_position + len(call_end):]
+    return _check_calls(calls, profile=profile, limits=limits)
+
+
+def _parse_qwen(text: str, limits: ToolOutputLimits) -> NormalizedToolOutput:
+    profile = NormalizationProfile.QWEN_JSON_V1.value
+    if _QWEN_START not in text and _QWEN_END not in text:
+        return NormalizedToolOutput(NormalizationProfile.QWEN_JSON_V1, (), text)
+    if text.count(_QWEN_START) != text.count(_QWEN_END):
+        _raise(profile, "unterminated_tool_call")
+
+    first = text.find(_QWEN_START)
+    remaining_text = text[:first]
+    rest = text[first:]
+
+    def parse_body(body: str, index: int) -> NormalizedToolCall:
+        source = body.strip()
+        value, fields = _parse_json_object_with_fields(source, profile=profile, limits=limits)
+        if set(value) != {"name", "arguments"}:
+            _raise(profile, "invalid_tool_call_shape")
+        arguments_raw = fields.get("arguments")
+        if arguments_raw is None:
+            _raise(profile, "invalid_tool_call_shape")
+        return _call(
+            index=index,
+            name=value["name"],
+            arguments_raw=arguments_raw,
+            profile=profile,
+            limits=limits,
+        )
+
+    calls = _parse_delimited_calls(
+        rest,
+        profile=profile,
+        call_start=_QWEN_START,
+        call_end=_QWEN_END,
+        limits=limits,
+        parse_body=parse_body,
+    )
+    return NormalizedToolOutput(NormalizationProfile.QWEN_JSON_V1, calls, remaining_text)
+
+
+def _parse_kimi(text: str, limits: ToolOutputLimits) -> NormalizedToolOutput:
+    profile = NormalizationProfile.KIMI_K2_V1.value
+    has_section_marker = _KIMI_SECTION_START in text or _KIMI_SECTION_END in text
+    remaining_text, section = _single_section(
+        text,
+        profile=profile,
+        start=_KIMI_SECTION_START,
+        end=_KIMI_SECTION_END,
+    )
+    if not has_section_marker:
+        return NormalizedToolOutput(NormalizationProfile.KIMI_K2_V1, (), remaining_text)
+
+    def parse_body(body: str, index: int) -> NormalizedToolCall:
+        if body.count(_KIMI_ARGUMENT_START) != 1:
+            _raise(profile, "invalid_tool_call_shape")
+        call_id, arguments_raw = body.split(_KIMI_ARGUMENT_START, 1)
+        match = _KIMI_ID_RE.fullmatch(call_id)
+        if match is None:
+            _raise(profile, "invalid_call_id")
+        name = match.group(1)
+        return _call(
+            index=index,
+            name=name,
+            arguments_raw=arguments_raw,
+            profile=profile,
+            limits=limits,
+            call_id=call_id,
+        )
+
+    calls = _parse_delimited_calls(
+        section,
+        profile=profile,
+        call_start=_KIMI_CALL_START,
+        call_end=_KIMI_CALL_END,
+        limits=limits,
+        parse_body=parse_body,
+    )
+    return NormalizedToolOutput(NormalizationProfile.KIMI_K2_V1, calls, remaining_text)
+
+
+def _parse_deepseek(text: str, limits: ToolOutputLimits) -> NormalizedToolOutput:
+    profile = NormalizationProfile.DEEPSEEK_V3_V1.value
+    has_section_marker = _DEEPSEEK_SECTION_START in text or _DEEPSEEK_SECTION_END in text
+    remaining_text, section = _single_section(
+        text,
+        profile=profile,
+        start=_DEEPSEEK_SECTION_START,
+        end=_DEEPSEEK_SECTION_END,
+    )
+    if not has_section_marker:
+        return NormalizedToolOutput(NormalizationProfile.DEEPSEEK_V3_V1, (), remaining_text)
+
+    def parse_body(body: str, index: int) -> NormalizedToolCall:
+        prefix = "function" + _DEEPSEEK_SEPARATOR
+        if not body.startswith(prefix):
+            _raise(profile, "invalid_tool_call_type")
+        payload = body[len(prefix):]
+        fence = "\n```json\n"
+        if payload.count(fence) != 1 or not payload.endswith("\n```"):
+            _raise(profile, "invalid_tool_call_shape")
+        name, fenced_arguments = payload.split(fence, 1)
+        arguments_raw = fenced_arguments[:-4]
+        return _call(
+            index=index,
+            name=name,
+            arguments_raw=arguments_raw,
+            profile=profile,
+            limits=limits,
+        )
+
+    calls = _parse_delimited_calls(
+        section,
+        profile=profile,
+        call_start=_DEEPSEEK_CALL_START,
+        call_end=_DEEPSEEK_CALL_END,
+        limits=limits,
+        parse_body=parse_body,
+    )
+    return NormalizedToolOutput(NormalizationProfile.DEEPSEEK_V3_V1, calls, remaining_text)
+
+
+def _parse_grok(text: str, limits: ToolOutputLimits) -> NormalizedToolOutput:
+    profile = NormalizationProfile.GROK_OPENAI_CHAT_V1.value
+    if not text.lstrip().startswith("{"):
+        return NormalizedToolOutput(NormalizationProfile.GROK_OPENAI_CHAT_V1, (), text)
+    value = _parse_json(text, profile=profile, limits=limits)
+    if not isinstance(value, dict) or not {"role", "content", "tool_calls"} <= set(value):
+        _raise(profile, "invalid_tool_call_shape")
+    if set(value) - {"role", "content", "tool_calls"}:
+        _raise(profile, "invalid_tool_call_shape")
+    if value["role"] != "assistant":
+        _raise(profile, "ambiguous_tool_output")
+    native_calls = value["tool_calls"]
+    if not isinstance(native_calls, list):
+        _raise(profile, "invalid_tool_call_shape")
+    if len(native_calls) > limits.max_calls:
+        _raise(profile, "call_limit_exceeded")
+    if not native_calls:
+        content = value["content"]
+        if type(content) is not str or not content:
+            _raise(profile, "ambiguous_tool_output")
+        return NormalizedToolOutput(
+            NormalizationProfile.GROK_OPENAI_CHAT_V1,
+            (),
+            content,
+        )
+    if value["content"] not in (None, ""):
+        _raise(profile, "ambiguous_tool_output")
+
+    calls: list[NormalizedToolCall] = []
+    for index, native_call in enumerate(native_calls):
+        if not isinstance(native_call, dict) or set(native_call) != {"id", "type", "function"}:
+            _raise(profile, "invalid_tool_call_shape")
+        if native_call["type"] != "function" or not isinstance(native_call["function"], dict):
+            _raise(profile, "invalid_tool_call_type")
+        function = native_call["function"]
+        if set(function) != {"name", "arguments"} or type(function["arguments"]) is not str:
+            _raise(profile, "invalid_tool_call_shape")
+        calls.append(
+            _call(
+                index=index,
+                name=function["name"],
+                arguments_raw=function["arguments"],
+                profile=profile,
+                limits=limits,
+                call_id=native_call["id"],
+            )
+        )
+    normalized = _check_calls(calls, profile=profile, limits=limits)
+    return NormalizedToolOutput(NormalizationProfile.GROK_OPENAI_CHAT_V1, normalized, "")
+
+
+_PARSERS: dict[
+    NormalizationProfile,
+    Callable[[str, ToolOutputLimits], NormalizedToolOutput],
+] = {
+    NormalizationProfile.GROK_OPENAI_CHAT_V1: _parse_grok,
+    NormalizationProfile.KIMI_K2_V1: _parse_kimi,
+    NormalizationProfile.DEEPSEEK_V3_V1: _parse_deepseek,
+    NormalizationProfile.QWEN_JSON_V1: _parse_qwen,
+}
+
+
+__all__ = [
+    "NormalizationProfile",
+    "NormalizedToolCall",
+    "NormalizedToolOutput",
+    "ToolNormalizationError",
+    "ToolOutputLimits",
+    "normalize_tool_output",
+]
