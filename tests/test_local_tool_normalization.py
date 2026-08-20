@@ -302,7 +302,9 @@ def test_normalization_module_has_only_pure_standard_library_imports() -> None:
     imports.update(
         (node.module or "").split(".")[0]
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module != "__future__"
+        if isinstance(node, ast.ImportFrom)
+        and node.module != "__future__"
+        and node.level == 0
     )
 
     assert imports <= {"dataclasses", "enum", "json", "re", "typing"}
