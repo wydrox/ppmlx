@@ -44,7 +44,9 @@ A `native_structured` profile must return a typed error for malformed argument J
 A profile with level `none` must not receive a tool-use route.
 
 A capability level does not prove quality.
-The published capability matrix must also identify the exact model, tokenizer revision, evaluation result, and support status.
+The published capability matrix must identify the exact model and model revision.
+It must also identify the tokenizer revision, normalization profile, repair policy, evaluation result, and support status.
+A model-family match alone cannot establish a stable or preview capability claim.
 
 ## Repair budget
 
@@ -146,8 +148,41 @@ Logs and traces can contain:
 
 They must not contain the malformed argument text, a repaired value that can include secrets, or an argument-derived hash.
 
-Profile evaluation must report repair counts and repair rates.
-A high repair rate can prevent a profile from receiving stable status even when its final valid-call rate passes the numeric threshold.
+## Evaluation and publication
+
+Deterministic parser and repair fixtures must pass at 100%.
+Tool-call and tool-result correlation must pass at 100%.
+
+Each evaluated model profile must run one fixed case set three times.
+The published result must identify:
+
+- PPMLX version and commit;
+- model repository and revision;
+- tokenizer revision;
+- quantization;
+- normalization profile;
+- capability level;
+- repair policy;
+- Apple chip and memory;
+- macOS version;
+- generation settings and seed;
+- case-set version;
+- strict-valid call count and rate;
+- repaired call count and rate;
+- effective valid-call count and rate;
+- tool-call and result correlation rate;
+- each run result and the aggregate result.
+
+A repaired call counts as effective and valid only after all normal tool, identity, and schema checks pass.
+
+Support status uses the effective valid-call rate:
+
+- `stable`: at least 98%;
+- `preview`: 95% to 97.9%;
+- `experimental` or `disabled`: below 95%.
+
+The capability matrix must show strict validity and repair use separately.
+It must not use one family-level score for unevaluated checkpoints.
 
 ## Security and privacy
 
