@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+- Fail profile publication closed on deterministic fixture evidence. A report can no longer claim `deterministic_fixtures_passed` as an operator flag; the evaluation flow must verify a recorded, content-free fixture artifact that names the exact ppmlx commit, and an artifact for a different commit disables publication.
+- Select local normalization profiles only for exact reviewed model repositories. A family-name or substring match no longer creates a tool capability claim; unknown models select no profile and stay strict.
+- Repair exactly one unambiguous missing final delimiter in Qwen tool-call arguments and keep envelope punctuation out of the argument repair surface, so repair errors attribute to the argument defect instead of the call envelope.
+
+### Added
+- `scripts/run_deterministic_fixtures.py` records the content-free `tool-profile-fixtures/v1` artifact that profile publication now requires.
+
 ## [0.9.1] - 2026-08-20
 
 ### Changed
