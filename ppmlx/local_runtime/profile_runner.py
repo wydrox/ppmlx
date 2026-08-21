@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import platform
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -270,7 +271,7 @@ def run_profile_evaluation(
     environment: AppleEvaluationEnvironment,
     settings: GenerationSettings,
     generate: ProfileGenerator,
-    deterministic_fixtures_passed: bool = True,
+    fixtures_evidence: Mapping[str, object],
     ppmlx_commit: str | None = None,
 ) -> dict[str, object]:
     """Run three fixed evaluations and return one validated safe report."""
@@ -278,6 +279,8 @@ def run_profile_evaluation(
     if type(model_path) is not str or not model_path:
         raise ProfileRunnerError("model_path_required")
     commit = ppmlx_commit or current_git_commit(repository_root)
+    if fixtures_evidence.get("ppmlx_commit") != commit:
+        raise ProfileRunnerError("fixture_evidence_commit_mismatch")
     runs = tuple(
         _run_once(
             run_index=index,
@@ -307,12 +310,13 @@ def run_profile_evaluation(
         generation_settings=settings.to_dict(),
         case_set=case_set,
         runs=runs,
-        deterministic_fixtures_passed=deterministic_fixtures_passed,
+        deterministic_fixtures_passed=True,
     )
     return finalize_report(
         report,
         architecture=environment.architecture,
         case_set_sha256=case_set_sha256(case_set_path),
+        fixtures_evidence=fixtures_evidence,
     )
 
 

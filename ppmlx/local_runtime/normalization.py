@@ -15,7 +15,6 @@ from typing import Callable, NoReturn
 from .tool_argument_repair import (
     ToolArgumentRepairBudget,
     ToolArgumentRepairError,
-    ToolArgumentRepairKind,
     ToolArgumentRepairMetadata,
     ToolArgumentRepairPolicy,
     repair_json_object,
@@ -324,12 +323,23 @@ def _parse_qwen_repair_fields(
     outer_end = len(source)
     while outer_end > arguments_start and source[outer_end - 1] in " \t\r\n":
         outer_end -= 1
-    if outer_end <= arguments_start or source[outer_end - 1] != "}":
+    if outer_end <= arguments_start:
         _raise(profile, "invalid_tool_call_shape")
-    arguments_raw = source[arguments_start : outer_end - 1].rstrip()
-    if not arguments_raw:
-        _raise(profile, "invalid_tool_call_shape")
-    return name, arguments_raw
+    if source[outer_end - 1] == "}":
+        # The documented envelope keeps one closing brace for the call object.
+        # It is never part of the argument value.
+        arguments_raw = source[arguments_start : outer_end - 1].rstrip()
+        if not arguments_raw:
+            _raise(profile, "invalid_tool_call_shape")
+        return name, arguments_raw
+    if source[outer_end - 1] == "]":
+        # The envelope brace is missing and the argument value holds the final
+        # delimiter; the repair surface stays inside the argument value.
+        arguments_raw = source[arguments_start:outer_end].rstrip()
+        if not arguments_raw:
+            _raise(profile, "invalid_tool_call_shape")
+        return name, arguments_raw
+    _raise(profile, "invalid_tool_call_shape")
 
 
 def _skip_space(source: str, position: int) -> int:
@@ -556,11 +566,6 @@ def _parse_qwen(
                 repair_policy=repair_policy,
                 repair_budget=repair_budget,
             )
-            if (
-                call.repair is not None
-                and call.repair.kind is ToolArgumentRepairKind.MISSING_FINAL_DELIMITER
-            ):
-                _raise(profile, "repair_ambiguous")
             return call
         if set(value) != {"name", "arguments"}:
             _raise(profile, "invalid_tool_call_shape")
@@ -758,21 +763,22 @@ _PARSERS: dict[NormalizationProfile, _Parser] = {
 }
 
 
+# Exact reviewed model repositories. A model identifier selects a profile only
+# when it names one reviewed repository; a family-name match does not create a
+# capability claim (docs/capabilities/tool-profiles.md).
+_REVIEWED_MODEL_PROFILES: dict[str, NormalizationProfile] = {}
+
+
 def select_normalization_profile(model: str) -> NormalizationProfile | None:
-    """Select a profile only when the model identifier names a supported family."""
+    """Select a profile only for an exact reviewed model repository.
+
+    A family-name or substring match does not create a capability claim.
+    Unknown models select no profile and stay strict.
+    """
 
     if type(model) is not str:
         return None
-    normalized = model.lower().replace("_", "-")
-    if "grok" in normalized:
-        return NormalizationProfile.GROK_OPENAI_CHAT_V1
-    if "kimi" in normalized or "moonshot" in normalized:
-        return NormalizationProfile.KIMI_K2_V1
-    if "deepseek" in normalized:
-        return NormalizationProfile.DEEPSEEK_V3_V1
-    if "qwen" in normalized:
-        return NormalizationProfile.QWEN_JSON_V1
-    return None
+    return _REVIEWED_MODEL_PROFILES.get(model)
 
 
 __all__ = [

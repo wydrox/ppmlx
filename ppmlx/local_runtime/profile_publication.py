@@ -8,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import cast
 
+from .deterministic_fixtures import load_fixture_evidence
 from .normalization import NormalizationProfile
 from .tool_argument_repair import (
     ToolArgumentRepairKind,
@@ -379,8 +380,16 @@ def classify_report(report: Mapping[str, object]) -> PublishedSupportStatus:
     return PublishedSupportStatus.EXPERIMENTAL
 
 
-def validate_report(report: Mapping[str, object]) -> PublishedSupportStatus:
-    """Validate one content-free evidence report and return its derived status."""
+def validate_report(
+    report: Mapping[str, object],
+    *,
+    fixtures_evidence: Mapping[str, object] | None = None,
+) -> PublishedSupportStatus:
+    """Validate one content-free evidence report and return its derived status.
+
+    Publication fails closed unless ``fixtures_evidence`` is the recorded,
+    commit-bound artifact of this repository's deterministic fixture suite.
+    """
 
     root = _mapping(report, code="invalid_report")
     required = {
@@ -399,8 +408,16 @@ def validate_report(report: Mapping[str, object]) -> PublishedSupportStatus:
         raise ProfilePublicationError("invalid_report")
     if type(root["deterministic_fixtures_passed"]) is not bool:
         raise ProfilePublicationError("invalid_fixture_status")
+    if root["deterministic_fixtures_passed"] is not True:
+        raise ProfilePublicationError("fixtures_not_recorded")
+    if fixtures_evidence is None:
+        raise ProfilePublicationError("fixtures_evidence_required")
     _assert_no_content(root)
     _validate_identity(root)
+    ppmlx = _mapping(root["ppmlx"], code="invalid_ppmlx_identity")
+    evidence_commit = fixtures_evidence.get("ppmlx_commit")
+    if type(evidence_commit) is not str or evidence_commit != ppmlx["commit"]:
+        raise ProfilePublicationError("fixture_evidence_commit_mismatch")
     _validate_profile(root)
     _validate_environment(root)
     _validate_generation_settings(root)
@@ -417,6 +434,7 @@ def finalize_report(
     *,
     architecture: str,
     case_set_sha256: str,
+    fixtures_evidence: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Add derived publication fields to a report built by the evaluator."""
 
@@ -436,13 +454,23 @@ def finalize_report(
     )
     report["aggregate"] = aggregate
     aggregate["support_status"] = classify_report(report).value
-    validate_report(report)
+    validate_report(report, fixtures_evidence=fixtures_evidence)
     return report
 
 
-def load_reports(directory: Path) -> tuple[dict[str, object], ...]:
-    """Load and validate all reviewed JSON evidence files in one directory."""
+def load_reports(
+    directory: Path,
+    *,
+    fixtures_evidence: Mapping[str, object] | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Load and validate all reviewed JSON evidence files in one directory.
 
+    Every report must carry the same recorded fixture artifact; without it,
+    no report can be published.
+    """
+
+    if fixtures_evidence is None:
+        raise ProfilePublicationError("fixtures_evidence_required")
     if not directory.exists():
         return ()
     reports: list[dict[str, object]] = []
@@ -452,7 +480,7 @@ def load_reports(directory: Path) -> tuple[dict[str, object], ...]:
         except (OSError, UnicodeError, json.JSONDecodeError):
             raise ProfilePublicationError("invalid_report_file") from None
         report = _mapping(value, code="invalid_report")
-        validate_report(report)
+        validate_report(report, fixtures_evidence=fixtures_evidence)
         reports.append(report)
     return tuple(reports)
 
@@ -461,14 +489,20 @@ def _percent(value: object) -> str:
     return f"{float(cast(int | float, value)) * 100:.1f}%"
 
 
-def render_capability_matrix(reports: Sequence[Mapping[str, object]]) -> str:
+def render_capability_matrix(
+    reports: Sequence[Mapping[str, object]],
+    *,
+    fixtures_evidence: Mapping[str, object] | None = None,
+) -> str:
     """Render exact evidence and explicit not-evaluated parser profiles."""
 
+    if fixtures_evidence is None:
+        raise ProfilePublicationError("fixtures_evidence_required")
     reviewed: list[dict[str, object]] = []
     evaluated: set[str] = set()
     for report in reports:
         root = _mapping(report, code="invalid_report")
-        validate_report(root)
+        validate_report(root, fixtures_evidence=fixtures_evidence)
         reviewed.append(root)
         profile = _mapping(root["profile"], code="invalid_profile")
         evaluated.add(cast(str, profile["normalization_profile"]))
@@ -524,11 +558,12 @@ def render_capability_matrix(reports: Sequence[Mapping[str, object]]) -> str:
             "## Publication gates",
             "",
             "- Deterministic parser and correlation fixtures must pass at 100%.",
+            "- Publication fails closed without a recorded fixture artifact for the exact ppmlx commit; the flag alone is not evidence.",
             "- Each exact model profile must complete three fixed runs.",
             "- Stable requires at least 98% effective valid calls in every run and no more than 2% repaired valid calls in any run.",
             "- Preview requires at least 95% effective valid calls in every run.",
             "- Lower results are experimental. Any fixture or correlation failure disables the profile.",
-            "- Family-name matching does not create a capability claim.",
+            "- Family-name matching does not create a capability claim. A model identifier selects a profile only when it names one exact reviewed repository.",
             "",
         ]
     )

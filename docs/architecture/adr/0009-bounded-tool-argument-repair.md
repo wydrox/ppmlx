@@ -47,6 +47,8 @@ A capability level does not prove quality.
 The published capability matrix must identify the exact model repository and model revision.
 It must also identify the tokenizer revision, quantization, normalization profile, repair policy, evaluation result, and support status.
 A model-family match alone cannot establish a stable or preview capability claim.
+Runtime profile selection must use exact reviewed model repositories.
+A family-name or substring match must select no profile rather than guess a claim.
 
 ## Repair budget
 
@@ -109,6 +111,9 @@ A repair must not:
 - execute a tool.
 
 If a permitted transformation has more than one possible edit location, ppmlx must reject the output as ambiguous.
+A repair with exactly one possible edit location must not be rejected as ambiguous.
+The repair surface covers only the argument value.
+Envelope punctuation, such as the call object's closing brace, is never swept into the argument repair.
 
 ## Agent IR representation
 
@@ -152,6 +157,11 @@ They must not contain the malformed argument text, a repaired value that can inc
 
 Deterministic parser and repair fixtures must pass at 100 percent.
 Tool-call and tool-result correlation must pass at 100 percent.
+
+Publication fails closed on fixture evidence.
+A report may not claim `deterministic_fixtures_passed` as an operator flag.
+The evaluation flow must run the deterministic fixtures itself or verify a recorded, content-free fixture artifact that names the exact ppmlx commit.
+An artifact for a different commit disables publication.
 
 Each evaluated model profile must run one fixed case set three times.
 The published result must identify:

@@ -15,6 +15,7 @@ import pytest
 from ppmlx import continuation as continuation_module
 from ppmlx.local_runtime import runtime as runtime_module
 from ppmlx.local_runtime.backend import LocalEngineRequest, LocalGeneration
+from ppmlx.local_runtime.normalization import NormalizationProfile
 from ppmlx.local_runtime.runtime import (
     AgentRuntimeError,
     LocalAgentRuntime,
@@ -144,6 +145,7 @@ def _runtime(case: RuntimeCase) -> tuple[LocalAgentRuntime, StubGenerator]:
     runtime = LocalAgentRuntime(
         generate=generator,
         resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
+        profile_selector=lambda _model: NormalizationProfile.QWEN_JSON_V1,
     )
     return runtime, generator
 
@@ -204,6 +206,7 @@ def test_runtime_enforces_total_conversation_budget() -> None:
     runtime = LocalAgentRuntime(
         generate=generator,
         resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
+        profile_selector=lambda _model: NormalizationProfile.QWEN_JSON_V1,
         max_total_conversation_bytes=1,
     )
 
@@ -421,6 +424,7 @@ def test_three_turn_kimi_reused_source_call_id_gets_distinct_public_ids() -> Non
     runtime = LocalAgentRuntime(
         generate=generator,
         resolve_model=lambda _model, _protocol: "moonshot/Kimi-K2",
+        profile_selector=lambda _model: NormalizationProfile.KIMI_K2_V1,
     )
     system: dict[str, object] = {"role": "system", "content": "Use read."}
     user: dict[str, object] = {"role": "user", "content": "Read two files."}
@@ -559,6 +563,7 @@ def test_exact_retry_cache_does_not_outlive_continuation(
         ledger=ledger,
         generate=generator,
         resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
+        profile_selector=lambda _model: NormalizationProfile.QWEN_JSON_V1,
         conversation_ttl_seconds=1,
     )
 
@@ -607,6 +612,7 @@ def test_exact_concurrent_retry_joins_one_continuation() -> None:
         ledger=ledger,
         generate=generator,
         resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
+        profile_selector=lambda _model: NormalizationProfile.QWEN_JSON_V1,
     )
     first = runtime.execute(
         _json(case, "initial-request.json"),
@@ -654,6 +660,7 @@ def test_local_generation_uses_one_dedicated_thread() -> None:
     runtime = LocalAgentRuntime(
         generate=generator,
         resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
+        profile_selector=lambda _model: NormalizationProfile.QWEN_JSON_V1,
     )
     first = runtime.execute(
         _json(case, "initial-request.json"),
@@ -696,6 +703,7 @@ def test_default_generator_uses_isolated_engine_on_dedicated_thread(monkeypatch)
     monkeypatch.setattr("ppmlx.engine.TextEngine", StrictEngine)
     runtime = LocalAgentRuntime(
         resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
+        profile_selector=lambda _model: NormalizationProfile.QWEN_JSON_V1,
     )
 
     try:
@@ -738,6 +746,7 @@ def test_chat_rejects_parallel_calls_when_disabled() -> None:
     runtime = LocalAgentRuntime(
         generate=generator,
         resolve_model=lambda _model, _protocol: "mlx-community/Qwen3",
+        profile_selector=lambda _model: NormalizationProfile.QWEN_JSON_V1,
     )
     native = _json(case, "initial-request.json")
     native["parallel_tool_calls"] = False
@@ -808,6 +817,7 @@ def test_grok_profile_completes_a_tool_continuation_with_text() -> None:
     runtime = LocalAgentRuntime(
         generate=generator,
         resolve_model=lambda _model, _protocol: "xai/grok-4",
+        profile_selector=lambda _model: NormalizationProfile.GROK_OPENAI_CHAT_V1,
     )
 
     first = runtime.execute(
