@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -182,6 +183,7 @@ class ProviderInvocation:
     max_tokens_cap: int = 32_768
     enable_reasoning: bool = False
     parallel_tool_calls: bool = True
+    cancel_handle: ProviderCancellationHandle | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, RequestEnvelope):
@@ -198,6 +200,10 @@ class ProviderInvocation:
             raise ValueError("Provider reasoning flag is invalid")
         if type(self.parallel_tool_calls) is not bool:
             raise ValueError("Provider parallel tool flag is invalid")
+        if self.cancel_handle is not None and not isinstance(
+            self.cancel_handle, ProviderCancellationHandle
+        ):
+            raise ValueError("Provider cancellation handle is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +242,7 @@ class ProviderResult:
         default_factory=lambda: MappingProxyType({})
     )
     streaming: ProviderStreamingMode = ProviderStreamingMode.BUFFERED
+    cancelled: bool = False
 
     def __post_init__(self) -> None:
         if not _valid_provider_id(self.provider_id):
@@ -255,10 +262,40 @@ class ProviderResult:
             raise ValueError("Provider source call identifiers are invalid")
         if not isinstance(self.streaming, ProviderStreamingMode):
             raise ValueError("Provider streaming mode is invalid")
+        if type(self.cancelled) is not bool:
+            raise ValueError("Provider cancelled flag is invalid")
         object.__setattr__(
             self,
             "source_call_ids",
             MappingProxyType(dict(self.source_call_ids)),
+        )
+
+
+class ProviderCancellationHandle:
+    """Thread-safe, idempotent cancellation signal for one provider call.
+
+    The caller owns the handle and may ``cancel()`` it from another thread
+    while a provider invocation or stream is in flight. Providers must check
+    the handle at safe boundaries and surface cancellation as a typed outcome
+    (never by silently truncating output).
+    """
+
+    __slots__ = ("_event",)
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation. Idempotent and thread-safe."""
+        self._event.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def __repr__(self) -> str:
+        return (
+            f"ProviderCancellationHandle(cancelled={self.cancelled})"
         )
 
 
@@ -271,9 +308,28 @@ class ProviderError(ValueError):
         super().__init__(f"{self.provider_id} provider error {self.code}")
 
 
+class ProviderCancelledError(ProviderError):
+    """Typed cancellation outcome: the call was cancelled via its handle.
+
+    Raised by streaming providers at a safe boundary after any events already
+    yielded to the caller, so cancellation is never a silent partial output.
+    """
+
+    def __init__(self, *, provider_id: str) -> None:
+        super().__init__(provider_id=provider_id, code="cancelled")
+
+
 @runtime_checkable
 class Provider(Protocol):
-    """Common interface for local and remote Agent IR model providers."""
+    """Common interface for local and remote Agent IR model providers.
+
+    Cancellation contract: an invocation may carry a
+    :class:`ProviderCancellationHandle`. ``invoke`` reports cancellation via
+    ``ProviderResult.cancelled`` (buffered providers cannot un-generate work,
+    so no events are silently dropped). ``stream`` raises
+    :class:`ProviderCancelledError` at the first safe boundary after the
+    handle fires; events yielded before cancellation remain valid.
+    """
 
     @property
     def provider_id(self) -> str: ...
@@ -292,6 +348,8 @@ class Provider(Protocol):
 __all__ = [
     "Provider",
     "ProviderCallReference",
+    "ProviderCancellationHandle",
+    "ProviderCancelledError",
     "ProviderCapabilities",
     "ProviderCredentialType",
     "ProviderDataPath",
