@@ -8,6 +8,7 @@ for shadow-mode evaluation.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -29,6 +30,7 @@ from ppmlx.memory_store import (
 )
 from ppmlx.tool_distillers import CodingToolDistiller, DistilledMemoryCandidate, GenericJsonToolDistiller, ToolDistiller
 
+logger = logging.getLogger(__name__)
 
 STATUS_ACTIVE = "active"
 STATUS_QUARANTINED = "quarantined"
@@ -892,10 +894,22 @@ class MemoryEngine:
             event.setdefault("request", {"messages": event.get("messages", [])})
             result = self._extract_validate_store(event, suppress_extraction_errors=False)
             result["job_id"] = job["job_id"]
-            self.store.complete_extraction_job(job["job_id"], result=result)
+            completed = self.store.complete_extraction_job(job["job_id"], str(job.get("worker_id") or ""), result=result)
+            if not completed:
+                logger.warning(
+                    "extraction job %s claim was lost before completion; discarding result", job["job_id"],
+                )
+                return {
+                    "job_id": job["job_id"],
+                    "event_id": job.get("source_event_id"),
+                    "stolen": 1,
+                    "status": "stolen",
+                }
             return result
         except Exception as exc:  # pragma: no cover - exact extractor failures vary
-            self.store.fail_extraction_job(job["job_id"], str(exc), retry=True)
+            self.store.fail_extraction_job(
+                job["job_id"], str(exc), worker_id=str(job.get("worker_id") or ""), retry=True,
+            )
             failed_job = self.store.get_extraction_job(job["job_id"]) or job
             return {
                 "job_id": job["job_id"],
@@ -925,7 +939,12 @@ class MemoryEngine:
 
         def _heartbeat() -> None:
             while not stop.wait(interval):
-                self.store.renew_extraction_job_claim(job_id, worker_id)
+                if not self.store.renew_extraction_job_claim(job_id, worker_id):
+                    logger.warning(
+                        "extraction job %s claim was stolen from worker %s; stopping heartbeat",
+                        job_id, worker_id,
+                    )
+                    break
 
         thread = threading.Thread(target=_heartbeat, name=f"memory-extraction-heartbeat-{worker_id}", daemon=True)
         thread.start()

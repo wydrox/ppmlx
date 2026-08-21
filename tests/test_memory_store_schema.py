@@ -101,7 +101,7 @@ def test_enqueue_list_claim_complete_and_fail_extraction_jobs(tmp_path):
     assert claimed["claimed_at"] is not None
     assert store.claim_extraction_job("worker-b") is None
 
-    assert store.complete_extraction_job("job-test-1", result={"atoms": 2}) is True
+    assert store.complete_extraction_job("job-test-1", "worker-a", result={"atoms": 2}) is True
     completed = store.get_extraction_job("job-test-1")
     assert completed is not None
     assert completed["status"] == "completed"
@@ -388,8 +388,9 @@ def test_secret_redaction_covers_events_jobs_candidates_and_fts(tmp_path):
         job_id="secret-job",
         metadata={"secret": secret},
     )
+    assert store.claim_extraction_job("secret-worker") is not None
     assert store.complete_extraction_job(
-        "secret-job", result={"api_key": secret, "atoms": [{"token": secret}]},
+        "secret-job", "secret-worker", result={"api_key": secret, "atoms": [{"token": secret}]},
     ) is True
     store.enqueue_extraction_job({"messages": ["safe"]}, job_id="secret-failure-job")
     assert store.fail_extraction_job("secret-failure-job", f"token={secret}") is True
