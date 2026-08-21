@@ -111,11 +111,32 @@ def _strip_thinking(text: str) -> tuple[str, str | None]:
     return text, None
 
 
+def _apply_seed(seed: int | None) -> None:
+    """
+    Seed MLX's global RNG for (best-effort) deterministic sampling.
+
+    mlx-lm 0.31.x removed the ``seed`` keyword from ``generate`` /
+    ``generate_step``; seeding ``mlx.core.random`` directly is the supported
+    way to make sampling reproducible.
+    """
+    if seed is None:
+        return
+    try:
+        import mlx.core as mx
+
+        mx.random.seed(seed)
+    except Exception as exc:  # pragma: no cover - mlx missing/unseedable
+        log.warning("Could not seed mlx RNG (seed=%s): %s", seed, exc)
+
+
 def _resolve_model_path(repo_id: str) -> str:
     """Resolve a repo_id to a local path if available, otherwise return the repo_id."""
     try:
         from ppmlx.models import resolve_model_path
-        return resolve_model_path(repo_id)
+        # Interactive CLI/serve flows resolve user-selected registry ids and
+        # may fall back to HuggingFace; the Agent IR provider layer is the
+        # fail-closed LOCAL data-path boundary, not this legacy wrapper.
+        return resolve_model_path(repo_id, allow_download=True)
     except ImportError:
         return repo_id
 
@@ -328,8 +349,7 @@ class TextEngine:
         }
         if sampler is not None:
             kwargs["sampler"] = sampler
-        if seed is not None:
-            kwargs["seed"] = seed
+        _apply_seed(seed)
         if repetition_penalty is not None and repetition_penalty != 1.0:
             try:
                 from mlx_lm.sample_utils import make_logits_processors
@@ -431,8 +451,7 @@ class TextEngine:
         }
         if sampler is not None:
             kwargs["sampler"] = sampler
-        if seed is not None:
-            kwargs["seed"] = seed
+        _apply_seed(seed)
         if repetition_penalty is not None and repetition_penalty != 1.0:
             try:
                 from mlx_lm.sample_utils import make_logits_processors

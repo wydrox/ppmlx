@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import platform
 import subprocess
 from collections.abc import Mapping
@@ -25,6 +26,8 @@ from .profile_evaluation import (
 from .profile_publication import finalize_report
 from .tool_argument_repair import ToolArgumentRepairPolicy
 from .tool_profiles import ToolCapabilityLevel
+
+log = logging.getLogger(__name__)
 
 
 class ProfileRunnerError(ValueError):
@@ -207,14 +210,20 @@ def case_set_sha256(path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _generation_failure(case: ToolEvaluationCase) -> CaseEvaluation:
+def _generation_failure(case: ToolEvaluationCase, detail: str | None = None) -> CaseEvaluation:
+    # Surface the underlying exception instead of masking it behind a bare
+    # "generation_failed" code — otherwise real bugs (e.g. API incompatibilities)
+    # are invisible in reports.
+    error_code = "generation_failed"
+    if detail:
+        error_code = f"{error_code}: {detail}"[:500]
     failed = AttemptEvaluation(
         expected_calls=len(case.expected_calls),
         valid_calls=0,
         correlated_calls=0,
         repair_attempts=(),
         repaired_valid_calls=0,
-        error_code="generation_failed",
+        error_code=error_code,
     )
     return CaseEvaluation(case_id=case.case_id, strict=failed, effective=failed)
 
@@ -241,8 +250,10 @@ def _run_once(
             )
             if type(output) is not str:
                 raise ProfileRunnerError("invalid_generation")
-        except Exception:
-            results.append(_generation_failure(case))
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            log.exception("Generation failed for case %s: %s", case.case_id, detail)
+            results.append(_generation_failure(case, detail))
             continue
         results.append(
             evaluate_generated_output(
