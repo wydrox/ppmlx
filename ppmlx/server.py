@@ -1351,6 +1351,7 @@ async def _anthropic_tunnel(request: Request, path: str):
         SubscriptionPassthroughProvider,
         warn_subscription_tos_once,
     )
+    from ppmlx.providers.base import ProviderError
 
     if not _subscription_passthrough_enabled():
         return JSONResponse(
@@ -1392,7 +1393,64 @@ async def _anthropic_tunnel(request: Request, path: str):
             headers=incoming,
             body=body,
         )
+    except ProviderError as exc:
+        # Typed, safe provider errors must not be masked as generic 502s.
+        if exc.code == "invalid_tunnel_path":
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "type": "not_found_error",
+                        "code": "invalid_tunnel_path",
+                        "message": (
+                            "Only paths under /v1/ can be tunneled to "
+                            "api.anthropic.com."
+                        ),
+                    }
+                },
+            )
+        if exc.code == "invalid_tunnel_method":
+            return JSONResponse(
+                status_code=405,
+                content={
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_tunnel_method",
+                        "message": (
+                            "Only GET and POST requests can be tunneled to "
+                            "api.anthropic.com."
+                        ),
+                    }
+                },
+            )
+        if exc.code == "credentials_unavailable":
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "type": "permission_error",
+                        "code": "credentials_unavailable",
+                        "message": (
+                            "No usable Claude Code credentials. Run Claude "
+                            "Code once to log in (creates "
+                            "~/.claude/.credentials.json), or grant Keychain "
+                            "access if the file is unreadable."
+                        ),
+                    }
+                },
+            )
+        log.warning("passthrough tunnel failed: %s", exc.code)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": {
+                    "type": "api_error",
+                    "code": exc.code or "tunnel_failed",
+                }
+            },
+        )
     except Exception:
+        log.warning("passthrough tunnel failed unexpectedly", exc_info=True)
         return JSONResponse(
             status_code=502,
             content={"error": {"type": "api_error", "code": "tunnel_failed"}},
