@@ -114,6 +114,12 @@ def _patch_stub_capability_lookup(monkeypatch):
     monkeypatch.setattr(router_module, "_stub_capabilities", _capabilities)
 
 
+@pytest.fixture()
+def capability_lookup():
+    """Explicit capability lookup for the injectable route() parameter."""
+    return _capabilities
+
+
 def _route_input(**overrides) -> RouteInput:
     values = {
         "public_model": "gpt-5",

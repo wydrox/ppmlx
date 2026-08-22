@@ -10,9 +10,10 @@ data-path boundary.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -198,7 +199,13 @@ def policy_from_dict(mapping: Mapping[str, object]) -> RoutePolicy:
         raise ValueError("Route policy version is invalid")
     default_model = routes.get("default_model")
     if default_model is not None and (
-        type(default_model) is not str or not default_model
+        type(default_model) is not str
+        or not default_model
+        or "/" not in default_model
+        or any(
+            not part
+            for part in default_model.partition("/")
+        )
     ):
         raise ValueError("Route policy default model is invalid")
     raw_aliases = routes.get("aliases", {})
@@ -262,6 +269,8 @@ def policy_from_dict(mapping: Mapping[str, object]) -> RoutePolicy:
             candidates=tuple(candidates),
             fallback_permitted_errors=frozenset(fallback_errors),
         )
+        if entry.key in entries:
+            raise ValueError("Route policy contains duplicate route entries")
         entries[entry.key] = entry
     return RoutePolicy(
         version=version,
@@ -275,7 +284,7 @@ def policy_from_dict(mapping: Mapping[str, object]) -> RoutePolicy:
     )
 
 
-def load_policy(path: object) -> RoutePolicy:
+def load_policy(path: str | os.PathLike[str]) -> RoutePolicy:
     """Load and validate a route policy from a TOML file."""
     try:
         with open(path, "rb") as handle:
@@ -356,7 +365,7 @@ class HealthSnapshot:
     snapshot_id: str
     captured_at: datetime
     expires_at: datetime
-    states: Mapping[tuple[str, str], SnapshotCandidateState] = field(
+    states: Mapping[tuple[str, str, str], SnapshotCandidateState] = field(
         default_factory=lambda: MappingProxyType({})
     )
 
@@ -375,12 +384,22 @@ class HealthSnapshot:
             raise ValueError("Health snapshot expiry precedes capture time")
         if not isinstance(self.states, Mapping) or any(
             type(key) is not tuple
-            or len(key) != 2
-            or any(type(part) is not str or not part for part in key)
+            or len(key) != 3
+            or any(type(part) is not str for part in key)
             or not isinstance(value, SnapshotCandidateState)
             for key, value in self.states.items()
         ):
             raise ValueError("Health snapshot states are invalid")
+        for key, value in self.states.items():
+            # M1: a snapshot key must name the same candidate as the state
+            # it carries, otherwise one entry silently shadows another.
+            expected = (
+                value.provider_id,
+                value.auth_profile or "",
+                value.model,
+            )
+            if key != expected:
+                raise ValueError("Health snapshot state key is inconsistent")
         object.__setattr__(
             self, "states", MappingProxyType(dict(self.states))
         )
@@ -391,7 +410,9 @@ class HealthSnapshot:
 
     def state_for(self, candidate: RouteCandidate) -> HealthState:
         """State recorded for one candidate; unknown when absent."""
-        found = self.states.get((candidate.provider_id, candidate.model))
+        found = self.states.get(
+            (candidate.provider_id, candidate.auth_profile or "", candidate.model)
+        )
         return HealthState.UNKNOWN if found is None else found.state
 
 
@@ -424,7 +445,11 @@ class StubHealthSource:
             expires_at=moment + timedelta(milliseconds=ttl_ms),
             states=MappingProxyType(
                 {
-                    (candidate.provider_id, candidate.model): (
+                    (
+                        candidate.provider_id,
+                        candidate.auth_profile or "",
+                        candidate.model,
+                    ): (
                         SnapshotCandidateState(
                             provider_id=candidate.provider_id,
                             model=candidate.model,
@@ -451,16 +476,6 @@ def resolve_alias(
     if name in policy.entries:
         return None
     return policy.aliases.get(name)
-
-
-_CAPABILITY_NAMES = (
-    "images",
-    "context",
-    "parallel_tool_calls",
-    "structured_output",
-    "text",
-    "tools",
-)
 
 
 def check_capabilities(
@@ -589,8 +604,15 @@ def route(
     policy: RoutePolicy,
     snapshot: HealthSnapshot | None = None,
     now: datetime | None = None,
+    capability_lookup: Callable[[RouteCandidate], ProviderCapabilities] | None = None,
 ) -> RouteDecision:
-    """Select one candidate deterministically from the policy and snapshot."""
+    """Select one candidate deterministically from the policy and snapshot.
+
+    ``capability_lookup`` maps one candidate to its advertised capabilities.
+    It defaults to :func:`_stub_capabilities`, a placeholder table kept for
+    backwards compatibility until adapters register real profiles; callers
+    should inject a real lookup in production.
+    """
     moment = _utc(now) if now is not None else _utc(datetime.now(UTC))
     entry = policy.entries.get(f"{request.harness}:{request.public_model}")
     if entry is None:
@@ -606,19 +628,19 @@ def route(
         or moment >= snapshot.expires_at
     ):
         return _decision(request, policy, None, (), "health_expired", ())
+    if capability_lookup is None:
+        capability_lookup = _stub_capabilities
     skipped: list[tuple[RouteCandidate, str, str]] = []
-    unhealthy_seen = False
     capability_failures = 0
     missing_all: set[str] = set()
     for candidate in entry.candidates:
         state = snapshot.state_for(candidate)
         if state is not HealthState.HEALTHY:
-            unhealthy_seen = True
             skipped.append(
                 (candidate, state.value, f"{state.value}_candidate_state")
             )
             continue
-        capabilities = _stub_capabilities(candidate)
+        capabilities = capability_lookup(candidate)
         missing = check_capabilities(request.required, capabilities)
         if missing:
             capability_failures += 1
@@ -651,19 +673,12 @@ def _default_entry(policy: RoutePolicy) -> RouteEntry | None:
     )
 
 
-_STUB_CAPABILITY_CACHE: dict[tuple[str, str], ProviderCapabilities] = {}
-
-
 def _stub_capabilities(candidate: RouteCandidate) -> ProviderCapabilities:
     """Placeholder capability lookup until adapters register real profiles.
 
     Local candidates advertise full tool support; remote candidates stay
     text-only so capability tests can drive rejection deterministically.
     """
-    key = (candidate.provider_id, candidate.model)
-    cached = _STUB_CAPABILITY_CACHE.get(key)
-    if cached is not None:
-        return cached
     from ppmlx.providers.base import (
         ProviderCredentialType,
         ProviderStreamingMode,
@@ -693,7 +708,6 @@ def _stub_capabilities(candidate: RouteCandidate) -> ProviderCapabilities:
             else ProviderToolSupportStatus.DISABLED
         ),
     )
-    _STUB_CAPABILITY_CACHE[key] = capabilities
     return capabilities
 
 
