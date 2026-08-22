@@ -30,6 +30,7 @@ class NormalizationProfile(str, Enum):
     QWEN_JSON_V1 = "qwen-json-v1"
     GEMMA4_V1 = "gemma4-v1"
     LFM25_V1 = "lfm25-v1"
+    QWEN35_TOOLCALL_V1 = "qwen35-toolcall-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +119,13 @@ _GEMMA_CALL_PREFIX = "call:"
 
 _LFM_SECTION_START = "<|tool_call_start|>"
 _LFM_SECTION_END = "<|tool_call_end|>"
+
+_QWEN35_SECTION_START = "<tool_call>"
+_QWEN35_SECTION_END = "</tool_call>"
+_QWEN35_FUNCTION_START = "<function="
+_QWEN35_FUNCTION_END = "</function>"
+_QWEN35_PARAMETER_START = "<parameter="
+_QWEN35_PARAMETER_END = "</parameter>"
 
 _LITERAL_MAX_DEPTH = 64
 
@@ -1007,6 +1015,103 @@ def _parse_lfm25(
     )
 
 
+_QWEN35_NAME_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_$.]*$")
+
+
+def _qwen35_parameters(body: str, *, profile: str) -> dict[str, object]:
+    """Parse ``<parameter=key>value</parameter>`` blocks from one function body."""
+
+    arguments: dict[str, object] = {}
+    rest = body
+    while rest.strip():
+        rest = rest.lstrip()
+        if not rest.startswith(_QWEN35_PARAMETER_START):
+            _raise(profile, "invalid_tool_call_shape")
+        after_start = rest[len(_QWEN35_PARAMETER_START) :]
+        tag_end = after_start.find(">")
+        if tag_end < 0:
+            _raise(profile, "invalid_tool_call_shape")
+        key = after_start[:tag_end]
+        if not key or _QWEN35_NAME_RE.fullmatch(key) is None:
+            _raise(profile, "invalid_tool_call_shape")
+        after_key = after_start[tag_end + 1 :]
+        end_position = after_key.find(_QWEN35_PARAMETER_END)
+        if end_position < 0:
+            _raise(profile, "unterminated_tool_call")
+        value = after_key[:end_position]
+        # The documented rendering starts each value on its own line and
+        # terminates it with one newline; strip exactly one of each.
+        if value.startswith("\n"):
+            value = value[1:]
+        if value.endswith("\n"):
+            value = value[:-1]
+        if key in arguments:
+            raise _DuplicateJsonKey
+        arguments[key] = value
+        rest = after_key[end_position + len(_QWEN35_PARAMETER_END) :]
+    return arguments
+
+
+def _parse_qwen35(
+    text: str,
+    limits: ToolOutputLimits,
+    repair_policy: ToolArgumentRepairPolicy | None,
+    repair_budget: ToolArgumentRepairBudget,
+) -> NormalizedToolOutput:
+    profile = NormalizationProfile.QWEN35_TOOLCALL_V1.value
+    has_section_marker = _QWEN35_SECTION_START in text or _QWEN35_SECTION_END in text
+    remaining_text, section = _single_section(
+        text,
+        profile=profile,
+        start=_QWEN35_SECTION_START,
+        end=_QWEN35_SECTION_END,
+    )
+    if not has_section_marker:
+        return NormalizedToolOutput(NormalizationProfile.QWEN35_TOOLCALL_V1, (), remaining_text)
+
+    calls: list[NormalizedToolCall] = []
+    rest = section
+    while rest.strip():
+        rest = rest.lstrip()
+        if not rest.startswith(_QWEN35_FUNCTION_START):
+            _raise(profile, "malformed_tool_section")
+        after_start = rest[len(_QWEN35_FUNCTION_START) :]
+        tag_end = after_start.find(">")
+        if tag_end < 0:
+            _raise(profile, "invalid_tool_call_shape")
+        name = after_start[:tag_end].strip()
+        after_name = after_start[tag_end + 1 :]
+        end_position = after_name.find(_QWEN35_FUNCTION_END)
+        if end_position < 0:
+            _raise(profile, "unterminated_tool_call")
+        body = after_name[:end_position]
+        if _QWEN35_FUNCTION_START in body:
+            _raise(profile, "nested_tool_call")
+        try:
+            arguments = _qwen35_parameters(body, profile=profile)
+        except _DuplicateJsonKey:
+            _raise(profile, "duplicate_json_key")
+        calls.append(
+            _literal_arguments(
+                arguments,
+                index=len(calls),
+                name=name,
+                profile=profile,
+                limits=limits,
+                repair_policy=repair_policy,
+                repair_budget=repair_budget,
+            )
+        )
+        if len(calls) > limits.max_calls:
+            _raise(profile, "call_limit_exceeded")
+        rest = after_name[end_position + len(_QWEN35_FUNCTION_END) :]
+    return NormalizedToolOutput(
+        NormalizationProfile.QWEN35_TOOLCALL_V1,
+        _check_calls(calls, profile=profile, limits=limits),
+        remaining_text,
+    )
+
+
 def _parse_grok(
     text: str,
     limits: ToolOutputLimits,
@@ -1082,6 +1187,7 @@ _PARSERS: dict[NormalizationProfile, _Parser] = {
     NormalizationProfile.QWEN_JSON_V1: _parse_qwen,
     NormalizationProfile.GEMMA4_V1: _parse_gemma4,
     NormalizationProfile.LFM25_V1: _parse_lfm25,
+    NormalizationProfile.QWEN35_TOOLCALL_V1: _parse_qwen35,
 }
 
 

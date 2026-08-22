@@ -10,6 +10,7 @@ This matrix contains exact reviewed model profiles. A parser profile without rev
 | — | — | `qwen-json-v1` | `template_structured` | `none` | — | — | — | **not_evaluated** |
 | — | — | `gemma4-v1` | `template_structured` | `none` | — | — | — | **not_evaluated** |
 | — | — | `lfm25-v1` | `template_structured` | `none` | — | — | — | **not_evaluated** |
+| — | — | `qwen35-toolcall-v1` | `template_structured` | `none` | — | — | — | **not_evaluated** |
 
 ## Publication gates
 
