@@ -508,7 +508,7 @@ class AnthropicProvider:
                     dict(arguments_input), separators=(",", ":"), sort_keys=True
                 )
                 local_call_id = self._call_id_factory()
-                source_call_ids[local_call_id] = source_call_id
+                source_call_ids[local_call_id] = str(source_call_id)
                 staged_calls.append((local_call_id, name, arguments_raw))
             else:
                 # thinking/redoable_thinking blocks were never enabled on this

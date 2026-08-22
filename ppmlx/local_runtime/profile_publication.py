@@ -8,7 +8,6 @@ from enum import Enum
 from pathlib import Path
 from typing import cast
 
-from .deterministic_fixtures import load_fixture_evidence
 from .normalization import NormalizationProfile
 from .tool_argument_repair import (
     ToolArgumentRepairKind,

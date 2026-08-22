@@ -67,6 +67,17 @@ def _is_loopback(request: Request) -> bool:
         return host in {"localhost", "testclient"}
 
 
+def _authenticate(request: Request, service: Any, headers: dict[str, str | None]):
+    """Shared credential/session gate that re-validates client locality.
+
+    Every memory-read endpoint must come through here so /search and /stats
+    enforce loopback-only access exactly like /handshake does.
+    """
+    if not _is_loopback(request):
+        raise MemoryReadError("permission_denied")
+    return service.authenticate(**headers)
+
+
 def _headers(request: Request) -> dict[str, str | None]:
     auth = request.headers.get("authorization") or ""
     credential = auth[len("Bearer "):] if auth.startswith("Bearer ") else None
@@ -139,7 +150,7 @@ def _search_item(row: dict[str, Any], scope: dict[str, str]) -> dict[str, Any]:
 async def handshake(request: Request):
     try:
         h = _headers(request)
-        body = await _body(request)
+        await _body(request)  # validate the envelope even though it carries no params
         service = get_service()
         envelope = service.handshake(
             credential=h["credential"],
@@ -159,7 +170,7 @@ async def memory_search(request: Request):
         body = await _body(request)
         request_id, raw_scope, params, limit, cursor_token = _validate_envelope(body)
         service = get_service()
-        grant, session = service.authenticate(**h)
+        grant, session = _authenticate(request, service, h)
         service.check_tool(grant, "memory_search")
         scope = service.resolve_scope(grant, raw_scope)
         query = params.get("query")
@@ -240,7 +251,7 @@ async def memory_stats(request: Request):
             raise MemoryReadError("validation_error")
 
         service = get_service()
-        grant, session = service.authenticate(**h)
+        grant, session = _authenticate(request, service, h)
         service.check_tool(grant, "memory_stats")
         scope = service.resolve_scope(grant, raw_scope)
         service.check_request_id(session, request_id, "stats")

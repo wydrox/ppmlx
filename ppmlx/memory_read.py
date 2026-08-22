@@ -427,7 +427,10 @@ class MemoryReadService:
                 )
                 conn.commit()
                 return value.encode()
-            return row[0].encode()
+            raw_key = row[0]
+            if isinstance(raw_key, str):
+                return raw_key.encode()
+            return bytes(raw_key)
 
     def make_cursor(self, *, grant_id: str, tool: str, scope: dict[str, str], params: dict[str, Any], offset: int, expires_at: float) -> str:
         payload = json.dumps(

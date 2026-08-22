@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from typing import Any
 from datetime import UTC, datetime
 
 from ppmlx.auth import AuthError, resolve_secret
@@ -26,10 +27,8 @@ from ppmlx.providers.base import (
     ProviderInvocation,
 )
 from ppmlx.router import (
-    FORBIDDEN_FALLBACK_CATEGORIES,
     HealthSnapshot,
     HealthState,
-    RequiredCapabilities,
     RouteCandidate,
     RouteDecision,
     RouteEntry,
@@ -88,7 +87,7 @@ class RoutedResult:
     """Outcome of one successful routed provider invocation."""
 
     decision: RouteDecision
-    events: tuple
+    events: tuple[Any, ...]
     provider_id: str
     model_id: str
 
@@ -124,7 +123,7 @@ def _snapshot_with_failure(
     )
 
 
-def _is_output_event(event) -> bool:
+def _is_output_event(event: object) -> bool:
     """True once any content or terminal output has been produced."""
     kind = getattr(event, "type", "")
     return kind in {
@@ -149,7 +148,7 @@ class RoutingService:
         policy: RoutePolicy,
         providers: Mapping[str, Provider],
         *,
-        health_source=None,
+        health_source: Any = None,
     ) -> None:
         self._policy = policy
         self._providers = dict(providers)
@@ -171,7 +170,7 @@ class RoutingService:
         target = self.remote_alias_target(name)
         return target is not None and target[0] not in LOCAL_PROVIDER_IDS
 
-    def _capability_lookup(self, candidate: RouteCandidate):
+    def _capability_lookup(self, candidate: RouteCandidate) -> Any:
         """Real capability lookup injected into the router (audit fix M2)."""
         provider = self._providers.get(candidate.provider_id)
         if provider is None:
@@ -217,7 +216,7 @@ class RoutingService:
     def execute(
         self,
         request: RouteInput,
-        envelope,
+        envelope: Any,
         *,
         max_tokens_cap: int = 32_768,
         cancel_handle: ProviderCancellationHandle | None = None,
@@ -288,12 +287,12 @@ class RoutingService:
     def stream(
         self,
         request: RouteInput,
-        envelope,
+        envelope: Any,
         *,
         max_tokens_cap: int = 32_768,
         cancel_handle: ProviderCancellationHandle | None = None,
         now: datetime | None = None,
-    ) -> Iterator:
+    ) -> Iterator[Any]:
         """Streaming execution with first-event pinning.
 
         Fallback to later candidates happens only on provider errors raised
@@ -389,7 +388,7 @@ def prime_provider_credentials(
             _, source = resolve_secret(provider_id, prefer_env=prefer_env)
         except AuthError:
             continue
-        if source == "keyring":
+        if source in ("keychain", "keyring"):
             try:
                 secret = resolve_secret(provider_id, prefer_env=False)[0]
             except AuthError:
