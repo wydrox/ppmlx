@@ -302,9 +302,15 @@ class ProviderCancellationHandle:
 class ProviderError(ValueError):
     """A typed safe provider error that contains no request or secret data."""
 
-    def __init__(self, *, provider_id: str, code: str) -> None:
+    def __init__(
+        self, *, provider_id: str, code: str, detail: str | None = None
+    ) -> None:
         self.provider_id = provider_id if _valid_provider_id(provider_id) else "provider"
         self.code = code if _valid_code(code) else "provider_failed"
+        # Optional sanitized diagnostic context (exception class name, status
+        # code, byte offset). Never request/response body content or secrets;
+        # the human-readable message stays clean.
+        self.detail = detail
         super().__init__(f"{self.provider_id} provider error {self.code}")
 
 

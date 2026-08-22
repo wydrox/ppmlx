@@ -330,20 +330,61 @@ class OpenAIProvider:
         payload["stream"] = False
         try:
             with self._build_client() as client:
-                return client.post(
-                    "/chat/completions", json=payload, headers=self._headers()
+                request = client.build_request(
+                    "POST",
+                    "/chat/completions",
+                    json=payload,
+                    headers=self._headers(),
                 )
-        except httpx.TimeoutException:
-            raise ProviderError(provider_id=self.provider_id, code="timeout") from None
-        except httpx.TransportError:
-            raise ProviderError(provider_id=self.provider_id, code="network_error") from None
+                response = client.send(request, stream=True)
+                try:
+                    self._raise_for_status(response)
+                    # H1: enforce max_response_bytes incrementally during the
+                    # read instead of after the full body is already buffered
+                    # (mirrors the streaming path's byte counting).
+                    chunks: list[bytes] = []
+                    total_bytes = 0
+                    for chunk in response.iter_bytes():
+                        total_bytes += len(chunk)
+                        if total_bytes > self._max_response_bytes:
+                            raise ProviderError(
+                                provider_id=self.provider_id,
+                                code="response_too_large",
+                                detail=(
+                                    f"buffered body exceeded "
+                                    f"{self._max_response_bytes} bytes at "
+                                    f"offset {total_bytes}"
+                                ),
+                            )
+                        chunks.append(chunk)
+                    return httpx.Response(
+                        status_code=response.status_code,
+                        headers=response.headers,
+                        content=b"".join(chunks),
+                        request=request,
+                    )
+                finally:
+                    response.close()
+        except httpx.TimeoutException as exc:
+            raise ProviderError(
+                provider_id=self.provider_id,
+                code="timeout",
+                detail=f"exception={type(exc).__name__}",
+            ) from exc
+        except httpx.TransportError as exc:
+            raise ProviderError(
+                provider_id=self.provider_id,
+                code="network_error",
+                detail=f"exception={type(exc).__name__}",
+            ) from exc
         except ProviderError:
             raise
-        except Exception:
+        except Exception as exc:
             raise ProviderError(
                 provider_id=self.provider_id,
                 code="provider_invoke_failed",
-            ) from None
+                detail=f"exception={type(exc).__name__}",
+            ) from exc
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         if response.status_code < 400:
@@ -387,15 +428,22 @@ class OpenAIProvider:
             raise ProviderError(provider_id=self.provider_id, code="response_too_large")
         try:
             document = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            raise ProviderError(provider_id=self.provider_id, code="invalid_response") from None
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProviderError(
+                provider_id=self.provider_id,
+                code="invalid_response",
+                detail=f"exception={type(exc).__name__}; bytes={len(body)}",
+            ) from exc
+        # L9: parity with the streaming path -- this adapter negotiates
+        # exactly one output choice.
+        choices = document.get("choices") if isinstance(document, Mapping) else None
         if (
             not isinstance(document, Mapping)
-            or not isinstance(document.get("choices"), list)
-            or not document["choices"]
+            or not isinstance(choices, list)
+            or len(choices) != 1
         ):
             raise ProviderError(provider_id=self.provider_id, code="invalid_response")
-        choice = document["choices"][0]
+        choice = choices[0]
         if not isinstance(choice, Mapping) or not isinstance(choice.get("message"), Mapping):
             raise ProviderError(provider_id=self.provider_id, code="invalid_response")
         message = choice["message"]
@@ -635,7 +683,7 @@ class OpenAIProvider:
         payload["stream"] = True
         request_id = invocation.request.request_id
         output_id = invocation.output_id or self._output_id_factory()
-        state_sequence = invocation.sequence_start
+        state_sequence: int = invocation.sequence_start
 
         def _next_sequence() -> int:
             nonlocal state_sequence
