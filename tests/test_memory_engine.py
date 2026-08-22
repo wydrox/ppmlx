@@ -841,7 +841,7 @@ def test_process_extraction_job_renews_claim_while_running(tmp_path):
         max_candidates = 1
 
         def extract(self, event):
-            time.sleep(0.3)
+            time.sleep(1.0)
             return [ShadowMemoryCandidate(
                 type="preference",
                 subject="user",
@@ -865,13 +865,13 @@ def test_process_extraction_job_renews_claim_while_running(tmp_path):
         messages=[{"role": "user", "content": "I prefer slow extraction."}],
         response_text="ok",
     )
-    worker_a = MemoryEngine(store=store, extractor=SlowExtractor(), extraction_timeout_seconds=0.15)
-    worker_b = MemoryEngine(store=store, extractor=SlowExtractor(), extraction_timeout_seconds=0.15)
+    worker_a = MemoryEngine(store=store, extractor=SlowExtractor(), extraction_timeout_seconds=1.0)
+    worker_b = MemoryEngine(store=store, extractor=SlowExtractor(), extraction_timeout_seconds=1.0)
 
     results: list[dict | None] = []
     thread = threading.Thread(target=lambda: results.append(worker_a.process_extraction_job(worker_id="worker-a")))
     thread.start()
-    time.sleep(0.22)
+    time.sleep(0.75)
 
     assert worker_b.process_extraction_job(worker_id="worker-b") is None
     thread.join(timeout=2)

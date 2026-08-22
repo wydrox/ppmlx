@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 import asyncio
 import json
+import logging
 import sys
 import threading
 from pathlib import Path
@@ -31,6 +32,7 @@ from ppmlx.context_reducer import build_handoff_context
 # ---------------------------------------------------------------------------
 
 server = Server("ppmlx-memory")
+logger = logging.getLogger(__name__)
 store: MemoryStore | None = None
 _worker_thread: threading.Thread | None = None
 _worker_stop: threading.Event | None = None
@@ -91,12 +93,17 @@ def start_background_worker(poll_seconds: float = 2.0) -> None:
 
                 result = engine._extract_validate_store(event, suppress_extraction_errors=True)
                 result["job_id"] = job["job_id"]
-                s.complete_extraction_job(job["job_id"], result=result)
+                if not s.complete_extraction_job(job["job_id"], str(job.get("worker_id") or ""), result=result):
+                    logger.warning(
+                        "extraction job %s claim was lost before completion; discarding result", job["job_id"],
+                    )
 
             except Exception as exc:
                 try:
                     if job:
-                        s.fail_extraction_job(job["job_id"], str(exc), retry=True)
+                        s.fail_extraction_job(
+                            job["job_id"], str(exc), worker_id=str(job.get("worker_id") or ""), retry=True,
+                        )
                 except Exception:
                     pass
 
