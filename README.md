@@ -126,6 +126,7 @@ print(response.choices[0].message.content)
 | `ppmlx quality-bench` | Split a real long session into 80% prefix / 20% holdout probes and compare local answers to recorded answers | `--split`, `--max-probes`, `--model` |
 | `ppmlx trace export` / `ppmlx compact-replay` | Export and replay local traces through compact mode | `--project`, `--session`, `--expect` |
 | `ppmlx config` | View/set configuration | `--hf-token` |
+| `ppmlx auth add/list/status/remove` | Manage provider API keys in the macOS Keychain | `--dry-run`, `--env` |
 
 ## Connect Your Tools
 
@@ -209,9 +210,35 @@ Behavior:
   unavailable/server errors may fall back to the next candidate, and only
   before the first output event. Once output starts, the route is pinned —
   no provider switch mid-response.
-- Credentials resolve from the OS keyring via `ppmlx auth login <provider>`
+- Credentials resolve from the OS keyring via `ppmlx auth add <provider>`
   (env vars still take precedence when set).
 
+### Provider authentication
+
+Remote providers need an API key. `ppmlx auth add` stores it in the macOS
+Keychain; `config.toml` only records a `secret_ref`, never the key itself.
+
+```bash
+ppmlx auth add openai          # prompts for the key (hidden input)
+ppmlx auth list                # providers, key source, availability
+ppmlx auth status openai       # stored? secret_ref? env fallback?
+ppmlx auth remove openai       # delete from Keychain + config
+```
+
+Every command accepts `--dry-run` to show what would change without writing
+anything. Keys are never printed, logged, or written to disk. An
+`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` environment variable takes precedence
+when set.
+
+### Memory read endpoints
+
+The experimental local memory graph can be read over HTTP with three
+endpoints: `POST /v1/memory/read/handshake`, `POST /v1/memory/read/search`,
+and `POST /v1/memory/read/stats`. They are loopback-only, like the other
+strict local paths. A client first calls `/handshake` to get a short-lived
+read grant, then uses that grant on `/search` and `/stats`. Every response
+carries disclosure labels, and a feedback-loop guard keeps read results from
+re-entering stored memory.
 
 The first release supports named output profiles for Grok, Kimi K2, DeepSeek V3, and Qwen models. ppmlx rejects an unknown profile, an unsupported tool schema, an invalid result link, or a request that can lose tool data. In strict mode, tool requests cannot use the legacy path. Responses WebSocket tool requests are rejected until that transport uses the same Agent IR runtime.
 
@@ -346,6 +373,27 @@ When the server is running, interactive API docs are available at:
 ## Architecture
 
 The [proxy architecture decisions](docs/architecture/README.md) define the target contracts for routing, tool use, provider authentication, memory, privacy, and harness compatibility.
+
+## Project Structure
+
+```
+ppmlx/
+  cli.py               # Typer CLI (entry point)
+  server.py            # FastAPI app (OpenAI-compatible routes)
+  engine.py            # MLX LLM inference
+  models.py            # Model registry + HuggingFace download
+  config.py            # Config loading (~/.ppmlx/config.toml)
+  router.py            # Route policy parsing + deterministic routing (ADR 0005)
+  routing_service.py   # Remote routing orchestration (candidates, fallback, pinning)
+  auth.py              # Keychain-backed provider credential storage
+  memory_read.py       # Memory read service (grants, sessions, disclosure labels)
+  providers/
+    base.py            # Provider protocol (SSE streaming, cancellation, capabilities)
+    mlx.py             # Local MLX adapter
+    openai.py          # OpenAI remote adapter
+    anthropic.py       # Anthropic remote adapter
+tests/                 # Full suite, runs without GPU
+```
 
 ## Requirements
 

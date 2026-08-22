@@ -1,6 +1,6 @@
 [project]
 name = "ppmlx"
-version = "0.9.1"
+version = "0.10.0"
 description = "CLI for running LLMs on Apple Silicon via MLX"
 readme = "README.md"
 license = { file = "LICENSE" }

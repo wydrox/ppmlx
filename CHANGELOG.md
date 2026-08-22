@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-22
+
+### Added
+- Remote OpenAI and Anthropic providers with SSE streaming, cancellation, and native tool calls.
+- A deterministic router per ADR 0005: route policy aliases, health snapshots, and a forbidden fallback-error matrix.
+- A Keychain-backed `ppmlx auth` CLI (`add`, `list`, `status`, `remove`, all with `--dry-run`); keys never touch disk or logs.
+- The memory-read/v1 minimal slice (ADR 0006): loopback-only read grants, sessions, disclosure labels, and a feedback-loop guard.
+- Normalization profiles `gemma4-v1`, `lfm25-v1`, and `qwen35-toolcall-v1` with a capability-matrix evidence pipeline.
+- End-to-end remote routing through the `[server] route_policy` setting.
+
+### Fixed
+- Memory extraction claim race: stale-requeue can no longer steal live claims; completion is worker-guarded.
+- mlx-lm 0.31.x seed compatibility.
+- Fail-closed local model resolution: no implicit HuggingFace download under a LOCAL claim.
+- `ProviderCancellationHandle` is honored across the whole provider protocol.
+
+### Security
+- Enforce the request size cap during buffered HTTP reads, not only at completion.
+- Redacted error detail channel keeps provider error internals out of client responses.
+- Bound and lock secret retention for stored credentials.
+- Advisory file lock around config writes prevents concurrent config corruption.
+
 ## [0.9.1] - 2026-08-20
 
 ### Changed
