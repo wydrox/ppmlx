@@ -3604,5 +3604,230 @@ def bench(
             server_proc.wait(timeout=5)
 
 
+# ---------------------------------------------------------------------------
+# Provider authentication (ADR 0004) — secrets live in the macOS Keychain via
+# the `keyring` package; config.toml [auth] stores only secret_ref + env_key.
+# ---------------------------------------------------------------------------
+
+auth_app = typer.Typer(help="Manage provider API keys (stored in the macOS Keychain)")
+app.add_typer(auth_app, name="auth")
+
+
+def _print_auth_error(exc: Exception) -> None:
+    """Print an auth failure without echoing any secret material.
+
+    Only the pre-redacted ``rendered`` message is shown, passed through
+    ``auth.redact`` as a final gate against any secret this process has
+    touched. Exception ``detail`` may carry raw backend text and must never
+    reach the terminal.
+    """
+    from ppmlx import auth as auth_mod
+
+    rendered = getattr(exc, "rendered", None)
+    text = str(rendered) if rendered is not None else str(exc)
+    console.print(f"[red]{auth_mod.redact(text)}[/red]")
+
+
+def _auth_add_stdin_is_interactive() -> bool:
+    """True when key input can be read without echoing.
+
+    Tests (CliRunner pipes stdin, no tty) set PPMLX_AUTH_ALLOW_PIPE_STDIN=1
+    so getpass reads the piped input instead of refusing.
+    """
+    if os.environ.get("PPMLX_AUTH_ALLOW_PIPE_STDIN") == "1":
+        return True
+    return sys.stdin.isatty()
+
+
+@auth_app.command("add")
+def auth_add(
+    provider: str = typer.Argument(..., help="Provider identifier (e.g. openai, anthropic)."),
+    env: bool = typer.Option(
+        False,
+        "--env",
+        help="Also record an environment variable name used to resolve the key at runtime.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would change without writing."),
+):
+    """Store a provider API key in the macOS Keychain.
+
+    The key is read with getpass (no echo) and never written to disk or logs;
+    config.toml only records secret_ref (and env_key with --env).
+    """
+    from ppmlx import auth as auth_mod
+
+    try:
+        provider = auth_mod.validate_provider_name(provider)
+    except auth_mod.AuthError as exc:
+        _print_auth_error(exc)
+        raise typer.Exit(1)
+
+    entries, err = auth_mod.load_auth_entries()
+    if err is not None:
+        console.print(
+            "[red]config.toml is corrupt or unreadable; fix or remove it before "
+            "changing auth entries.[/red]"
+        )
+        raise typer.Exit(1)
+
+    existing = entries.get(provider)
+    if existing is not None and not dry_run:
+        overwrite = typer.confirm(f"An entry for {provider!r} already exists. Overwrite?")
+        if not overwrite:
+            raise typer.Abort()
+
+    env_key_name = f"{provider.upper()}_API_KEY" if env else None
+
+    if dry_run:
+        # Short-circuit before any secret handling: a dry run must not
+        # prompt for (or hold) the key at all.
+        console.print("[bold]Dry run:[/bold] no changes were written.")
+        console.print(f"  Would store key for [bold]{provider}[/bold] in the macOS Keychain.")
+        action = "Would update" if existing is not None else "Would add"
+        suffix = f" (env_key={env_key_name})" if env_key_name else ""
+        console.print(f"  {action} \\[auth.providers.{provider}] in config.toml{suffix}")
+        return
+
+    if not _auth_add_stdin_is_interactive():
+        console.print("[red]auth add requires an interactive terminal (key input is hidden).[/red]")
+        raise typer.Exit(1)
+
+    import getpass
+
+    secret = getpass.getpass(f"API key for {provider}: ")
+    confirm = getpass.getpass("Repeat API key for confirmation: ")
+    import hmac as _hmac
+
+    if not _hmac.compare_digest(secret.encode(), confirm.encode()):
+        console.print("[red]The two entries do not match; nothing was stored.[/red]")
+        raise typer.Exit(1)
+    if not secret:
+        console.print("[red]Empty key; nothing was stored.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        auth_mod.set_secret(provider, secret, env_key=env_key_name)
+    except auth_mod.AuthError as exc:
+        _print_auth_error(exc)
+        raise typer.Exit(1)
+
+    console.print(f"[green]API key for {provider} stored in the macOS Keychain.[/green]")
+    console.print(f"[dim]secret_ref: {auth_mod.secret_ref_for(provider)}[/dim]")
+
+
+@auth_app.command("list")
+def auth_list(
+    dry_run: bool = typer.Option(False, "--dry-run", help="No-op for list; nothing is ever written."),
+):
+    """List configured providers and whether a key is available."""
+    from ppmlx import auth as auth_mod
+    from rich.table import Table
+
+    entries, err = auth_mod.load_auth_entries()
+    if err is not None:
+        console.print("[yellow]Warning: config.toml is corrupt or unreadable.[/yellow]")
+    if err is None and not entries:
+        console.print("No auth profiles configured. Add one with `ppmlx auth add <provider>`.")
+        return
+    table = Table(title="Provider authentication", show_header=True)
+    table.add_column("Provider")
+    table.add_column("Source")
+    table.add_column("Available")
+    table.add_column("Env var")
+    table.add_column("Secret ref")
+    for status in auth_mod.list_providers():
+        source = status["source"] or "-"
+        available = "[green]yes[/green]" if status["stored"] else "[red]no[/red]"
+        env_col = status["env_key"] or "-"
+        if status["env_set"] and not status["stored"]:
+            available = "[green]yes[/green]"
+            source = "environment"
+        table.add_row(status["provider"], source, available, env_col, status["secret_ref"])
+    console.print(table)
+
+
+@auth_app.command("status")
+def auth_status(
+    provider: str = typer.Argument(..., help="Provider identifier."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="No-op for status; nothing is ever written."),
+):
+    """Show whether a key is stored for a provider (never prints the key)."""
+    from ppmlx import auth as auth_mod
+
+    try:
+        status = auth_mod.status_for(provider)
+    except auth_mod.AuthError as exc:
+        _print_auth_error(exc)
+        raise typer.Exit(1)
+    if status["error"]:
+        console.print(f"[yellow]{status['error']}[/yellow]")
+        raise typer.Exit(1)
+    console.print(f"[bold]{status['provider']}[/bold]")
+    console.print(f"  stored: {'yes' if status['stored'] else 'no'}")
+    if status["stored"]:
+        console.print(f"  source: {status['source']}")
+    console.print(f"  secret_ref: {status['secret_ref']}")
+    if status["env_key"]:
+        state = "set" if status["env_set"] else "not set"
+        console.print(f"  env fallback: {status['env_key']} ({state})")
+
+
+@auth_app.command("remove")
+def auth_remove(
+    provider: str = typer.Argument(..., help="Provider identifier."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be removed without changing anything."),
+):
+    """Remove a provider's key from the Keychain and its entry from config.toml."""
+    from ppmlx import auth as auth_mod
+
+    try:
+        provider = auth_mod.validate_provider_name(provider)
+    except auth_mod.AuthError as exc:
+        _print_auth_error(exc)
+        raise typer.Exit(1)
+
+    entries, err = auth_mod.load_auth_entries()
+    in_config = err is None and provider in entries
+    has_secret = True
+    try:
+        auth_mod.get_secret(provider)
+    except auth_mod.SecretNotFoundError:
+        has_secret = False
+    except auth_mod.AuthError as exc:
+        _print_auth_error(exc)
+        raise typer.Exit(1)
+
+    if not in_config and not has_secret:
+        console.print(f"No auth entry found for {provider}.")
+        raise typer.Exit(1)
+
+    if dry_run:
+        console.print("[bold]Dry run:[/bold] no changes were written.")
+        if has_secret:
+            console.print(f"  Would delete keychain entry for [bold]{provider}[/bold].")
+        if in_config:
+            console.print(f"  Would remove \\[auth.providers.{provider}] from config.toml.")
+        return
+
+    try:
+        auth_mod.delete_secret(provider)
+    except auth_mod.AuthError as exc:
+        _print_auth_error(exc)
+        raise typer.Exit(1)
+    removed_cfg = False
+    try:
+        removed_cfg = auth_mod.remove_auth_entry(provider)
+    except auth_mod.AuthError as exc:
+        _print_auth_error(exc)
+        console.print("[yellow]Keychain entry deleted but config.toml could not be updated.[/yellow]")
+        raise typer.Exit(1)
+    parts = []
+    if has_secret:
+        parts.append("removed from Keychain")
+    if removed_cfg:
+        parts.append("entry removed from config.toml")
+    console.print(f"[green]{provider}: {'; '.join(parts)}.[/green]")
+
+
 if __name__ == "__main__":
     main_entry()
