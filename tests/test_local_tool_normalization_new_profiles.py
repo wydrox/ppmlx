@@ -345,3 +345,14 @@ def test_lfm25_rejects_ambiguous_multiple_sections() -> None:
         )
 
     assert captured.value.code == "ambiguous_tool_section"
+
+
+def test_gemma4_exact_live_captured_shape() -> None:
+    # Exact shape captured live from mlx-community/gemma-4-e4b-it-qat.
+    text = '<|tool_call>call:get_weather{city:<|"|>Paris<|"|>}<tool_call|>'
+    output = normalize_tool_output(text, profile="gemma4-v1")
+
+    assert output.remaining_text == ""
+    assert [(call.name, call.arguments_json) for call in output.tool_calls] == [
+        ("get_weather", {"city": "Paris"}),
+    ]
