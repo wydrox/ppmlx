@@ -123,6 +123,7 @@ class AnthropicProvider:
         *,
         base_url: str = DEFAULT_BASE_URL,
         env_key: str = DEFAULT_ENV_KEY,
+        provider_id: str = "anthropic",
         anthropic_version: str = DEFAULT_ANTHROPIC_VERSION,
         model_catalog: Sequence[str] = DEFAULT_MODEL_CATALOG,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
@@ -161,6 +162,9 @@ class AnthropicProvider:
             if not callable(factory):
                 raise ValueError("Provider identifier factory is invalid")
         self._base_url = base_url.rstrip("/")
+        if type(provider_id) is not str or not provider_id:
+            raise ValueError("Provider identifier is invalid")
+        self._provider_id = provider_id
         self._env_key = env_key
         self._anthropic_version = anthropic_version
         self._model_catalog = catalog
@@ -173,7 +177,7 @@ class AnthropicProvider:
 
     @property
     def provider_id(self) -> str:
-        return "anthropic"
+        return self._provider_id
 
     def _resolve_api_key(self) -> str:
         key = os.environ.get(self._env_key)

@@ -381,7 +381,7 @@ def prime_provider_credentials(
     env_keys = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
     primed: list[str] = []
     for provider_id in provider_ids:
-        env_key = env_keys.get(provider_id)
+        env_key = env_keys.get(provider_id) or f"{provider_id.upper()}_API_KEY"
         if env_key is None or os.environ.get(env_key):
             continue
         try:
