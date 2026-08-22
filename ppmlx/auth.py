@@ -16,10 +16,13 @@ matches the secret values seen during the operation.
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import tempfile
+import threading
 import tomllib
 import tomli_w
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -200,29 +203,30 @@ def save_auth_entry(
     """
     provider = validate_provider_name(provider)
     path = _config_path(config_dir)
-    try:
-        with open(path, "rb") as f:
-            data: dict[str, Any] = tomllib.load(f)
-    except FileNotFoundError:
-        data = {}
+    with _config_lock(path):
+        try:
+            with open(path, "rb") as f:
+                data: dict[str, Any] = tomllib.load(f)
+        except FileNotFoundError:
+            data = {}
 
-    providers = data.setdefault("auth", {}).setdefault("providers", {})
-    existing = providers.get(provider)
-    new_entry: dict[str, Any] = {"secret_ref": secret_ref_for(provider)}
-    if env_key:
-        new_entry["env_key"] = env_key
-    if isinstance(existing, dict) and existing == new_entry:
-        return False
-    if isinstance(existing, dict):
-        # Preserve unknown keys on update so we do not drop foreign metadata.
-        merged = dict(existing)
-        merged.update(new_entry)
-        new_entry = merged
-    providers[provider] = new_entry
+        providers = data.setdefault("auth", {}).setdefault("providers", {})
+        existing = providers.get(provider)
+        new_entry: dict[str, Any] = {"secret_ref": secret_ref_for(provider)}
+        if env_key:
+            new_entry["env_key"] = env_key
+        if isinstance(existing, dict) and existing == new_entry:
+            return False
+        if isinstance(existing, dict):
+            # Preserve unknown keys on update so we do not drop foreign metadata.
+            merged = dict(existing)
+            merged.update(new_entry)
+            new_entry = merged
+        providers[provider] = new_entry
 
-    if dry_run:
-        return True
-    _atomic_write_toml(path, data)
+        if dry_run:
+            return True
+        _atomic_write_toml(path, data)
     return True
 
 
@@ -238,30 +242,36 @@ def remove_auth_entry(
     """
     provider = validate_provider_name(provider)
     path = _config_path(config_dir)
-    try:
-        with open(path, "rb") as f:
-            data: dict[str, Any] = tomllib.load(f)
-    except FileNotFoundError:
-        return False
-    auth = data.get("auth")
-    if not isinstance(auth, dict):
-        return False
-    providers = auth.get("providers")
-    if not isinstance(providers, dict) or provider not in providers:
-        return False
-    del providers[provider]
-    if not providers:
-        del auth["providers"]
-    if not auth:
-        del data["auth"]
-    if dry_run:
-        return True
-    _atomic_write_toml(path, data)
+    with _config_lock(path):
+        try:
+            with open(path, "rb") as f:
+                data: dict[str, Any] = tomllib.load(f)
+        except FileNotFoundError:
+            return False
+        auth = data.get("auth")
+        if not isinstance(auth, dict):
+            return False
+        providers = auth.get("providers")
+        if not isinstance(providers, dict) or provider not in providers:
+            return False
+        del providers[provider]
+        if not providers:
+            del auth["providers"]
+        if not auth:
+            del data["auth"]
+        if dry_run:
+            return True
+        _atomic_write_toml(path, data)
     return True
 
 
 def _atomic_write_toml(path: Path, data: dict[str, Any]) -> None:
-    """Write TOML atomically, keeping a .bak of the previous content."""
+    """Write TOML atomically, keeping a .bak of the previous content.
+
+    The old content is *copied* to ``.bak`` first, so ``config.toml`` itself
+    is only ever swapped via a single ``os.replace`` — there is no window in
+    which the config file does not exist.
+    """
     payload = tomli_w.dumps(data)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".config-", suffix=".toml", dir=path.parent)
@@ -271,12 +281,47 @@ def _atomic_write_toml(path: Path, data: dict[str, Any]) -> None:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
+        bak_path = path.with_suffix(".toml.bak")
         if path.exists():
-            os.replace(path, path.with_suffix(".toml.bak"))
+            with open(path, "rb") as src, open(bak_path, "wb") as dst:
+                dst.write(src.read())
+                dst.flush()
+                os.fsync(dst.fileno())
         os.replace(tmp_path, path)
+        # fsync the directory so the rename is durable.
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     finally:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
+
+
+# Advisory inter-process lock serialising read-modify-write cycles on
+# config.toml (see save_auth_entry / remove_auth_entry).
+
+
+class _FlockContext:
+    """Context manager holding an exclusive flock on ``<config>.lock``."""
+
+    def __init__(self, lock_path: Path) -> None:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = open(lock_path, "a+")
+
+    def __enter__(self):
+        fcntl.flock(self._file.fileno(), fcntl.LOCK_EX)
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._file.close()
+
+
+def _config_lock(path: Path) -> _FlockContext:
+    return _FlockContext(path.with_suffix(path.suffix + ".lock"))
 
 
 # ---------------------------------------------------------------------------
@@ -316,18 +361,25 @@ def _safe_error(message: str, secrets: list[str]) -> str:
 
 
 # Every secret value this process has touched, kept so display code can apply
-# a final-pass redaction regardless of how a message was constructed.
-_seen_secrets: list[str] = []
+# a final-pass redaction regardless of how a message was constructed. Bounded
+# (oldest entries are evicted) and guarded by a lock so concurrent callers
+# cannot race on append/iteration.
+_seen_secrets: deque[str] = deque(maxlen=64)
+_seen_secrets_lock = threading.Lock()
 
 
 def _remember_secret(value: str | None) -> None:
-    if value and len(value) >= 3 and value not in _seen_secrets:
-        _seen_secrets.append(value)
+    if value and len(value) >= 3:
+        with _seen_secrets_lock:
+            if value not in _seen_secrets:
+                _seen_secrets.append(value)
 
 
 def redact(text: str) -> str:
     """Remove any secret seen by this process from ``text``."""
-    for s in tuple(_seen_secrets):
+    with _seen_secrets_lock:
+        snapshot = tuple(_seen_secrets)
+    for s in snapshot:
         if s in text:
             text = text.replace(s, "[REDACTED]")
     return text
@@ -353,17 +405,17 @@ def set_secret(
     except keyring.errors.NoKeyringError as exc:
         raise KeyringUnavailableError(
             _safe_error("System keyring is not available.", [secret]),
-            detail=f"{type(exc).__name__}: {exc}",
+            detail=_safe_error(f"{type(exc).__name__}: {exc}", [secret]),
         ) from None
     except keyring.errors.KeyringLocked as exc:
         raise KeyringUnavailableError(
             _safe_error("System keyring is locked; unlock it and retry.", [secret]),
-            detail=f"{type(exc).__name__}: {exc}",
+            detail=_safe_error(f"{type(exc).__name__}: {exc}", [secret]),
         ) from None
     except Exception as exc:
         raise KeyringUnavailableError(
             _safe_error(f"Failed to store secret in system keyring: {_exc_class(exc)}", [secret]),
-            detail=f"{type(exc).__name__}: {exc}",
+            detail=_safe_error(f"{type(exc).__name__}: {exc}", [secret]),
         ) from None
     save_auth_entry(provider, env_key, config_dir=config_dir)
 

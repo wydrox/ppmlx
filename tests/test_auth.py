@@ -176,8 +176,8 @@ class TestConfigRoundTrip:
     def test_no_temp_files_left_behind(self, fake_keyring, tmp_path):
         save_auth_entry("tidy", None)
         leftovers = [p.name for p in tmp_path.iterdir() if p.name != "config.toml"]
-        # only the .bak backup may remain
-        assert set(leftovers) <= {"config.toml.bak"}
+        # only the .bak backup and the advisory lock file may remain
+        assert set(leftovers) <= {"config.toml.bak", "config.toml.lock"}
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +188,8 @@ class TestConfigRoundTrip:
 class TestDryRunNoOp:
     def test_save_dry_run_writes_nothing(self, fake_keyring, tmp_path):
         assert save_auth_entry("openai", "OPENAI_API_KEY", dry_run=True) is True
-        assert not list(tmp_path.iterdir())  # no file created at all
+        # no config.toml is created (the advisory .lock file is expected)
+        assert not (tmp_path / "config.toml").exists()
         assert load_auth_entries()[0] == {}
 
     def test_remove_dry_run_writes_nothing(self, fake_keyring, tmp_path):
@@ -553,3 +554,65 @@ class TestCliMisc:
         res = CliRunner().invoke(app, ["auth", "status", "ghost"])
         assert res.exit_code == 0
         assert "stored: no" in res.output
+
+
+# ---------------------------------------------------------------------------
+# Audit fixes: M5 (detail redaction), M7 (concurrent writers), L13 (dry-run)
+# ---------------------------------------------------------------------------
+
+
+class TestAuditFixes:
+    def test_keyring_failure_detail_is_redacted(self, fake_keyring, monkeypatch):
+        """M5: KeyringUnavailableError.detail must never contain the secret."""
+        import keyring.errors
+
+        def boom(self, service, username, password):
+            raise keyring.errors.NoKeyringError(f"cannot store {password} right now")
+
+        monkeypatch.setattr(type(fake_keyring), "set_password", boom)
+        with pytest.raises(KeyringUnavailableError) as ei:
+            set_secret("openai", SECRET)
+        assert SECRET not in ei.value.detail
+        assert "[REDACTED]" in ei.value.detail
+
+    def test_concurrent_writers_do_not_lose_entries(self, fake_keyring, tmp_path):
+        """M7: concurrent save_auth_entry calls all land in config.toml."""
+        import threading
+
+        names = [f"prov{i}" for i in range(8)]
+        errors: list[Exception] = []
+
+        def writer(name: str) -> None:
+            try:
+                for _ in range(10):
+                    save_auth_entry(name, None)
+            except Exception as exc:  # pragma: no cover - surfaced via assert
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(n,)) for n in names]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        entries, err = load_auth_entries(config_dir=tmp_path)
+        assert err is None
+        for n in names:
+            assert n in entries, f"entry {n!r} lost to a concurrent writer"
+
+    def test_cli_add_dry_run_never_prompts_for_secret(self, fake_keyring, monkeypatch):
+        """L13: --dry-run short-circuits before any getpass call."""
+
+        def refuse(*a, **kw):
+            raise AssertionError("getpass must not be called on a dry run")
+
+        import getpass
+
+        monkeypatch.setattr(getpass, "getpass", refuse)
+        from ppmlx.cli import app
+
+        res = CliRunner().invoke(app, ["auth", "add", "openai", "--dry-run"])
+        assert res.exit_code == 0
+        assert "Would store" in res.output
+        assert fake_keyring.store == {}

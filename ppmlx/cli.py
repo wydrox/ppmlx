@@ -3677,6 +3677,17 @@ def auth_add(
             raise typer.Abort()
 
     env_key_name = f"{provider.upper()}_API_KEY" if env else None
+
+    if dry_run:
+        # Short-circuit before any secret handling: a dry run must not
+        # prompt for (or hold) the key at all.
+        console.print("[bold]Dry run:[/bold] no changes were written.")
+        console.print(f"  Would store key for [bold]{provider}[/bold] in the macOS Keychain.")
+        action = "Would update" if existing is not None else "Would add"
+        suffix = f" (env_key={env_key_name})" if env_key_name else ""
+        console.print(f"  {action} \\[auth.providers.{provider}] in config.toml{suffix}")
+        return
+
     if not _auth_add_stdin_is_interactive():
         console.print("[red]auth add requires an interactive terminal (key input is hidden).[/red]")
         raise typer.Exit(1)
@@ -3685,20 +3696,14 @@ def auth_add(
 
     secret = getpass.getpass(f"API key for {provider}: ")
     confirm = getpass.getpass("Repeat API key for confirmation: ")
-    if secret != confirm:
+    import hmac as _hmac
+
+    if not _hmac.compare_digest(secret.encode(), confirm.encode()):
         console.print("[red]The two entries do not match; nothing was stored.[/red]")
         raise typer.Exit(1)
     if not secret:
         console.print("[red]Empty key; nothing was stored.[/red]")
         raise typer.Exit(1)
-
-    if dry_run:
-        console.print("[bold]Dry run:[/bold] no changes were written.")
-        console.print(f"  Would store key for [bold]{provider}[/bold] in the macOS Keychain.")
-        action = "Would update" if existing is not None else "Would add"
-        suffix = f" (env_key={env_key_name})" if env_key_name else ""
-        console.print(f"  {action} \\[auth.providers.{provider}] in config.toml{suffix}")
-        return
 
     try:
         auth_mod.set_secret(provider, secret, env_key=env_key_name)
