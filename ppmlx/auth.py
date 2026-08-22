@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+from types import TracebackType
 import tempfile
 import threading
 import tomllib
@@ -310,10 +311,16 @@ class _FlockContext:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         self._file = open(lock_path, "a+")
 
-    def __enter__(self):
+    def __enter__(self) -> "_FlockContext":
         fcntl.flock(self._file.fileno(), fcntl.LOCK_EX)
+        return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         try:
             fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
         finally:
@@ -445,8 +452,9 @@ def get_secret(provider: str) -> str:
         raise SecretNotFoundError(
             _safe_error(f"No API key stored for provider {provider!r}.", []),
         )
-    _remember_secret(value)
-    return value
+    secret = str(value)
+    _remember_secret(secret)
+    return secret
 
 
 def delete_secret(provider: str) -> None:

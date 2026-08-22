@@ -12,7 +12,6 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 FIXTURE_SCHEMA = "tool-profile-fixtures/v1"
 

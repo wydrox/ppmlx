@@ -370,16 +370,19 @@ def test_prime_provider_credentials_pulls_from_keyring(monkeypatch):
     import ppmlx.routing_service as rs
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr(
-        rs,
-        "resolve_secret",
-        lambda provider, prefer_env=False: ("key-from-keyring", "keyring"),
-    )
+    # Non-mocked resolve_secret path: real auth.resolve_secret with a
+    # monkeypatched keyring backend returning the secret under the real
+    # "keychain" source label (regression for final-gate blocker 1).
+    import ppmlx.auth as auth_mod
+
+    monkeypatch.setattr(auth_mod, "_has_stored_secret", lambda p: True)
+    monkeypatch.setattr(auth_mod, "get_secret", lambda p: "key-from-keychain")
+
     primed = rs.prime_provider_credentials(("openai",))
     assert primed == ("openai",)
     import os
 
-    assert os.environ["OPENAI_API_KEY"] == "key-from-keyring"
+    assert os.environ["OPENAI_API_KEY"] == "key-from-keychain"
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
