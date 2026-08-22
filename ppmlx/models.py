@@ -510,12 +510,23 @@ def download_model(alias_or_repo: str, token: str | None = None) -> Path:
     return local_path
 
 
-def resolve_model_path(repo_id: str) -> str:
-    """Resolve a repo_id to a local path if available, otherwise return the
-    repo_id for direct HuggingFace loading."""
+def resolve_model_path(repo_id: str, *, allow_download: bool = False) -> str:
+    """Resolve a repo_id to a locally downloaded model path.
+
+    Fail-closed by default: if the exact model is not already present in the
+    local store, raise ``ModelNotFoundError`` instead of returning the raw
+    repo_id (which HuggingFace loaders would treat as an implicit network
+    download). Pass ``allow_download=True`` to opt in to the legacy behaviour
+    of returning the repo_id for direct HuggingFace resolution.
+    """
     local = get_model_path(repo_id)
     if local:
         return str(local)
+    if not allow_download:
+        raise ModelNotFoundError(
+            f"Model '{repo_id}' is not available locally. "
+            f"Download it first with `ppmlx pull {repo_id}`."
+        )
     return repo_id
 
 

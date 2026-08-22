@@ -266,12 +266,25 @@ def test_generation_exception_is_sanitized() -> None:
 @pytest.mark.parametrize(
     ("model", "expected"),
     [
-        ("xai/grok-4", NormalizationProfile.GROK_OPENAI_CHAT_V1),
-        ("moonshot/Kimi-K2", NormalizationProfile.KIMI_K2_V1),
-        ("deepseek-ai/DeepSeek-V3", NormalizationProfile.DEEPSEEK_V3_V1),
-        ("mlx-community/Qwen3", NormalizationProfile.QWEN_JSON_V1),
+        ("xai/grok-4", None),
+        ("moonshot/Kimi-K2", None),
+        ("deepseek-ai/DeepSeek-V3", None),
+        ("mlx-community/Qwen3", None),
         ("meta-llama/Llama", None),
     ],
 )
 def test_profile_selection_is_explicit(model: str, expected: NormalizationProfile | None) -> None:
     assert select_normalization_profile(model) is expected
+
+
+def test_family_name_match_does_not_create_a_capability_claim() -> None:
+    for model in (
+        "mlx-community/Qwen2.5-7B-Instruct-4bit",
+        "mlx-community/Qwen3-30B-A3B-4bit",
+        "not-grok",
+        "my-kimi-model",
+        "deepseek-coder-v2",
+        "GROK",
+        "mlx-community/qwen3",
+    ):
+        assert select_normalization_profile(model) is None

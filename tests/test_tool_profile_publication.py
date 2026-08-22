@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from ppmlx.local_runtime.deterministic_fixtures import (
+    DeterministicFixtureError,
+    run_deterministic_fixtures,
+)
 from ppmlx.local_runtime.normalization import NormalizationProfile
 from ppmlx.local_runtime.profile_evaluation import (
     AttemptEvaluation,
@@ -28,6 +32,15 @@ from ppmlx.local_runtime.tool_argument_repair import ToolArgumentRepairPolicy
 
 ROOT = Path(__file__).resolve().parents[1]
 CASE_SET_PATH = ROOT / "tests" / "fixtures" / "tool_profile_eval" / "cases-v1.json"
+
+
+def _fixtures_evidence() -> dict[str, object]:
+    """Run the real deterministic fixtures once per call site that needs them."""
+
+    return run_deterministic_fixtures(
+        repository_root=ROOT,
+        ppmlx_commit="a" * 40,
+    )
 
 
 def _run(
@@ -105,13 +118,17 @@ def _report(
         report,
         architecture="arm64",
         case_set_sha256="d" * 64,
+        fixtures_evidence=_fixtures_evidence(),
     )
 
 
 def test_valid_report_requires_exact_immutable_content_free_evidence() -> None:
     report = _report()
 
-    assert validate_report(report) is PublishedSupportStatus.STABLE
+    assert (
+        validate_report(report, fixtures_evidence=_fixtures_evidence())
+        is PublishedSupportStatus.STABLE
+    )
     serialized = json.dumps(report, sort_keys=True)
     assert '"architecture": "arm64"' in serialized
     assert '"sha256": "' + ("d" * 64) + '"' in serialized
@@ -137,13 +154,34 @@ def test_stable_status_is_blocked_when_repair_rate_exceeds_two_percent() -> None
 
 
 def test_fixture_or_correlation_failure_disables_publication() -> None:
-    fixture_failure = _report(fixtures_passed=False)
+    fixture_failure = _report()
+    fixture_failure["deterministic_fixtures_passed"] = False
     correlation_failure = _report(
         runs=(_run(1, correlated=99), _run(2), _run(3))
     )
 
     assert classify_report(fixture_failure) is PublishedSupportStatus.DISABLED
     assert classify_report(correlation_failure) is PublishedSupportStatus.DISABLED
+
+
+def test_publication_fails_closed_without_recorded_fixture_evidence() -> None:
+    report = _report()
+
+    with pytest.raises(ProfilePublicationError) as missing:
+        validate_report(report)
+    assert missing.value.code == "fixtures_evidence_required"
+
+    with pytest.raises(ProfilePublicationError) as unproven:
+        validate_report(report, fixtures_evidence={"schema_version": "tool-profile-fixtures/v1"})
+    assert unproven.value.code == "fixture_evidence_commit_mismatch"
+
+    other_commit = _report()
+    ppmlx = other_commit["ppmlx"]
+    assert isinstance(ppmlx, dict)
+    ppmlx["commit"] = "e" * 40
+    with pytest.raises(ProfilePublicationError) as mismatch:
+        validate_report(other_commit, fixtures_evidence=_fixtures_evidence())
+    assert mismatch.value.code == "fixture_evidence_commit_mismatch"
 
 
 @pytest.mark.parametrize(
@@ -166,7 +204,7 @@ def test_publication_rejects_mutable_or_non_apple_evidence(
     section[path[1]] = value
 
     with pytest.raises(ProfilePublicationError) as captured:
-        validate_report(report)
+        validate_report(report, fixtures_evidence=_fixtures_evidence())
 
     assert captured.value.code == code
 
@@ -180,14 +218,17 @@ def test_publication_rejects_content_fields_even_when_nested() -> None:
     first["prompt"] = "credential-test-THIS_IS_SECRET"
 
     with pytest.raises(ProfilePublicationError) as captured:
-        validate_report(report)
+        validate_report(report, fixtures_evidence=_fixtures_evidence())
 
     assert captured.value.code in {"content_in_report", "invalid_run"}
     assert "credential-test" not in str(captured.value)
 
 
 def test_matrix_is_generated_from_evidence_and_marks_other_profiles_not_evaluated() -> None:
-    rendered = render_capability_matrix((_report(),))
+    rendered = render_capability_matrix(
+        (_report(),),
+        fixtures_evidence=_fixtures_evidence(),
+    )
 
     assert "mlx-community/Example-4bit" in rendered
     assert "`bbbbbbbbbbbb`" in rendered
@@ -196,7 +237,7 @@ def test_matrix_is_generated_from_evidence_and_marks_other_profiles_not_evaluate
     assert "`grok-openai-chat-v1`" in rendered
     assert "`kimi-k2-v1`" in rendered
     assert "`deepseek-v3-v1`" in rendered
-    assert rendered.count("**not_evaluated**") == 3
+    assert rendered.count("**not_evaluated**") == 6
     assert "family-name matching" in rendered.lower()
 
 
@@ -208,7 +249,7 @@ def test_report_rates_and_support_status_cannot_be_forged() -> None:
     aggregate["effective_valid_call_rate"] = 0.5
 
     with pytest.raises(ProfilePublicationError) as rate_error:
-        validate_report(forged_rate)
+        validate_report(forged_rate, fixtures_evidence=_fixtures_evidence())
     assert rate_error.value.code == "inconsistent_aggregate"
 
     forged_status = copy.deepcopy(report)
@@ -217,5 +258,5 @@ def test_report_rates_and_support_status_cannot_be_forged() -> None:
     status["support_status"] = "experimental"
 
     with pytest.raises(ProfilePublicationError) as status_error:
-        validate_report(forged_status)
+        validate_report(forged_status, fixtures_evidence=_fixtures_evidence())
     assert status_error.value.code == "support_status_mismatch"

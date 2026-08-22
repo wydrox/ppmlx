@@ -10,7 +10,10 @@ def _resolve_model_path(repo_id: str) -> str:
     """Resolve alias to local path if available."""
     try:
         from ppmlx.models import resolve_model_path
-        return resolve_model_path(repo_id)
+        # Interactive engine flows resolve user-selected registry ids;
+        # downloads stay allowed here (the fail-closed LOCAL boundary is
+        # enforced at the provider layer).
+        return resolve_model_path(repo_id, allow_download=True)
     except ImportError:
         return repo_id
 

@@ -34,6 +34,7 @@ from ppmlx.models import (
 from .base import (
     ProviderCallReference,
     ProviderCapabilities,
+    ProviderCancelledError,
     ProviderCredentialType,
     ProviderDataPath,
     ProviderError,
@@ -87,13 +88,17 @@ class MLXProvider:
         *,
         generate: LocalGenerator = _default_generate,
         model_lister: ModelLister = list_local_models,
-        model_resolver: ModelResolver = resolve_model_path,
+        model_resolver: ModelResolver | None = None,
         profile_selector: ProfileSelector = select_normalization_profile,
         platform_probe: PlatformProbe = _default_platform_probe,
         call_id_factory: Callable[[], str] = new_call_id,
         output_id_factory: Callable[[], str] = new_output_id,
         parallel_group_factory: Callable[[], str] = new_parallel_group_id,
+        allow_download: bool = False,
     ) -> None:
+        self._allow_download = bool(allow_download)
+        if model_resolver is None:
+            model_resolver = self._fail_closed_model_resolver
         for value in (
             generate,
             model_lister,
@@ -118,6 +123,17 @@ class MLXProvider:
     @property
     def provider_id(self) -> str:
         return "mlx"
+
+    def _fail_closed_model_resolver(self, model_id: str) -> str:
+        """Resolve only models already downloaded locally.
+
+        The provider declares ``ProviderDataPath.LOCAL``: silently letting the
+        MLX loader fetch a HuggingFace repo derived from caller input would
+        break that claim (and the SSRF/trusted-config rules in
+        docs/security/threat-model.md). Downloads require the explicit
+        ``allow_download=True`` opt-in on this provider.
+        """
+        return resolve_model_path(model_id, allow_download=self._allow_download)
 
     def capabilities(self, model_id: str) -> ProviderCapabilities:
         if type(model_id) is not str or not model_id or any(
@@ -312,6 +328,15 @@ class MLXProvider:
             ) from None
 
     def invoke(self, invocation: ProviderInvocation) -> ProviderResult:
+        handle = invocation.cancel_handle
+        if handle is not None and handle.cancelled:
+            return ProviderResult(
+                provider_id=self.provider_id,
+                model_id=invocation.model_id,
+                events=(),
+                streaming=ProviderStreamingMode.BUFFERED,
+                cancelled=True,
+            )
         execution = self._execute(invocation)
         calls = tuple(
             ProviderCallReference(
@@ -331,10 +356,23 @@ class MLXProvider:
             calls=calls,
             source_call_ids=execution.source_call_ids,
             streaming=ProviderStreamingMode.BUFFERED,
+            cancelled=handle is not None and handle.cancelled,
         )
 
     def stream(self, invocation: ProviderInvocation) -> Iterator[AgentEvent]:
-        return iter(self.invoke(invocation).events)
+        handle = invocation.cancel_handle
+        if handle is not None and handle.cancelled:
+            raise ProviderCancelledError(provider_id=self.provider_id)
+        events = self.invoke(invocation).events
+
+        def _generate() -> Iterator[AgentEvent]:
+            for event in events:
+                if handle is not None and handle.cancelled:
+                    # Typed, observable cancellation: never a silent stop.
+                    raise ProviderCancelledError(provider_id=self.provider_id)
+                yield event
+
+        return _generate()
 
 
 __all__ = ["MLXProvider"]

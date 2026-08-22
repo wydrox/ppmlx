@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import platform
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -24,6 +26,8 @@ from .profile_evaluation import (
 from .profile_publication import finalize_report
 from .tool_argument_repair import ToolArgumentRepairPolicy
 from .tool_profiles import ToolCapabilityLevel
+
+log = logging.getLogger(__name__)
 
 
 class ProfileRunnerError(ValueError):
@@ -206,14 +210,20 @@ def case_set_sha256(path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _generation_failure(case: ToolEvaluationCase) -> CaseEvaluation:
+def _generation_failure(case: ToolEvaluationCase, detail: str | None = None) -> CaseEvaluation:
+    # Surface the underlying exception instead of masking it behind a bare
+    # "generation_failed" code — otherwise real bugs (e.g. API incompatibilities)
+    # are invisible in reports.
+    error_code = "generation_failed"
+    if detail:
+        error_code = f"{error_code}: {detail}"[:500]
     failed = AttemptEvaluation(
         expected_calls=len(case.expected_calls),
         valid_calls=0,
         correlated_calls=0,
         repair_attempts=(),
         repaired_valid_calls=0,
-        error_code="generation_failed",
+        error_code=error_code,
     )
     return CaseEvaluation(case_id=case.case_id, strict=failed, effective=failed)
 
@@ -240,8 +250,10 @@ def _run_once(
             )
             if type(output) is not str:
                 raise ProfileRunnerError("invalid_generation")
-        except Exception:
-            results.append(_generation_failure(case))
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            log.exception("Generation failed for case %s: %s", case.case_id, detail)
+            results.append(_generation_failure(case, detail))
             continue
         results.append(
             evaluate_generated_output(
@@ -270,7 +282,7 @@ def run_profile_evaluation(
     environment: AppleEvaluationEnvironment,
     settings: GenerationSettings,
     generate: ProfileGenerator,
-    deterministic_fixtures_passed: bool = True,
+    fixtures_evidence: Mapping[str, object],
     ppmlx_commit: str | None = None,
 ) -> dict[str, object]:
     """Run three fixed evaluations and return one validated safe report."""
@@ -278,6 +290,8 @@ def run_profile_evaluation(
     if type(model_path) is not str or not model_path:
         raise ProfileRunnerError("model_path_required")
     commit = ppmlx_commit or current_git_commit(repository_root)
+    if fixtures_evidence.get("ppmlx_commit") != commit:
+        raise ProfileRunnerError("fixture_evidence_commit_mismatch")
     runs = tuple(
         _run_once(
             run_index=index,
@@ -307,12 +321,13 @@ def run_profile_evaluation(
         generation_settings=settings.to_dict(),
         case_set=case_set,
         runs=runs,
-        deterministic_fixtures_passed=deterministic_fixtures_passed,
+        deterministic_fixtures_passed=True,
     )
     return finalize_report(
         report,
         architecture=environment.architecture,
         case_set_sha256=case_set_sha256(case_set_path),
+        fixtures_evidence=fixtures_evidence,
     )
 
 

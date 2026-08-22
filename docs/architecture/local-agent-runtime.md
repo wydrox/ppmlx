@@ -30,7 +30,7 @@ The strict runtime accepts a request only when all these conditions are true:
 
 - The selected local model has a named output profile.
 
-The first profiles are `grok-openai-chat-v1`, `kimi-k2-v1`, `deepseek-v3-v1`, and `qwen-json-v1`.
+The profiles are `grok-openai-chat-v1`, `kimi-k2-v1`, `deepseek-v3-v1`, `qwen-json-v1`, `gemma4-v1`, and `lfm25-v1`.
 
 The strict mode rejects Responses WebSocket tool requests. Non-tool requests and non-stream requests stay on the legacy runtime. A tool transcript cannot change these fields to enter the legacy runtime.
 

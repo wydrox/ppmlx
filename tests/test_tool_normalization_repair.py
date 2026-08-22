@@ -34,15 +34,66 @@ def test_qwen_repairs_one_trailing_comma_inside_arguments() -> None:
     assert call.repair.profile == "qwen-json-v1"
 
 
-def test_qwen_rejects_ambiguous_missing_inner_or_outer_delimiter() -> None:
+def test_qwen_repairs_one_missing_envelope_brace_without_argument_change() -> None:
+    output = normalize_tool_output(
+        '<tool_call>{"name":"read","arguments":{"path":"main.py"}</tool_call>',
+        profile="qwen-json-v1",
+        repair_policy="bounded-json-v1",
+    )
+
+    call = output.tool_calls[0]
+    assert call.arguments_raw == '{"path":"main.py"}'
+    assert call.repair is not None
+    assert call.repair.kind is ToolArgumentRepairKind.MISSING_FINAL_DELIMITER
+
+
+def test_qwen_repairs_one_unambiguous_missing_final_delimiter() -> None:
+    # ADR 0009: a repair with exactly one possible edit location must not be
+    # rejected as ambiguous.
+    output = normalize_tool_output(
+        '<tool_call>{"name":"read","arguments":{"path":"main.py"}</tool_call>',
+        profile="qwen-json-v1",
+        repair_policy=POLICY,
+    )
+
+    call = output.tool_calls[0]
+    assert call.arguments_json == {"path": "main.py"}
+    assert call.repair is not None
+    assert call.repair.kind is ToolArgumentRepairKind.MISSING_FINAL_DELIMITER
+
+
+def test_qwen_repair_surface_excludes_the_envelope_brace() -> None:
+    # ADR 0009: the repair surface covers only the argument value. The call
+    # object's closing brace stays in the envelope, so a trailing comma in the
+    # arguments has exactly one possible edit location and must be repaired
+    # instead of being misattributed to the envelope.
+    output = normalize_tool_output(
+        '<tool_call>{"name":"read","arguments":{"path":"main.py",}}</tool_call>',
+        profile="qwen-json-v1",
+        repair_policy=POLICY,
+    )
+
+    call = output.tool_calls[0]
+    assert call.arguments_raw == '{"path":"main.py"}'
+    assert call.arguments_json == {"path": "main.py"}
+    assert call.repair is not None
+    assert call.repair.kind is ToolArgumentRepairKind.TRAILING_COMMA
+
+
+def test_qwen_envelope_defect_does_not_mask_an_argument_error() -> None:
+    # ADR 0009: repairing the missing call-object brace must not change how
+    # the arguments themselves fail. An argument defect the bounded policy
+    # cannot fix surfaces as its own typed error, not as an envelope or
+    # ambiguity error.
     with pytest.raises(ToolNormalizationError) as captured:
         normalize_tool_output(
-            '<tool_call>{"name":"read","arguments":{"path":"main.py"}</tool_call>',
+            '<tool_call>{"name":"read","arguments'
+            '":{"path":"main.py","path":"backup.py"}</tool_call>',
             profile="qwen-json-v1",
-            repair_policy="bounded-json-v1",
+            repair_policy=POLICY,
         )
 
-    assert captured.value.code == "repair_ambiguous"
+    assert captured.value.code == "duplicate_json_key"
 
 
 def test_qwen_repairs_one_double_encoded_object() -> None:

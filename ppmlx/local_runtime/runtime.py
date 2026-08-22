@@ -502,6 +502,9 @@ class LocalAgentRuntime:
         ledger: ContinuationLedger | None = None,
         generate: LocalGenerator = default_local_generator,
         resolve_model: Callable[[str, str], str] = default_model_resolver,
+        profile_selector: Callable[[str], NormalizationProfile | None] = (
+            select_normalization_profile
+        ),
         max_tokens_cap: int = 32_768,
         conversation_ttl_seconds: int = 86_400,
         max_active_conversations: int = _DEFAULT_MAX_ACTIVE_CONVERSATIONS,
@@ -519,11 +522,14 @@ class LocalAgentRuntime:
         ):
             if type(value) is not int or value < 1:
                 raise AgentRuntimeError("invalid_runtime_limit")
+        if not callable(profile_selector):
+            raise AgentRuntimeError("invalid_runtime_limit")
         self._ledger = ledger or ContinuationLedger(
             active_ttl_seconds=conversation_ttl_seconds,
         )
         self._generate = generate
         self._resolve_model = resolve_model
+        self._profile_selector = profile_selector
         self._max_tokens_cap = max_tokens_cap
         self._conversation_ttl_seconds = conversation_ttl_seconds
         self._max_active_conversations = max_active_conversations
@@ -745,7 +751,7 @@ class LocalAgentRuntime:
 
         semantics = _request_semantics(request_envelope, protocol=protocol)
         local_model = route_pin.model
-        profile = select_normalization_profile(local_model)
+        profile = self._profile_selector(local_model)
         native_response_id, output_id = _native_response_ids(protocol)
         if not call_ids:
             self._reserve_conversation_slot()
