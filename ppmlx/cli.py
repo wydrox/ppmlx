@@ -645,6 +645,20 @@ def _flush_port(host: str, port: int) -> None:
     console.print(f"[red]Port {port} still in use after killing processes.[/red]")
 
 
+def _persist_launch_config(action: str, base_url: str, model: str) -> None:
+    """Write the persistent harness config during launch (same writers as onboard)."""
+    from ppmlx import onboard
+
+    try:
+        result = onboard.configure_harnesses(
+            [action], base_url=base_url, model=model, dry_run=False
+        )
+        for record in result.applied:
+            console.print(f"[dim]Persistent config written to {record.path}[/dim]")
+    except Exception as error:  # never block a launch on config persistence
+        console.print(f"[yellow]Warning: could not write persistent {action} config: {error}[/yellow]")
+
+
 def _launch_coding_tool(action: str, model: str, host: str, port: int) -> None:
     if _port_in_use(host, port):
         console.print(f"[red]Port {port} is already in use.[/red]")
@@ -679,6 +693,7 @@ def _launch_coding_tool(action: str, model: str, host: str, port: int) -> None:
         cmd = ["claude", "--model", model]
         env["ANTHROPIC_BASE_URL"] = base
         env["ANTHROPIC_API_KEY"] = "local"
+        _persist_launch_config("claude", base, model)
     elif action == "codex":
         cmd = [
             "codex", "--model", model,
@@ -689,41 +704,17 @@ def _launch_coding_tool(action: str, model: str, host: str, port: int) -> None:
             "-c", 'model_providers.ppmlx.wire_api="responses"',
         ]
         env["OPENAI_API_KEY"] = "local"
+        _persist_launch_config("codex", base_url, model)
     elif action == "opencode":
         cmd = ["opencode"]
         env["OPENAI_API_KEY"] = "local"
         env["OPENAI_BASE_URL"] = base_url
+        _persist_launch_config("opencode", base_url, model)
     elif action == "pi":
-        models_file = Path.home() / ".pi" / "agent" / "models.json"
-        models_file.parent.mkdir(parents=True, exist_ok=True)
-        existing = json.loads(models_file.read_text()) if models_file.exists() else {}
-        if isinstance(existing, dict) and "providers" in existing:
-            existing["providers"]["ppmlx"] = {
-                "api": "openai-completions",
-                "apiKey": "local",
-                "baseUrl": base_url,
-                "models": [{
-                    "_launch": True,
-                    "contextWindow": 262144,
-                    "id": model,
-                    "input": ["text"],
-                    "reasoning": True,
-                }],
-            }
-        else:
-            if isinstance(existing, list):
-                entries = [e for e in existing if isinstance(e, dict) and e.get("id") != "ppmlx"]
-            else:
-                entries = []
-            entries.append({
-                "id": "ppmlx",
-                "name": f"ppmlx ({model})",
-                "baseUrl": base_url,
-                "api": "openai-completions",
-                "apiKey": "local",
-            })
-            existing = entries
-        models_file.write_text(json.dumps(existing, indent=2))
+        from ppmlx import onboard
+
+        onboard.write_pi_models(base_url, model)
+        console.print(f"[dim]Persistent pi config written to {onboard.pi_models_path()}.[/dim]")
         cmd = ["pi", "--model", f"ppmlx/{model}"]
     elif action == "openwebui":
         import time, webbrowser
@@ -840,6 +831,44 @@ def main(
 ):
     """ppmlx: Run LLMs on Apple Silicon via MLX."""
     from ppmlx.config import check_first_run; check_first_run()
+
+
+@app.command()
+def onboard(
+    harness: str = typer.Option(
+        None, "--harness",
+        help="Comma-separated harnesses to configure (claude,codex,opencode,pi). Omit to detect/ask interactively.",
+    ),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Default model to advertise in configs"),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="ppmlx server endpoint"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would change without writing anything."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Non-interactive: skip prompts, use defaults."),
+    setup_routes: Optional[bool] = typer.Option(
+        None, "--setup-routes/--no-setup-routes", help="Write example route policy + [server] route_policy."
+    ),
+):
+    """Interactive wizard: persist ppmlx config for coding harnesses."""
+    from ppmlx.onboard import run_onboard_wizard
+
+    harnesses = None
+    if harness:
+        harnesses = [h.strip().lower() for h in harness.split(",") if h.strip()]
+        invalid = [h for h in harnesses if h not in ("claude", "codex", "opencode", "pi")]
+        if invalid:
+            console.print(f"[red]Unknown harness(es): {', '.join(invalid)}[/red]")
+            raise typer.Exit(1)
+    try:
+        run_onboard_wizard(
+            harnesses=harnesses,
+            model=model,
+            base_url=base_url,
+            dry_run=dry_run or False,
+            yes=yes,
+            setup_routes=setup_routes if setup_routes is not None else (False if (dry_run or yes) else None),
+        )
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()
