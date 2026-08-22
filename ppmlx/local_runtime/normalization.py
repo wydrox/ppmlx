@@ -115,6 +115,16 @@ _DEEPSEEK_CALL_END = "<｜tool▁call▁end｜>"
 _DEEPSEEK_SEPARATOR = "<｜tool▁sep｜>"
 
 _GEMMA_CALL_START = "<|tool_call>"
+# Real Gemma 4 output terminates each call with ``<tool_call|>`` (no slash).
+# The terminator is optional: the profile contract does not require it, but
+# consuming it keeps trailing model output from being rejected as
+# text_after_tool_section.
+_GEMMA_CALL_END = "<tool_call|>"
+# Gemma 4 escapes string argument values with the ``<|"|>`` marker on both
+# sides (format_argument macro in the official chat template). Content
+# between the markers is taken verbatim: the template performs no
+# backslash escaping, so none is processed here.
+_GEMMA_STRING_MARKER = '<|"|>'
 _GEMMA_CALL_PREFIX = "call:"
 
 _LFM_SECTION_START = "<|tool_call_start|>"
@@ -726,6 +736,26 @@ def _parse_literal_value(
     head = source[position]
     if head in "[{":
         return _parse_literal_container(source, position, profile=profile, depth=depth)
+    if profile == NormalizationProfile.GEMMA4_V1.value:
+        # Gemma 4 renders string values as <|"|>content<|"|>. The content
+        # is taken verbatim: the chat template performs no backslash
+        # escaping inside these markers, so none is processed here.
+        if source.startswith(_GEMMA_STRING_MARKER, position):
+            content_start = position + len(_GEMMA_STRING_MARKER)
+            content_end = source.find(_GEMMA_STRING_MARKER, content_start)
+            if content_end < 0:
+                _raise(profile, "malformed_arguments")
+            return source[content_start:content_end], (
+                content_end + len(_GEMMA_STRING_MARKER)
+            )
+    if profile == NormalizationProfile.LFM25_V1.value and head == "'":
+        # LFM2.5's format_arg_value macro wraps string values in single
+        # quotes with no escaping; the content between the quotes is
+        # verbatim.
+        content_end = source.find("'", position + 1)
+        if content_end < 0:
+            _raise(profile, "malformed_arguments")
+        return source[position + 1 : content_end], content_end + 1
     try:
         value, end = _JSON_DECODER.raw_decode(source, position)
     except (_DuplicateJsonKey, json.JSONDecodeError, TypeError, ValueError, RecursionError):
@@ -808,6 +838,7 @@ def _split_top_level(source: str, *, separator: str) -> list[str]:
     parts: list[str] = []
     depth = 0
     in_string = False
+    in_single_quote = False
     escaped = False
     start = 0
     for index, character in enumerate(source):
@@ -819,8 +850,16 @@ def _split_top_level(source: str, *, separator: str) -> list[str]:
             elif character == '"':
                 in_string = False
             continue
+        if in_single_quote:
+            # LFM2.5 string values are single-quoted with no escape
+            # processing, so the next quote always closes the value.
+            if character == "'":
+                in_single_quote = False
+            continue
         if character == '"':
             in_string = True
+        elif character == "'":
+            in_single_quote = True
         elif character in "([{":
             depth += 1
         elif character in ")]}":
@@ -911,6 +950,12 @@ def _parse_gemma4(
         if len(calls) > limits.max_calls:
             _raise(profile, "call_limit_exceeded")
         rest = after_prefix[end_position:]
+        # Real Gemma 4 output ends each call with <tool_call|>; the
+        # terminator is optional per the profile contract, so consume it
+        # when present (surrounded by whitespace) and keep parsing.
+        stripped_rest = rest.lstrip()
+        if stripped_rest.startswith(_GEMMA_CALL_END):
+            rest = stripped_rest[len(_GEMMA_CALL_END) :]
     return NormalizedToolOutput(
         NormalizationProfile.GEMMA4_V1,
         _check_calls(calls, profile=profile, limits=limits),

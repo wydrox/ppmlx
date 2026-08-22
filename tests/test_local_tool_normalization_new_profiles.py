@@ -66,6 +66,119 @@ def test_gemma4_rejects_text_after_calls() -> None:
     assert captured.value.code == "text_after_tool_section"
 
 
+def test_gemma4_parses_escaped_marker_strings() -> None:
+    # Real Gemma 4 output renders string arguments as <|"|>value<|"|>.
+    text = '<|tool_call>call:get_weather{city:<|"|>Paris<|"|>,days:3}'
+    output = normalize_tool_output(text, profile=NormalizationProfile.GEMMA4_V1)
+
+    call = output.tool_calls[0]
+    assert call.name == "get_weather"
+    assert call.arguments_json == {"city": "Paris", "days": 3}
+    assert _roundtrip_ok(call)
+
+
+def test_gemma4_escaped_marker_strings_in_containers() -> None:
+    text = (
+        "<|tool_call>call:plan{"
+        'title:<|"|>Trip<|"|>,'
+        'stops:[<|"|>Lyon<|"|>,<|"|>Nice<|"|>],'
+        'meta:{note:<|"|>plain text<|"|>,ok:true}'
+        "}"
+    )
+    output = normalize_tool_output(text, profile="gemma4-v1")
+
+    call = output.tool_calls[0]
+    assert call.arguments_json == {
+        "title": "Trip",
+        "stops": ["Lyon", "Nice"],
+        "meta": {"note": "plain text", "ok": True},
+    }
+
+
+def test_gemma4_content_verbatim_no_backslash_processing() -> None:
+    text = '<|tool_call>call:echo{raw:<|"|>a\\nb<|"|>}<tool_call|>'
+    output = normalize_tool_output(text, profile="gemma4-v1")
+
+    # No backslash-escape processing inside the markers.
+    assert output.tool_calls[0].arguments_json == {"raw": "a\\nb"}
+
+
+def test_gemma4_unterminated_escaped_string_rejected() -> None:
+    with pytest.raises(ToolNormalizationError) as captured:
+        normalize_tool_output(
+            '<|tool_call>call:read{path:<|"|>a}',
+            profile="gemma4-v1",
+        )
+
+    assert captured.value.code == "malformed_arguments"
+
+
+def test_gemma4_optional_call_end_terminator() -> None:
+    text = (
+        "Hi.<|tool_call>call:a{x:1}<tool_call|>"
+        "\n<|tool_call>call:b{y:<|\"|>z<|\"|>}<tool_call|>\n"
+    )
+    output = normalize_tool_output(text, profile="gemma4-v1")
+
+    assert output.remaining_text == "Hi."
+    assert [(call.name, call.arguments_json) for call in output.tool_calls] == [
+        ("a", {"x": 1}),
+        ("b", {"y": "z"}),
+    ]
+
+
+def test_gemma4_text_after_terminator_still_rejected() -> None:
+    with pytest.raises(ToolNormalizationError) as captured:
+        normalize_tool_output(
+            '<|tool_call>call:a{x:1}<tool_call|> trailing prose',
+            profile="gemma4-v1",
+        )
+
+    assert captured.value.code == "text_after_tool_section"
+
+
+def test_lfm25_parses_template_single_quoted_strings() -> None:
+    # The LFM2.5 chat template's format_arg_value macro wraps string
+    # argument values in single quotes (Python-style), not double quotes.
+    text = (
+        "<|tool_call_start|>"
+        "[get_weather(city='Paris', units='celsius', days=2)]"
+        "<|tool_call_end|>"
+    )
+    output = normalize_tool_output(text, profile=NormalizationProfile.LFM25_V1)
+
+    call = output.tool_calls[0]
+    assert call.name == "get_weather"
+    assert call.arguments_json == {"city": "Paris", "units": "celsius", "days": 2}
+    assert _roundtrip_ok(call)
+
+
+def test_lfm25_single_quoted_strings_with_commas_and_mixed_values() -> None:
+    text = (
+        "<|tool_call_start|>[search(q='a, b + c', opts=[1,true], nested={k:'v, v'})]"
+        "<|tool_call_end|>"
+    )
+    output = normalize_tool_output(text, profile="lfm25-v1")
+
+    call = output.tool_calls[0]
+    assert call.name == "search"
+    assert call.arguments_json == {
+        "q": "a, b + c",
+        "opts": [1, True],
+        "nested": {"k": "v, v"},
+    }
+
+
+def test_lfm25_unterminated_single_quote_rejected() -> None:
+    with pytest.raises(ToolNormalizationError) as captured:
+        normalize_tool_output(
+            "<|tool_call_start|>[echo(x='oops)]<|tool_call_end|>",
+            profile="lfm25-v1",
+        )
+
+    assert captured.value.code == "malformed_arguments"
+
+
 def test_lfm25_parses_single_python_style_call() -> None:
     text = (
         "Checking weather."
