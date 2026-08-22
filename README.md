@@ -239,6 +239,37 @@ anything. Keys are never printed, logged, or written to disk. An
 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` environment variable takes precedence
 when set.
 
+### Using your Claude subscription with ppmlx
+
+Onboarded users keep their subscription models. When a harness points all
+traffic at ppmlx, ppmlx transparently tunnels Claude Code subscription
+traffic to Anthropic, so `claude-*` requests still run on your
+subscription through the same ppmlx base URL.
+
+How it works:
+
+- ppmlx proxies ALL Anthropic endpoints Claude Code uses (messages with
+  SSE streaming, complete, telemetry) and forwards headers, body, and
+  response stream byte-faithfully. No fingerprint cloning — headers are
+  forwarded exactly as received from Claude Code.
+- Credentials are live-read from your installed, logged-in Claude Code
+  (`~/.claude`). ppmlx stores nothing; Claude Code credential rotation is
+  picked up automatically.
+- Full request and response content enters the memory pipeline with
+  standard secret redaction, tagged with provenance source
+  `anthropic-subscription`.
+
+Prerequisite: Claude Code must be installed AND logged in.
+
+This feature is OFF by default. Enable it with
+`[dangerous] subscription_passthrough = true` in `~/.ppmlx/config.toml`;
+enabling it prints a terms-of-service warning. Use outside Claude Code is
+blocked by default — the tunnel serves your own Claude Code session.
+
+**Warning:** proxying subscription traffic may breach your provider's
+terms of service, up to account termination. This risk is yours. See
+[ADR 0010](docs/architecture/adr/0010-subscription-passthrough.md).
+
 ### Memory read endpoints
 
 The experimental local memory graph can be read over HTTP with three

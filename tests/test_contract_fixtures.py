@@ -41,6 +41,7 @@ ADR_FILES = [
     "0007-retention-and-redaction.md",
     "0008-compatibility.md",
     "0009-bounded-tool-argument-repair.md",
+    "0010-subscription-passthrough.md",
 ]
 
 

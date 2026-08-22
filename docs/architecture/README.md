@@ -28,6 +28,14 @@ The following accepted decision amends the contract for Phase 4:
 ADR 0009 amends ADR 0003 and clarifies the Agent IR acceptance boundary in ADR 0002.
 A later accepted ADR takes precedence only for the rules that it explicitly amends.
 
+The following accepted decision records the subscription passthrough design:
+
+- [ADR 0010: Subscription Passthrough](adr/0010-subscription-passthrough.md)
+
+ADR 0010 reverses the earlier rule that subscription authentication is out of scope.
+It defines a full transparent tunnel for Claude Code subscription traffic,
+locked behind the `[dangerous]` config gate by default.
+
 The [contract fixture manifest](../../tests/fixtures/contracts/manifest.json) records the exact harness and protocol versions for Phase 1.
 The [Agent IR v1 JSON Schema](schema/agent-ir-v1.schema.json) defines the normalized request and event shapes.
 The [local Agent IR runtime guide](local-agent-runtime.md) defines the Phase 4 implementation boundary and its limits.
