@@ -17,11 +17,13 @@ from .base import (
     ProviderStreamingMode,
     ProviderToolSupportStatus,
 )
+from .anthropic import AnthropicProvider
 from .mlx import MLXProvider
 from .openai import OpenAIProvider
 
 
 __all__ = [
+    "AnthropicProvider",
     "MLXProvider",
     "OpenAIProvider",
     "Provider",
