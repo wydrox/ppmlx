@@ -847,7 +847,18 @@ def _encode_stream(events: Sequence[AgentEvent], *, context: EncodeContext) -> s
         if any(not state["completed"] for state in calls.values()) or terminal.finish_reason != "tool_calls":
             raise _error("invalid_terminal")
     else:
-        raise _error("empty_output")
+        # Reasoning-only or token-limited models may complete without any
+        # visible text or tool calls. That is a valid empty completion, not an
+        # error: emit a role chunk with empty content and finish normally.
+        frames[0] = SSEFrame(
+            event=None,
+            data=_chunk(
+                response_id=response_id,
+                context=context,
+                choice_index=choice_index,
+                delta={"role": "assistant", "content": ""},
+            ),
+        )
 
     frames.append(
         SSEFrame(

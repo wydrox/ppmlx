@@ -335,3 +335,41 @@ def test_encode_rejects_unused_non_json_metadata_and_aggregate_limits() -> None:
                 limits=AdapterLimits(max_sse_stream_bytes=1),
             ),
         )
+
+
+def test_encode_stream_reasoning_only_empty_output_is_valid_completion() -> None:
+    """Reasoning models with tiny max_tokens can finish with no visible output.
+
+    That must encode as a valid empty completion stream, not raise
+    ``empty_output`` (which surfaced as an HTTP 500).
+    """
+    from ppmlx.agent_ir import ResponseCompletedEvent
+
+    events = [
+        ResponseCompletedEvent(
+            type="response.completed",
+            request_id="req_reasoning_only",
+            sequence=0,
+            choice_index=0,
+            output_id="chatcmpl-empty-output",
+            finish_reason="length",
+        )
+    ]
+    sse = OpenAIChatAdapter().encode_stream(
+        events,
+        context=EncodeContext(model="reasoning-model", response_id="chatcmpl-empty-output"),
+    )
+
+    payloads = [
+        json.loads(line.removeprefix("data: "))
+        for line in sse.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    assert sse.endswith("data: [DONE]\n") or "[DONE]" in sse
+    first = payloads[0]["choices"][0]["delta"]
+    assert first["role"] == "assistant"
+    terminal = payloads[-1]
+    assert terminal["choices"][0]["finish_reason"] == "length"
+    assert terminal["choices"][0]["delta"] == {}
+    assert all("content" not in chunk["choices"][0]["delta"] or chunk["choices"][0]["delta"]["content"] in (None, "")
+               for chunk in payloads)
