@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ppmlx.engine import TextEngine
+from ppmlx.local_runtime.deterministic_fixtures import load_fixture_evidence
 from ppmlx.local_runtime.normalization import NormalizationProfile
 from ppmlx.local_runtime.profile_evaluation import load_case_set
 from ppmlx.local_runtime.profile_runner import (
@@ -52,15 +53,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--case-set", type=Path, default=DEFAULT_CASE_SET)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--fixtures-evidence",
+        type=Path,
+        required=True,
+        help=(
+            "Recorded deterministic fixture artifact for this commit "
+            "(tool-profile-fixtures/v1); publication fails closed without it."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--seeds", nargs=3, type=int, default=(17, 29, 43))
-    parser.add_argument(
-        "--deterministic-fixtures-passed",
-        action="store_true",
-        help="Confirm that deterministic parser and correlation fixtures passed for this commit.",
-    )
     return parser
 
 
@@ -72,6 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else ToolArgumentRepairPolicy(args.repair_policy)
     )
     try:
+        fixtures_evidence = load_fixture_evidence(args.fixtures_evidence)
         case_set = load_case_set(args.case_set)
         settings = GenerationSettings(
             temperature=args.temperature,
@@ -94,7 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             environment=detect_apple_environment(),
             settings=settings,
             generate=TextEngineProfileGenerator(TextEngine(max_loaded=1)),
-            deterministic_fixtures_passed=args.deterministic_fixtures_passed,
+            fixtures_evidence=fixtures_evidence,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(

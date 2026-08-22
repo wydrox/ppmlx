@@ -11,6 +11,7 @@ from ppmlx.agent_ir import (
     ToolCallCompletedEvent,
 )
 from ppmlx.local_runtime.backend import LocalGeneration
+from ppmlx.local_runtime.normalization import NormalizationProfile
 from ppmlx.protocols import DecodeContext, openai_chat_adapter
 from ppmlx.providers import (
     MLXProvider,
@@ -91,9 +92,11 @@ def test_mlx_provider_satisfies_interface_and_lists_stable_provider_models() -> 
     assert qwen.data_path is ProviderDataPath.LOCAL
     assert qwen.credential_types == (ProviderCredentialType.NONE,)
     assert qwen.streaming is ProviderStreamingMode.BUFFERED
-    assert qwen.tools is True
-    assert qwen.parallel_tool_calls is True
-    assert qwen.tool_support_status is ProviderToolSupportStatus.NOT_EVALUATED
+    # No reviewed evidence covers mlx-community/Qwen3, so a family-name match
+    # does not create a tool capability claim.
+    assert qwen.tools is False
+    assert qwen.parallel_tool_calls is False
+    assert qwen.tool_support_status is ProviderToolSupportStatus.DISABLED
     llama = models[0].capabilities
     assert llama.tools is False
     assert llama.tool_support_status is ProviderToolSupportStatus.DISABLED
@@ -178,6 +181,7 @@ def test_mlx_provider_preserves_tool_arguments_and_source_call_identity() -> Non
         generate=lambda request: LocalGeneration(output, 11, 5),
         model_lister=_rows,
         model_resolver=lambda model: model,
+        profile_selector=lambda _model: NormalizationProfile.GROK_OPENAI_CHAT_V1,
         call_id_factory=lambda: "public_call",
     )
     invocation = ProviderInvocation(

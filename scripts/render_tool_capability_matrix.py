@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from ppmlx.local_runtime.deterministic_fixtures import load_fixture_evidence
 from ppmlx.local_runtime.profile_publication import (
     ProfilePublicationError,
     load_reports,
@@ -26,6 +27,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
+        "--fixtures-evidence",
+        type=Path,
+        required=True,
+        help=(
+            "Recorded deterministic fixture artifact (tool-profile-fixtures/v1) "
+            "that every published report must match."
+        ),
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="Fail when the checked-in matrix differs from generated output.",
@@ -36,9 +46,14 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        rendered = render_capability_matrix(load_reports(args.evidence))
-    except ProfilePublicationError as error:
-        print(f"Capability matrix generation failed: {error.code}", file=sys.stderr)
+        fixtures_evidence = load_fixture_evidence(args.fixtures_evidence)
+        rendered = render_capability_matrix(
+            load_reports(args.evidence, fixtures_evidence=fixtures_evidence),
+            fixtures_evidence=fixtures_evidence,
+        )
+    except (ProfilePublicationError, ValueError) as error:
+        code = getattr(error, "code", "matrix_generation_failed")
+        print(f"Capability matrix generation failed: {code}", file=sys.stderr)
         return 2
 
     if args.check:
