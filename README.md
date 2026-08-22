@@ -235,10 +235,36 @@ when set.
 The experimental local memory graph can be read over HTTP with three
 endpoints: `POST /v1/memory/read/handshake`, `POST /v1/memory/read/search`,
 and `POST /v1/memory/read/stats`. They are loopback-only, like the other
-strict local paths. A client first calls `/handshake` to get a short-lived
-read grant, then uses that grant on `/search` and `/stats`. Every response
-carries disclosure labels, and a feedback-loop guard keeps read results from
-re-entering stored memory.
+strict local paths. A client first calls `/handshake` with a grant credential
+to get a short-lived (15-minute) read session, then uses that session on
+`/search` and `/stats`. Every response carries disclosure labels, and a
+feedback-loop guard keeps read results from re-entering stored memory.
+
+**Creating a grant.** Use the CLI to issue a grant; the bearer credential is
+printed once and never stored or logged:
+
+```bash
+ppmlx memory grant create                       # global scope, 30-day TTL
+ppmlx memory grant create --project myproj --ttl-hours 168 --remote-capable
+ppmlx memory grant list                         # never shows credentials
+ppmlx memory grant revoke mrg_...               # kills live sessions too
+```
+
+Pass the printed `mrc_...` token as the credential on `/handshake`.
+
+**Required tool names per endpoint.** Each grant lists the tools it may use;
+the server rejects calls with `403 tool_denied` otherwise:
+
+| Endpoint | Required `allowed_tools` entry |
+|---|---|
+| `/v1/memory/read/search` | `memory_search` |
+| `/v1/memory/read/stats` | `memory_stats` |
+
+The full set of valid tool names is: `memory_search`, `memory_stats`
+(both served in this slice), plus reserved `memory_get_context` and
+`memory_graph_walk`. The `/context` and `/graph-walk` HTTP endpoints from
+ADR 0006 are **not implemented yet** — they are planned for a future slice;
+only `/handshake`, `/search`, and `/stats` are routed today.
 
 The first release supports named output profiles for Grok, Kimi K2, DeepSeek V3, and Qwen models. ppmlx rejects an unknown profile, an unsupported tool schema, an invalid result link, or a request that can lose tool data. In strict mode, tool requests cannot use the legacy path. Responses WebSocket tool requests are rejected until that transport uses the same Agent IR runtime.
 

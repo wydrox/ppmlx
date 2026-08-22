@@ -166,7 +166,7 @@ class MemoryReadService:
         instance_id: str,
         allowed_scopes: list[dict[str, str]],
         allowed_tools: list[str],
-        lifetime_days: int = 30,
+        lifetime_days: float = 30,
         remote_capable: bool = False,
     ) -> tuple[Grant, str]:
         """Create a grant; returns (grant, raw_credential). The raw credential

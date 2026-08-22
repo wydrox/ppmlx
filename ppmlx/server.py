@@ -611,6 +611,16 @@ async def _snapshot_loop(interval_seconds: int) -> None:
             pass
 
 
+def _sanitized_cause(exc: BaseException) -> str:
+    """One-line sanitized exception cause for API error messages.
+
+    Includes the exception type and message but strips newlines and caps the
+    length so internal stack details never leak multi-line into responses.
+    """
+    text = f"{type(exc).__name__}: {exc}".replace("\n", " ").strip()
+    return (text[:200] + "...") if len(text) > 200 else text
+
+
 def _route_engine(repo_id: str, has_images: bool) -> str:
     """Determine which engine to use: 'text', 'vision', or 'embed'."""
     try:
@@ -1740,9 +1750,9 @@ def _stream_chat(
                 if first_token_ts is None:
                     first_token_ts = time.time()
                 yield _make_chunk_sse(_delta("content", text))
-        except Exception:
+        except Exception as exc:
             log.exception("Chat completion stream error")
-            err = {"error": {"message": "Model generation failed", "type": "server_error"}}
+            err = {"error": {"message": f"Model generation failed ({_sanitized_cause(exc)})", "type": "server_error"}}
             yield f"data: {json.dumps(err)}\n\n"
 
         # Parse tool calls if tools were provided
@@ -1881,7 +1891,7 @@ async def _nonstream_chat(
             error_message=str(exc),
         )
         log.exception("Chat completion generation failed")
-        raise HTTPException(status_code=503, detail="Model generation failed")
+        raise HTTPException(status_code=503, detail=f"Model generation failed ({_sanitized_cause(exc)})")
 
     total_dur = (time.time() - start_ts) * 1000
 

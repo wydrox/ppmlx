@@ -23,8 +23,10 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 memory_app = typer.Typer(help="Inspect and manage the local temporal memory graph")
+grant_app = typer.Typer(help="Manage memory-read/v1 grants (issue, list, revoke)")
 trace_app = typer.Typer(help="Export local traces for compact replay/evaluation")
 app.add_typer(memory_app, name="memory")
+memory_app.add_typer(grant_app, name="grant")
 app.add_typer(trace_app, name="trace")
 console = Console()
 
@@ -2023,6 +2025,122 @@ def memory_walk_cmd(
     from ppmlx.memory_store import get_memory_store
     result = get_memory_store().graph_walk(entity_name, max_hops=max_hops, include_inferred=include_inferred)
     typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+_GRANT_LIST_QUERY = """
+SELECT grant_id, harness_name, harness_version, instance_id,
+       allowed_tools_json, allowed_scopes_json, issued_at, expires_at,
+       revoked_at, remote_capable
+FROM memory_grants ORDER BY issued_at
+"""
+
+
+def _load_grant_rows() -> list[dict]:
+    """Read all grants from the grants DB (read-only; no credentials)."""
+    import sqlite3
+
+    from ppmlx.memory_read import _default_grants_db_path
+
+    path = _default_grants_db_path()
+    if not path.exists():
+        return []
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(_GRANT_LIST_QUERY).fetchall()
+    return [dict(r) for r in rows]
+
+
+@grant_app.command(name="create")
+def memory_grant_create_cmd(
+    project: Optional[str] = typer.Option(None, "--project", help="Project id to scope the grant to (defaults to global scope)."),
+    remote_capable: bool = typer.Option(False, "--remote-capable", help="Allow the grant to be used for remote-capable reads."),
+    ttl_hours: int = typer.Option(24 * 30, "--ttl-hours", min=1, help="Grant lifetime in hours."),
+    tools: Optional[list[str]] = typer.Option(None, "--tool", help="Allowed tool (repeatable). Defaults to memory_search + memory_stats."),
+):
+    """Create a memory-read grant and print its bearer credential ONCE.
+
+    The raw credential is never stored or logged; only a SHA-256 verifier is
+    persisted. If you lose it, revoke this grant and create a new one.
+    """
+    import json as _json
+
+    from ppmlx.memory_read import MemoryReadError, get_service
+
+    allowed_tools = tools or ["memory_search", "memory_stats"]
+    if project:
+        scopes = [{"type": "project", "id": project}]
+    else:
+        scopes = [{"type": "global", "id": "global"}]
+    try:
+        grant, credential = get_service().create_grant(
+            harness_name="ppmlx-cli",
+            harness_version="1",
+            instance_id="local",
+            allowed_scopes=scopes,
+            allowed_tools=allowed_tools,
+            lifetime_days=max(ttl_hours / 24.0, 1 / 24.0),
+            remote_capable=remote_capable,
+        )
+    except MemoryReadError as exc:
+        typer.echo(f"error: could not create grant ({exc.code})", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Grant created: {grant.grant_id}")
+    typer.echo(f"  scopes: {_json.dumps(grant.allowed_scopes)}")
+    typer.echo(f"  tools:  {', '.join(grant.allowed_tools)}")
+    typer.echo(f"  expires_at: {grant.expires_at}")
+    typer.echo("")
+    typer.echo("=== Bearer credential (shown ONLY now — copy it immediately) ===")
+    typer.echo(credential)
+    typer.echo("=================================================================")
+
+
+@grant_app.command(name="list")
+def memory_grant_list_cmd(
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+):
+    """List memory-read grants (credentials are never displayed)."""
+    import json as _json
+
+    rows = _load_grant_rows()
+    if json_output:
+        for row in rows:
+            row["allowed_tools"] = _json.loads(row.pop("allowed_tools_json"))
+            row["allowed_scopes"] = _json.loads(row.pop("allowed_scopes_json"))
+            row["remote_capable"] = bool(row["remote_capable"])
+        typer.echo(_json.dumps(rows, indent=2))
+        return
+    if not rows:
+        typer.echo("No grants found.")
+        return
+    for row in rows:
+        status = "revoked" if row["revoked_at"] else "active"
+        expired = ""
+        try:
+            from ppmlx.memory_read import _parse_rfc3339, _utcnow
+
+            if _utcnow() >= _parse_rfc3339(row["expires_at"]) and not row["revoked_at"]:
+                expired = " (expired)"
+        except Exception:
+            pass
+        typer.echo(
+            f"{row['grant_id']}  {status}{expired}  "
+            f"harness={row['harness_name']}  expires={row['expires_at']}  "
+            f"tools={row['allowed_tools_json']}"
+        )
+
+
+@grant_app.command(name="revoke")
+def memory_grant_revoke_cmd(
+    grant_id: str = typer.Argument(..., help="Grant id to revoke (mrg_...)"),
+):
+    """Revoke a memory-read grant; live sessions are killed immediately."""
+    from ppmlx.memory_read import get_service
+
+    if get_service().revoke_grant(grant_id):
+        typer.echo(f"Revoked: {grant_id}")
+    else:
+        typer.echo(f"Grant not found (or already revoked): {grant_id}", err=True)
+        raise typer.Exit(1)
 
 
 @memory_app.command(name="config")
