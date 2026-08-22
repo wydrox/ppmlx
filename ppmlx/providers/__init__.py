@@ -18,10 +18,12 @@ from .base import (
     ProviderToolSupportStatus,
 )
 from .mlx import MLXProvider
+from .openai import OpenAIProvider
 
 
 __all__ = [
     "MLXProvider",
+    "OpenAIProvider",
     "Provider",
     "ProviderCallReference",
     "ProviderCapabilities",
