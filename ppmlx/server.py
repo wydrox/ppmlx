@@ -18,6 +18,7 @@ if not log.handlers:
     log.addHandler(_h)
 
 from starlette.responses import Response as StarletteResponse
+from starlette.responses import StreamingResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
@@ -1483,8 +1484,8 @@ async def _anthropic_tunnel(request: Request, path: str):
             status_code=tunnel.status_code,
             media_type=tunnel.headers.get("content-type", "application/json"),
         )
-    return StarletteResponse(
-        content=_stream(),
+    return StreamingResponse(
+        _stream(),
         status_code=tunnel.status_code,
         media_type=tunnel.headers.get("content-type", "application/json"),
     )
