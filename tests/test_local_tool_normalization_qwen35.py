@@ -130,3 +130,66 @@ def test_qwen35_does_not_guess_calls_from_prose() -> None:
 
     assert output.tool_calls == ()
     assert output.remaining_text == "ordinary answer text"
+
+
+def _typed_call(arguments: dict[str, object]):
+    def _render(value: object) -> str:
+        # Non-strings are rendered as JSON literals; strings are emitted raw
+        # so we can also exercise values that must stay plain text.
+        return value if isinstance(value, str) else json.dumps(value)
+
+    lines = "".join(
+        f"<parameter={key}>\n{_render(value)}\n</parameter>\n"
+        for key, value in arguments.items()
+    )
+    text = f"<tool_call>\n<function=do_thing>\n{lines}</function>\n</tool_call>"
+    output = normalize_tool_output(text, profile=NormalizationProfile.QWEN35_TOOLCALL_V1)
+    assert len(output.tool_calls) == 1
+    return output.tool_calls[0]
+
+
+def test_qwen35_type_inference_kept_strings() -> None:
+    call = _typed_call({"city": "Paris", "unit": "celsius", "note": "[a, b]"})
+    assert call.arguments_json == {"city": "Paris", "unit": "celsius", "note": "[a, b]"}
+    assert all(isinstance(v, str) for v in call.arguments_json.values())
+
+
+def test_qwen35_type_inference_scalars() -> None:
+    call = _typed_call(
+        {"line": 7, "rate": 0.025, "flag": True, "missing": None}
+    )
+    args = call.arguments_json
+    assert args == {"line": 7, "rate": 0.025, "flag": True, "missing": None}
+    assert type(args["line"]) is int
+    assert type(args["rate"]) is float
+    assert type(args["flag"]) is bool
+    assert args["missing"] is None
+
+
+def test_qwen35_type_inference_containers() -> None:
+    call = _typed_call(
+        {
+            "tags": ["bug", "phase-4"],
+            "config": {"extensions": ["py"]},
+        }
+    )
+    assert call.arguments_json == {
+        "tags": ["bug", "phase-4"],
+        "config": {"extensions": ["py"]},
+    }
+
+
+def test_qwen35_type_inference_invalid_json_object_text_stays_string() -> None:
+    body = (
+        "<tool_call>\n<function=f>\n<parameter=snippet>\n"
+        "{not json\nsecond line}\n</parameter>\n</function>\n</tool_call>"
+    )
+    output = normalize_tool_output(body, profile=NormalizationProfile.QWEN35_TOOLCALL_V1)
+    assert output.tool_calls[0].arguments_json == {
+        "snippet": "{not json\nsecond line}"
+    }
+
+
+def test_qwen35_none_literal_is_not_null() -> None:
+    call = _typed_call({"py_value": "None"})
+    assert call.arguments_json == {"py_value": "None"}

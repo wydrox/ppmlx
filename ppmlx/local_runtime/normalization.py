@@ -1063,8 +1063,43 @@ def _parse_lfm25(
 _QWEN35_NAME_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_$.]*$")
 
 
-def _qwen35_parameters(body: str, *, profile: str) -> dict[str, object]:
-    """Parse ``<parameter=key>value</parameter>`` blocks from one function body."""
+def _qwen35_infer_value(value: str, *, profile: str, limits: ToolOutputLimits) -> object:
+    """Infer a JSON type for one ``<parameter>`` string value (ADR 0009).
+
+    If the value parses as valid JSON and is NOT a plain JSON string, the
+    decoded typed value (int/float/bool/null/list/dict) is used. Otherwise
+    the raw string is kept verbatim: tool schemas commonly declare string
+    parameters whose content is arbitrary text, so no data is ever lost.
+    """
+
+    try:
+        decoded, end = _JSON_DECODER.raw_decode(value)
+        if value[end:].strip():
+            return value
+        if isinstance(decoded, str):
+            return value
+        _check_json_limits(decoded, profile=profile, limits=limits)
+        return decoded
+    except ToolNormalizationError:
+        raise
+    except _DuplicateJsonKey:
+        _raise(profile, "duplicate_json_key")
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
+        return value
+
+
+def _qwen35_parameters(
+    body: str,
+    *,
+    profile: str,
+    limits: ToolOutputLimits,
+) -> dict[str, object]:
+    """Parse ``<parameter=key>value</parameter>`` blocks from one function body.
+
+    Each value undergoes documented type inference (see
+    :func:`_qwen35_infer_value`): JSON numbers, booleans, nulls, arrays and
+    objects are decoded to their native types; anything else stays a string.
+    """
 
     arguments: dict[str, object] = {}
     rest = body
@@ -1092,7 +1127,7 @@ def _qwen35_parameters(body: str, *, profile: str) -> dict[str, object]:
             value = value[:-1]
         if key in arguments:
             raise _DuplicateJsonKey
-        arguments[key] = value
+        arguments[key] = _qwen35_infer_value(value, profile=profile, limits=limits)
         rest = after_key[end_position + len(_QWEN35_PARAMETER_END) :]
     return arguments
 
@@ -1133,7 +1168,7 @@ def _parse_qwen35(
         if _QWEN35_FUNCTION_START in body:
             _raise(profile, "nested_tool_call")
         try:
-            arguments = _qwen35_parameters(body, profile=profile)
+            arguments = _qwen35_parameters(body, profile=profile, limits=limits)
         except _DuplicateJsonKey:
             _raise(profile, "duplicate_json_key")
         calls.append(
