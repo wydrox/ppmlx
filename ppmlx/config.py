@@ -23,6 +23,7 @@ class ServerConfig:
     max_tools_tokens: int = 12000
     agent_runtime: str = "legacy"  # legacy | agent_ir
     continuation_ttl_seconds: int = 86400
+    route_policy: str = ""  # path to ADR 0005 route policy TOML
 
 
 @dataclass

@@ -233,6 +233,217 @@ async def _strict_agent_runtime_response(
     )
 
 
+_remote_routing_service = None
+_remote_routing_loaded = False
+
+
+def _get_remote_routing_service():
+    """Build the remote RoutingService from the configured route policy.
+
+    Returns None when no route policy is configured (local-only default).
+    """
+    global _remote_routing_service, _remote_routing_loaded
+    if _remote_routing_loaded:
+        return _remote_routing_service
+    _remote_routing_loaded = True
+    import os
+
+    policy_path = os.environ.get("PPMLX_ROUTE_POLICY") or ""
+    srv = _load_server_config()
+    if not policy_path and srv is not None:
+        policy_path = getattr(srv, "route_policy", "") or ""
+    if not policy_path:
+        return None
+    try:
+        from ppmlx.router import load_policy
+        from ppmlx.routing_service import RoutingService, prime_provider_credentials
+
+        policy = load_policy(policy_path)
+        providers = _remote_providers_for_policy(policy)
+        prime_provider_credentials()
+        _remote_routing_service = RoutingService(policy, providers)
+    except Exception as error:
+        log.warning("route policy could not be loaded: %s", type(error).__name__)
+        return None
+    return _remote_routing_service
+
+
+def _remote_providers_for_policy(policy):
+    """Instantiate remote provider adapters named by the route policy."""
+    from ppmlx.providers.anthropic import AnthropicProvider
+    from ppmlx.providers.openai import OpenAIProvider
+
+    providers = {}
+    for entry in policy.entries.values():
+        for candidate in entry.candidates:
+            if candidate.provider_id == "openai" and "openai" not in providers:
+                providers["openai"] = OpenAIProvider()
+            elif (
+                candidate.provider_id == "anthropic"
+                and "anthropic" not in providers
+            ):
+                providers["anthropic"] = AnthropicProvider()
+    return providers
+
+
+def _remote_required_capabilities(body: dict):
+    from ppmlx.router import RequiredCapabilities
+
+    return RequiredCapabilities(
+        text=True,
+        images=_has_images(body.get("messages", []) or []),
+        tools=bool(body.get("tools")),
+        parallel_tool_calls=bool(body.get("tools")),
+        structured_output=False,
+    )
+
+
+def _events_to_chat_completion(events, *, model: str, response_id: str, created: int):
+    """Convert canonical Agent IR events to one OpenAI chat.completion body."""
+    from ppmlx.agent_ir import (
+        ContentCompletedEvent,
+        ContentDeltaEvent,
+        ResponseCompletedEvent,
+        ToolCallCompletedEvent,
+    )
+
+    text_parts: list[str] = []
+    tool_calls: list[dict] = []
+    finish_reason = "stop"
+    usage = None
+    for event in events:
+        if isinstance(event, ContentDeltaEvent):
+            text_parts.append(event.delta)
+        elif isinstance(event, ContentCompletedEvent):
+            block = event.content
+            text = getattr(block, "text", None)
+            if isinstance(text, str) and text and not text_parts:
+                text_parts.append(text)
+        elif isinstance(event, ToolCallCompletedEvent):
+            tool_calls.append(
+                {
+                    "id": str(event.call_id),
+                    "type": "function",
+                    "function": {
+                        "name": str(event.name),
+                        "arguments": event.arguments_raw,
+                    },
+                }
+            )
+        elif isinstance(event, ResponseCompletedEvent):
+            finish_reason = "tool_calls" if tool_calls else str(event.finish_reason)
+            if event.usage is not None:
+                raw = event.usage.model_dump(mode="json", exclude_unset=True)
+                input_tokens = raw.get("input_tokens", 0)
+                output_tokens = raw.get("output_tokens", 0)
+                usage = {
+                    "prompt_tokens": input_tokens,
+                    "completion_tokens": output_tokens,
+                    "total_tokens": raw.get(
+                        "total_tokens", input_tokens + output_tokens
+                    ),
+                }
+    message: dict = {"role": "assistant", "content": "".join(text_parts)}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    payload: dict = {
+        "id": response_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason,
+                "logprobs": None,
+            }
+        ],
+    }
+    if usage is not None:
+        payload["usage"] = usage
+    return payload
+
+
+def _remote_route_chat_response(request: Request, body: object):
+    """Route one chat completion through the remote routing service.
+
+    Returns None when the model is not a configured remote alias, leaving the
+    local engine as the default path. Never raises: failures become typed
+    JSON error responses.
+    """
+    if not isinstance(body, dict):
+        return None
+    service = _get_remote_routing_service()
+    if service is None:
+        return None
+    model_name = body.get("model", "")
+    if type(model_name) is not str or not service.is_remote_model(model_name):
+        return None
+
+    from ppmlx.protocols.base import DecodeContext, EncodeContext
+    from ppmlx.protocols.openai_chat import OpenAIChatAdapter
+    from ppmlx.routing_service import RoutingServiceError
+    from ppmlx.router import RouteInput
+
+    request_id = "req_remote_" + uuid.uuid4().hex[:12]
+    created = int(time.time())
+    try:
+        decoded = OpenAIChatAdapter().decode_request(
+            body,
+            context=DecodeContext(request_id=request_id, kind="initial"),
+        )
+    except Exception:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "remote_route_invalid_request"}},
+        )
+    route_input = RouteInput(
+        public_model=model_name,
+        harness="openai-chat",
+        harness_version=__version__,
+        protocol="openai-chat",
+        required=_remote_required_capabilities(body),
+        policy_version=service.policy.version,
+        health_snapshot_id="auto",
+        request_id=request_id,
+        session_id=f"sess-{request.client.host if request.client else 'unknown'}",
+    )
+    try:
+        result = service.execute(route_input, decoded.request)
+    except RoutingServiceError as error:
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"error": {"code": error.code}},
+        )
+    except Exception:
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"code": "remote_route_error"}},
+        )
+    if body.get("stream") is True:
+        adapter = OpenAIChatAdapter()
+        sse = adapter.encode_stream(
+            result.events,
+            context=EncodeContext(
+                model=model_name,
+                created_at=created,
+                response_id=request_id,
+            ),
+        )
+        return StarletteResponse(
+            content=sse,
+            media_type="text/event-stream",
+        )
+    completion = _events_to_chat_completion(
+        result.events,
+        model=model_name,
+        response_id=request_id,
+        created=created,
+    )
+    return JSONResponse(content=completion)
+
+
 class _RequestBodyTooLarge(Exception):
     pass
 
@@ -1108,6 +1319,10 @@ async def chat_completions(request: Request):
     if strict_response is not None:
         return strict_response
     from ppmlx.schema import ChatCompletionRequest as _CCReq; _CCReq.model_validate(body)
+
+    remote_response = _remote_route_chat_response(request, body)
+    if remote_response is not None:
+        return remote_response
 
     model_name = body.get("model", "")
     raw_messages = [dict(msg) for msg in body.get("messages", [])]

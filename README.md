@@ -166,6 +166,53 @@ continuation_ttl_seconds = 86400
 
 You can also set `PPMLX_AGENT_RUNTIME=agent_ir`. The strict path applies only to requests that use `stream=true` and provide tools. It supports the Chat Completions, Responses HTTP, and Anthropic Messages paths. It buffers one local model turn, validates it, and then sends SSE data. It does not provide live token streaming for a tool turn.
 
+### Remote routing (ADR 0005)
+
+Remote providers (OpenAI, Anthropic) are opt-in via a versioned route policy
+TOML file. Without one, every request stays on the local engine.
+
+```toml
+# ~/.ppmlx/routes.toml
+[routes]
+version = "1"
+default_model = ""                        # optional local default
+
+[routes.aliases]
+gpt-remote = ["openai", "gpt-4o-mini"]    # public alias -> provider/model
+
+[[routes.entries]]
+key = "openai-chat:gpt-remote"            # <harness>:<public model>
+candidates = [
+  { provider = "openai",     model = "gpt-4o-mini" },
+  { provider = "anthropic",  model = "claude-3-5-haiku" },
+]
+fallback_errors = ["connection", "timeout"]  # categories eligible for fallback
+```
+
+Enable it on the server:
+
+```toml
+[server]
+route_policy = "/Users/me/.ppmlx/routes.toml"
+```
+
+or with an environment variable: `PPMLX_ROUTE_POLICY=~/.ppmlx/routes.toml ppmlx serve`.
+
+Behavior:
+
+- Requests whose `model` matches a route alias are routed to the first healthy,
+  capability-sufficient candidate; everything else uses the local engine.
+- Capabilities come from each provider adapter's real `capabilities()`; requests
+  needing unsupported capabilities skip that candidate (`missing_capability` is
+  never a fallback trigger).
+- Fallback follows the forbidden-error matrix: only connection/timeout/
+  unavailable/server errors may fall back to the next candidate, and only
+  before the first output event. Once output starts, the route is pinned —
+  no provider switch mid-response.
+- Credentials resolve from the OS keyring via `ppmlx auth login <provider>`
+  (env vars still take precedence when set).
+
+
 The first release supports named output profiles for Grok, Kimi K2, DeepSeek V3, and Qwen models. ppmlx rejects an unknown profile, an unsupported tool schema, an invalid result link, or a request that can lose tool data. In strict mode, tool requests cannot use the legacy path. Responses WebSocket tool requests are rejected until that transport uses the same Agent IR runtime.
 
 For this opt-in release, strict tool traffic must come from the loopback listener. A reverse proxy or a LAN client cannot use this path yet. See the [local Agent IR runtime guide](docs/architecture/local-agent-runtime.md) for the full boundary.
