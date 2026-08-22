@@ -176,7 +176,8 @@ TOML file. Without one, every request stays on the local engine.
 # ~/.ppmlx/routes.toml
 [routes]
 version = "1"
-default_model = ""                        # optional local default
+# optional local default; must be a full "provider/model" id when set
+default_model = "mlx/Qwen3.5-4B-4bit"
 
 [routes.aliases]
 gpt-remote = ["openai", "gpt-4o-mini"]    # public alias -> provider/model
@@ -185,7 +186,7 @@ gpt-remote = ["openai", "gpt-4o-mini"]    # public alias -> provider/model
 key = "openai-chat:gpt-remote"            # <harness>:<public model>
 candidates = [
   { provider = "openai",     model = "gpt-4o-mini" },
-  { provider = "anthropic",  model = "claude-3-5-haiku" },
+  { provider = "anthropic",  model = "claude-3-5-haiku", provider_kind = "anthropic" },
 ]
 fallback_errors = ["connection", "timeout"]  # categories eligible for fallback
 ```
@@ -212,6 +213,14 @@ Behavior:
   no provider switch mid-response.
 - Credentials resolve from the OS keyring via `ppmlx auth add <provider>`
   (env vars still take precedence when set).
+- Any OpenAI- or Anthropic-compatible gateway works: each candidate accepts an
+  optional `base_url` and `provider_kind` (`"openai"` by default, or
+  `"anthropic"`). The provider name is arbitrary — e.g.
+  `{ provider = "openrouter", model = "anthropic/claude-3.5-haiku",
+  base_url = "https://openrouter.ai/api/v1" }` routes through OpenRouter and
+  reads the `OPENROUTER_API_KEY` environment variable (or a keyring secret
+  stored via `ppmlx auth add openrouter`). An unknown `provider_kind` fails
+  policy validation loudly at startup instead of falling back to local.
 
 ### Provider authentication
 

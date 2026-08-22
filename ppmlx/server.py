@@ -235,23 +235,34 @@ async def _strict_agent_runtime_response(
 
 _remote_routing_service = None
 _remote_routing_loaded = False
+_remote_policy_failure: tuple[str, str] | None = None
 
 
-def _get_remote_routing_service():
-    """Build the remote RoutingService from the configured route policy.
-
-    Returns None when no route policy is configured (local-only default).
-    """
-    global _remote_routing_service, _remote_routing_loaded
-    if _remote_routing_loaded:
-        return _remote_routing_service
-    _remote_routing_loaded = True
+def _route_policy_path() -> str:
+    """Resolve the configured route-policy file path, if any."""
     import os
 
     policy_path = os.environ.get("PPMLX_ROUTE_POLICY") or ""
     srv = _load_server_config()
     if not policy_path and srv is not None:
         policy_path = getattr(srv, "route_policy", "") or ""
+    return policy_path
+
+
+def _get_remote_routing_service():
+    """Build the remote RoutingService from the configured route policy.
+
+    Returns None when no route policy is configured (local-only default).
+    When a policy IS configured but fails to load, the failure is recorded
+    loudly (``_remote_policy_failure``) and alias requests are refused with
+    an explicit error instead of silently falling back to the local engine.
+    """
+    global _remote_routing_service, _remote_routing_loaded, _remote_policy_failure
+    if _remote_routing_loaded:
+        return _remote_routing_service
+    _remote_routing_loaded = True
+
+    policy_path = _route_policy_path()
     if not policy_path:
         return None
     try:
@@ -260,29 +271,65 @@ def _get_remote_routing_service():
 
         policy = load_policy(policy_path)
         providers = _remote_providers_for_policy(policy)
-        prime_provider_credentials()
+        prime_provider_credentials(
+            tuple(
+                candidate.provider_id
+                for entry in policy.entries.values()
+                for candidate in entry.candidates
+                if candidate.provider_id not in ("mlx", "local")
+            )
+        )
         _remote_routing_service = RoutingService(policy, providers)
     except Exception as error:
-        log.warning("route policy could not be loaded: %s", type(error).__name__)
+        reason = f"{type(error).__name__}: {error}"
+        _remote_policy_failure = (policy_path, reason)
+        log.error(
+            "route policy %r could not be loaded; remote routing is DISABLED: %s",
+            policy_path,
+            reason,
+        )
         return None
     return _remote_routing_service
 
 
+def _env_key_for(provider_id: str) -> str:
+    defaults = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+    return defaults.get(provider_id) or f"{provider_id.upper()}_API_KEY"
+
+
 def _remote_providers_for_policy(policy):
-    """Instantiate remote provider adapters named by the route policy."""
+    """Instantiate one provider adapter per distinct route-policy candidate.
+
+    Candidates may carry an optional ``base_url`` (any OpenAI- or
+    Anthropic-compatible gateway) and ``provider_kind`` (openai|anthropic,
+    default openai). The provider name in the policy becomes the registry
+    key, so e.g. ``openrouter`` routes through the OpenAI adapter pointed at
+    https://openrouter.ai/api/v1 and reads ``OPENROUTER_API_KEY``.
+    """
     from ppmlx.providers.anthropic import AnthropicProvider
     from ppmlx.providers.openai import OpenAIProvider
 
     providers = {}
     for entry in policy.entries.values():
         for candidate in entry.candidates:
-            if candidate.provider_id == "openai" and "openai" not in providers:
-                providers["openai"] = OpenAIProvider()
-            elif (
-                candidate.provider_id == "anthropic"
-                and "anthropic" not in providers
-            ):
-                providers["anthropic"] = AnthropicProvider()
+            if candidate.provider_id in ("mlx", "local"):
+                continue
+            if candidate.provider_id in providers:
+                continue
+            env_key = _env_key_for(candidate.provider_id)
+            if candidate.provider_kind == "anthropic":
+                providers[candidate.provider_id] = AnthropicProvider(
+                    base_url=candidate.base_url
+                    or "https://api.anthropic.com/v1",
+                    env_key=env_key,
+                    provider_id=candidate.provider_id,
+                )
+            else:
+                providers[candidate.provider_id] = OpenAIProvider(
+                    base_url=candidate.base_url or "https://api.openai.com/v1",
+                    env_key=env_key,
+                    provider_id=candidate.provider_id,
+                )
     return providers
 
 
@@ -374,6 +421,21 @@ def _remote_route_chat_response(request: Request, body: object):
     """
     if not isinstance(body, dict):
         return None
+    _get_remote_routing_service()
+    if _remote_policy_failure is not None:
+        policy_path, reason = _remote_policy_failure
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "code": "route_policy_unavailable",
+                    "message": (
+                        f"Route policy {policy_path!r} could not be loaded "
+                        f"({reason}); remote routing is disabled."
+                    ),
+                }
+            },
+        )
     service = _get_remote_routing_service()
     if service is None:
         return None
@@ -442,6 +504,14 @@ def _remote_route_chat_response(request: Request, body: object):
         created=created,
     )
     return JSONResponse(content=completion)
+
+
+def _sanitized_generation_error(exc: BaseException) -> str:
+    """Short, secret-free cause string for generation-failure responses."""
+    text = " ".join(str(exc).split())
+    if len(text) > 200:
+        text = text[:197] + "..."
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 class _RequestBodyTooLarge(Exception):
@@ -519,6 +589,10 @@ async def lifespan(app: FastAPI):
         interval = 60
 
     snapshot_task = asyncio.create_task(_snapshot_loop(interval))
+
+    # Fail loudly at startup when a configured route policy is broken.
+    if _route_policy_path():
+        _get_remote_routing_service()
 
     yield
 
@@ -610,15 +684,6 @@ async def _snapshot_loop(interval_seconds: int) -> None:
         except Exception:
             pass
 
-
-def _sanitized_cause(exc: BaseException) -> str:
-    """One-line sanitized exception cause for API error messages.
-
-    Includes the exception type and message but strips newlines and caps the
-    length so internal stack details never leak multi-line into responses.
-    """
-    text = f"{type(exc).__name__}: {exc}".replace("\n", " ").strip()
-    return (text[:200] + "...") if len(text) > 200 else text
 
 
 def _route_engine(repo_id: str, has_images: bool) -> str:
@@ -1752,7 +1817,8 @@ def _stream_chat(
                 yield _make_chunk_sse(_delta("content", text))
         except Exception as exc:
             log.exception("Chat completion stream error")
-            err = {"error": {"message": f"Model generation failed ({_sanitized_cause(exc)})", "type": "server_error"}}
+            _cause = _sanitized_generation_error(exc)
+            err = {"error": {"message": f"Model generation failed ({_cause})", "type": "server_error"}}
             yield f"data: {json.dumps(err)}\n\n"
 
         # Parse tool calls if tools were provided
@@ -1891,7 +1957,7 @@ async def _nonstream_chat(
             error_message=str(exc),
         )
         log.exception("Chat completion generation failed")
-        raise HTTPException(status_code=503, detail=f"Model generation failed ({_sanitized_cause(exc)})")
+        raise HTTPException(status_code=503, detail=f"Model generation failed ({_sanitized_generation_error(exc)})")
 
     total_dur = (time.time() - start_ts) * 1000
 
@@ -2005,9 +2071,9 @@ async def completions(request: Request):
             temperature=0.7 if temperature is None else temperature,
             max_tokens=max_tokens,
         )
-    except Exception:
+    except Exception as exc:
         log.exception("Text completion generation failed")
-        raise HTTPException(status_code=503, detail="Model generation failed")
+        raise HTTPException(status_code=503, detail=f"Model generation failed ({_sanitized_generation_error(exc)})")
 
     return JSONResponse({
         "id": request_id,
@@ -2454,11 +2520,12 @@ def _stream_responses(
                     max_tokens=max_tokens,
                 )
                 full_text = text
-        except Exception:
+        except Exception as exc:
             log.exception("responses stream error")
+            _cause = _sanitized_generation_error(exc)
             yield _sse("error", {
                 "type": "server_error",
-                "message": "Model generation failed",
+                "message": f"Model generation failed ({_cause})",
             }, seq)
             return
 
@@ -2603,9 +2670,9 @@ async def _nonstream_responses(
             raise HTTPException(status_code=400, detail=f"Model '{model_name}' is an embedding model.")
     except HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
         log.exception("Responses generation failed")
-        raise HTTPException(status_code=503, detail="Model generation failed")
+        raise HTTPException(status_code=503, detail=f"Model generation failed ({_sanitized_generation_error(exc)})")
 
     remaining_text, tool_calls = _parse_tool_calls(text, tokenizer=tokenizer, tools=tools)
 
@@ -2962,7 +3029,7 @@ def _stream_anthropic(
             log.exception("Anthropic stream error")
             yield _anthropic_sse({
                 "type": "error",
-                "error": {"type": "server_error", "message": "Model generation failed"},
+                "error": {"type": "server_error", "message": f"Model generation failed ({_cause})"},
             })
             return
 
@@ -3074,9 +3141,9 @@ async def _nonstream_anthropic(
             gen_kwargs.pop("reasoning_budget", None)
             result = engine.generate(repo_id, messages, **gen_kwargs)
             text, reasoning, prompt_tokens, completion_tokens = result[0], result[1], result[2], result[3]
-    except Exception:
+    except Exception as exc:
         log.exception("Anthropic messages generation failed")
-        raise HTTPException(status_code=503, detail="Model generation failed")
+        raise HTTPException(status_code=503, detail=f"Model generation failed ({_sanitized_generation_error(exc)})")
 
     tokenizer = engine.get_tokenizer(repo_id)
     remaining_text, tool_calls = _parse_tool_calls(text, tokenizer=tokenizer, tools=oai_tools)
@@ -3279,11 +3346,12 @@ async def responses_ws(websocket: WebSocket):
                         max_tokens=max_tokens or 4096,
                     )
                     full_text = text
-            except Exception:
+            except Exception as exc:
                 log.exception("WebSocket generation error")
+                _cause = _sanitized_generation_error(exc)
                 await websocket.send_json({
                     "type": "error",
-                    "error": {"type": "server_error", "message": "Model generation failed"},
+                    "error": {"type": "server_error", "message": f"Model generation failed ({_cause})"},
                 })
                 continue
 

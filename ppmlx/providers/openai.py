@@ -102,6 +102,7 @@ class OpenAIProvider:
         *,
         base_url: str = DEFAULT_BASE_URL,
         env_key: str = DEFAULT_ENV_KEY,
+        provider_id: str = "openai",
         model_catalog: Sequence[str] = DEFAULT_MODEL_CATALOG,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
@@ -135,6 +136,9 @@ class OpenAIProvider:
             if not callable(factory):
                 raise ValueError("Provider identifier factory is invalid")
         self._base_url = base_url.rstrip("/")
+        if type(provider_id) is not str or not provider_id:
+            raise ValueError("Provider identifier is invalid")
+        self._provider_id = provider_id
         self._env_key = env_key
         self._model_catalog = catalog
         self._timeout_seconds = float(timeout_seconds)
@@ -146,7 +150,7 @@ class OpenAIProvider:
 
     @property
     def provider_id(self) -> str:
-        return "openai"
+        return self._provider_id
 
     def _resolve_api_key(self) -> str:
         key = os.environ.get(self._env_key)
@@ -357,9 +361,14 @@ class OpenAIProvider:
                                 ),
                             )
                         chunks.append(chunk)
+                    # iter_bytes() already decoded the content encoding; drop
+                    # the encoding headers so httpx does not decompress twice.
+                    rebuilt_headers = httpx.Headers(response.headers)
+                    for name in ("content-encoding", "content-length"):
+                        rebuilt_headers.pop(name, None)
                     return httpx.Response(
                         status_code=response.status_code,
-                        headers=response.headers,
+                        headers=rebuilt_headers,
                         content=b"".join(chunks),
                         request=request,
                     )

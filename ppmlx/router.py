@@ -80,6 +80,8 @@ class RouteCandidate:
     model: str
     auth_profile: str | None = None
     capability_profile: str = "default"
+    base_url: str | None = None
+    provider_kind: str = "openai"
 
     def __post_init__(self) -> None:
         if type(self.provider_id) is not str or not self.provider_id:
@@ -92,6 +94,13 @@ class RouteCandidate:
             raise ValueError("Route candidate authentication profile is invalid")
         if type(self.capability_profile) is not str or not self.capability_profile:
             raise ValueError("Route candidate capability profile is invalid")
+        if self.base_url is not None and (
+            type(self.base_url) is not str
+            or not self.base_url.startswith(("http://", "https://"))
+        ):
+            raise ValueError("Route candidate base URL is invalid")
+        if self.provider_kind not in ("openai", "anthropic"):
+            raise ValueError("Route candidate provider kind is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +265,8 @@ def policy_from_dict(mapping: Mapping[str, object]) -> RoutePolicy:
                     capability_profile=raw_candidate.get(
                         "capability_profile", "default"
                     ),
+                    base_url=raw_candidate.get("base_url"),
+                    provider_kind=raw_candidate.get("provider_kind", "openai"),
                 )
             )
         fallback_errors = raw_entry.get("fallback_errors", [])
