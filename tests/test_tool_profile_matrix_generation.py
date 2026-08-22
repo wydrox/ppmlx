@@ -53,6 +53,6 @@ def test_initial_matrix_makes_absence_of_model_evidence_explicit(tmp_path: Path)
     matrix = MATRIX.read_text(encoding="utf-8")
 
     assert reports == ()
-    assert matrix.count("**not_evaluated**") == 5
+    assert matrix.count("**not_evaluated**") == 6
     assert "A parser profile without reviewed evidence is not a model capability claim" in matrix
     assert "Family-name matching does not create a capability claim" in matrix
