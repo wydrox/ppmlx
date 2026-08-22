@@ -575,6 +575,11 @@ app.add_middleware(
 
 app.add_middleware(RequestSizeLimitMiddleware, max_bytes=_get_max_request_body_bytes())
 
+# memory-read/v1 contract (ADR 0006): loopback-only read endpoints.
+from ppmlx.memory_read_routes import router as _memory_read_router
+
+app.include_router(_memory_read_router)
+
 _MAX_TOKENS_CAP = _get_max_tokens_cap()
 
 

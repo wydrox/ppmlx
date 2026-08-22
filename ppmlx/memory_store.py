@@ -5,9 +5,18 @@ import json
 import re
 import sqlite3
 import threading
-from hashlib import sha1
+from hashlib import sha1, sha256
+from collections import deque
 from pathlib import Path
 from typing import Any
+
+_RECENT_READ_WINDOW = 512
+_recent_read_output_hashes: set[str] = set()
+_recent_read_output_order: deque[str] = deque()
+
+
+def content_hash(text: str) -> str:
+    return sha256(text.encode("utf-8")).hexdigest()
 
 
 ACTIVE_STATUSES = {"active"}
@@ -391,11 +400,40 @@ class MemoryStore:
                 self._fts_available = False
             conn.commit()
 
-    def record_event(self, event: dict[str, Any]) -> None:
+    def record_event(self, event: dict[str, Any]) -> bool:
+        """Record a capture-side event.
+
+        Feedback-loop guard (ADR 0006): events tagged
+        ``metadata.source == "memory_read_echo"`` or whose content hash matches
+        recently-served read outputs are dropped so read results never become
+        new durable facts via re-capture.
+
+        Returns True if the event was stored, False if it was dropped.
+        """
         self.init()
+        from ppmlx.memory_read import ECHO_SOURCE_TAG
+
+        metadata = event.get("metadata") or {}
+        if isinstance(metadata, dict):
+            if metadata.get("source") == ECHO_SOURCE_TAG:
+                return False
+            text = event.get("response_text") or ""
+            if text and content_hash(text) in _recent_read_output_hashes:
+                return False
         with self._lock, self._connect() as conn:
             self._record_event_conn(conn, event)
             conn.commit()
+        return True
+
+    def note_read_outputs(self, texts: list[str]) -> None:
+        """Register read-output content hashes for the re-capture dedup guard."""
+        for text in texts:
+            h = content_hash(text)
+            _recent_read_output_hashes.add(h)
+            _recent_read_output_order.append(h)
+            while len(_recent_read_output_order) > _RECENT_READ_WINDOW:
+                old = _recent_read_output_order.popleft()
+                _recent_read_output_hashes.discard(old)
 
     @staticmethod
     def _record_event_conn(conn: sqlite3.Connection, event: dict[str, Any]) -> None:
