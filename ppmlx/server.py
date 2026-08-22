@@ -297,6 +297,44 @@ def _env_key_for(provider_id: str) -> str:
     return defaults.get(provider_id) or f"{provider_id.upper()}_API_KEY"
 
 
+def _subscription_passthrough_enabled() -> bool:
+    from ppmlx.config import load_config
+
+    return load_config().dangerous.subscription_passthrough
+
+
+def _subscription_capture_hook(
+    *,
+    request_id: str,
+    endpoint: str,
+    model_alias: str,
+    model_repo: str,
+    request_text: str,
+    response_text: str,
+    metadata: dict | None = None,
+) -> None:
+    """Memory capture hook for the subscription passthrough path.
+
+    Receives already-redacted full request/response content from the provider
+    and records it through the existing shadow memory pipeline, tagged with
+    provenance source ``anthropic-subscription``.
+    """
+    try:
+        from ppmlx.memory_engine import get_memory_engine
+
+        get_memory_engine().capture_chat(
+            request_id=request_id,
+            endpoint=endpoint,
+            model_alias=model_alias,
+            model_repo=model_repo,
+            messages=[{"role": "user", "content": request_text}],
+            response_text=response_text,
+            metadata=dict(metadata or {}),
+        )
+    except Exception:
+        log.debug("Subscription passthrough memory capture failed", exc_info=True)
+
+
 def _remote_providers_for_policy(policy):
     """Instantiate one provider adapter per distinct route-policy candidate.
 
@@ -307,9 +345,15 @@ def _remote_providers_for_policy(policy):
     https://openrouter.ai/api/v1 and reads ``OPENROUTER_API_KEY``.
     """
     from ppmlx.providers.anthropic import AnthropicProvider
-    from ppmlx.providers.openai import OpenAIProvider
+    from ppmlx.providers.anthropic_subscription import (
+        LockedSubscriptionPassthrough,
+        SubscriptionPassthroughProvider,
+        warn_subscription_tos_once,
+    )
+    from ppmlx.config import load_config
 
     providers = {}
+    subscription_enabled = load_config().dangerous.subscription_passthrough
     for entry in policy.entries.values():
         for candidate in entry.candidates:
             if candidate.provider_id in ("mlx", "local"):
@@ -317,7 +361,26 @@ def _remote_providers_for_policy(policy):
             if candidate.provider_id in providers:
                 continue
             env_key = _env_key_for(candidate.provider_id)
-            if candidate.provider_kind == "anthropic":
+            if candidate.provider_kind == "anthropic-subscription":
+                if not subscription_enabled:
+                    # Gate is LOCKED by default: register a typed stand-in so
+                    # routes fail naming the flag, never with an opaque error.
+                    log.warning(
+                        "route candidate %r targets the subscription "
+                        "passthrough but [dangerous] subscription_passthrough "
+                        "is false; requests will be rejected",
+                        candidate.provider_id,
+                    )
+                    providers[candidate.provider_id] = LockedSubscriptionPassthrough(
+                        provider_id=candidate.provider_id
+                    )
+                    continue
+                warn_subscription_tos_once()
+                providers[candidate.provider_id] = SubscriptionPassthroughProvider(
+                    provider_id=candidate.provider_id,
+                    capture_hook=_subscription_capture_hook,
+                )
+            elif candidate.provider_kind == "anthropic":
                 providers[candidate.provider_id] = AnthropicProvider(
                     base_url=candidate.base_url
                     or "https://api.anthropic.com/v1",
@@ -325,6 +388,8 @@ def _remote_providers_for_policy(policy):
                     provider_id=candidate.provider_id,
                 )
             else:
+                from ppmlx.providers.openai import OpenAIProvider
+
                 providers[candidate.provider_id] = OpenAIProvider(
                     base_url=candidate.base_url or "https://api.openai.com/v1",
                     env_key=env_key,
@@ -1271,6 +1336,110 @@ def _normalize_tool_messages(messages: list[dict]) -> list[dict]:
 @app.head("/")
 async def root():
     return {"status": "ok"}
+
+
+# ── Subscription passthrough full tunnel ([dangerous], locked by default) ──
+
+async def _anthropic_tunnel(request: Request, path: str):
+    """Raw byte-for-byte tunnel to api.anthropic.com (SSE included).
+
+    Locked behind [dangerous] subscription_passthrough; disabled requests get
+    an explicit error naming the config flag. Credentials are live-read from
+    the installed Claude Code per request and never stored or logged.
+    """
+    from ppmlx.providers.anthropic_subscription import (
+        SubscriptionPassthroughProvider,
+        warn_subscription_tos_once,
+    )
+
+    if not _subscription_passthrough_enabled():
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "type": "permission_error",
+                    "code": "subscription_passthrough_disabled",
+                    "message": (
+                        "Subscription passthrough is disabled. Set "
+                        "[dangerous] subscription_passthrough = true in "
+                        "~/.ppmlx/config.toml to enable it."
+                    ),
+                }
+            },
+        )
+    warn_subscription_tos_once()
+    body = await request.body()
+    provider = SubscriptionPassthroughProvider(
+        capture_hook=_subscription_capture_hook
+    )
+    incoming = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower() not in ("host", "content-length", "authorization")
+    }
+    request_id = "req_sub_" + uuid.uuid4().hex[:12]
+    model_alias = "unknown"
+    try:
+        parsed = json.loads(body.decode("utf-8")) if body else {}
+        if isinstance(parsed, dict) and isinstance(parsed.get("model"), str):
+            model_alias = parsed["model"]
+    except Exception:
+        pass
+    try:
+        tunnel = provider.forward(
+            "/" + path.lstrip("/"),
+            method=request.method,
+            headers=incoming,
+            body=body,
+        )
+    except Exception:
+        return JSONResponse(
+            status_code=502,
+            content={"error": {"type": "api_error", "code": "tunnel_failed"}},
+        )
+
+    async def _stream():
+        collected: list[bytes] = []
+        try:
+            for chunk in tunnel.iter_bytes():
+                collected.append(chunk)
+                yield chunk
+        finally:
+            try:
+                provider.capture_to_memory(
+                    request_id=request_id,
+                    model_alias=model_alias,
+                    request_text=body.decode("utf-8", errors="replace"),
+                    response_text=b"".join(collected).decode(
+                        "utf-8", errors="replace"
+                    ),
+                )
+            except Exception:
+                log.debug("passthrough capture failed", exc_info=True)
+
+    if tunnel.status_code >= 400:
+        # Error bodies are drained but not captured; typed status passes back.
+        error_body = b"".join(tunnel.iter_bytes())
+        return StarletteResponse(
+            content=error_body,
+            status_code=tunnel.status_code,
+            media_type=tunnel.headers.get("content-type", "application/json"),
+        )
+    return StarletteResponse(
+        content=_stream(),
+        status_code=tunnel.status_code,
+        media_type=tunnel.headers.get("content-type", "application/json"),
+    )
+
+
+@app.post("/anthropic/{path:path}")
+async def anthropic_tunnel_post(request: Request, path: str):
+    return await _anthropic_tunnel(request, path)
+
+
+@app.get("/anthropic/{path:path}")
+async def anthropic_tunnel_get(request: Request, path: str):
+    return await _anthropic_tunnel(request, path)
 
 
 @app.post("/v1/messages/count_tokens")

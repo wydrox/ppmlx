@@ -99,7 +99,7 @@ class RouteCandidate:
             or not self.base_url.startswith(("http://", "https://"))
         ):
             raise ValueError("Route candidate base URL is invalid")
-        if self.provider_kind not in ("openai", "anthropic"):
+        if self.provider_kind not in ("openai", "anthropic", "anthropic-subscription"):
             raise ValueError("Route candidate provider kind is invalid")
 
 

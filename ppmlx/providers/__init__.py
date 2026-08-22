@@ -18,12 +18,18 @@ from .base import (
     ProviderToolSupportStatus,
 )
 from .anthropic import AnthropicProvider
+from .anthropic_subscription import (
+    LockedSubscriptionPassthrough,
+    SubscriptionCredentialsUnavailable,
+    SubscriptionPassthroughProvider,
+)
 from .mlx import MLXProvider
 from .openai import OpenAIProvider
 
 
 __all__ = [
     "AnthropicProvider",
+    "LockedSubscriptionPassthrough",
     "MLXProvider",
     "OpenAIProvider",
     "Provider",
@@ -41,4 +47,6 @@ __all__ = [
     "ProviderResult",
     "ProviderStreamingMode",
     "ProviderToolSupportStatus",
+    "SubscriptionCredentialsUnavailable",
+    "SubscriptionPassthroughProvider",
 ]

@@ -88,6 +88,13 @@ class ThinkingConfig:
 
 
 @dataclass
+class DangerousConfig:
+    """Explicitly unsafe opt-in features. Everything here defaults to OFF."""
+
+    subscription_passthrough: bool = False
+
+
+@dataclass
 class AnalyticsConfig:
     enabled: bool = False
     provider: str = "posthog"
@@ -106,6 +113,7 @@ class Config:
     tool_awareness: ToolAwarenessConfig = field(default_factory=ToolAwarenessConfig)
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
     analytics: AnalyticsConfig = field(default_factory=AnalyticsConfig)
+    dangerous: DangerousConfig = field(default_factory=DangerousConfig)
 
 
 def get_ppmlx_dir() -> Path:
@@ -302,6 +310,12 @@ def _apply_toml(cfg: Config, data: dict) -> None:
         if "enabled" in th: cfg.thinking.enabled = bool(th["enabled"])
         if "default_reasoning_budget" in th: cfg.thinking.default_reasoning_budget = int(th["default_reasoning_budget"])
         if "effort_base" in th: cfg.thinking.effort_base = int(th["effort_base"])
+    if "dangerous" in data:
+        dg = data["dangerous"]
+        if "subscription_passthrough" in dg:
+            cfg.dangerous.subscription_passthrough = bool(
+                dg["subscription_passthrough"]
+            )
     if "analytics" in data:
         an = data["analytics"]
         if "enabled" in an: cfg.analytics.enabled = bool(an["enabled"])
@@ -357,6 +371,9 @@ def _apply_env(cfg: Config) -> None:
         "PPMLX_THINKING_ENABLED": ("thinking", "enabled", _parse_bool),
         "PPMLX_THINKING_BUDGET": ("thinking", "default_reasoning_budget", int),
         "PPMLX_EFFORT_BASE": ("thinking", "effort_base", int),
+        "PPMLX_DANGEROUS_SUBSCRIPTION_PASSTHROUGH": (
+            "dangerous", "subscription_passthrough", _parse_bool
+        ),
         "PPMLX_ANALYTICS_ENABLED": ("analytics", "enabled", _parse_bool),
         "PPMLX_ANALYTICS_PROVIDER": ("analytics", "provider", _normalize_analytics_provider),
         "PPMLX_ANALYTICS_HOST": ("analytics", "host", _normalize_analytics_host),
