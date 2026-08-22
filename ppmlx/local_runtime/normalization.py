@@ -1140,51 +1140,68 @@ def _parse_qwen35(
 ) -> NormalizedToolOutput:
     profile = NormalizationProfile.QWEN35_TOOLCALL_V1.value
     has_section_marker = _QWEN35_SECTION_START in text or _QWEN35_SECTION_END in text
-    remaining_text, section = _single_section(
-        text,
-        profile=profile,
-        start=_QWEN35_SECTION_START,
-        end=_QWEN35_SECTION_END,
-    )
     if not has_section_marker:
-        return NormalizedToolOutput(NormalizationProfile.QWEN35_TOOLCALL_V1, (), remaining_text)
+        return NormalizedToolOutput(NormalizationProfile.QWEN35_TOOLCALL_V1, (), text)
+    if text.count(_QWEN35_SECTION_START) != text.count(_QWEN35_SECTION_END):
+        _raise(profile, "unterminated_tool_call")
+
+    first = text.find(_QWEN35_SECTION_START)
+    remaining_text = text[:first]
+    rest = text[first:]
 
     calls: list[NormalizedToolCall] = []
-    rest = section
-    while rest.strip():
-        rest = rest.lstrip()
-        if not rest.startswith(_QWEN35_FUNCTION_START):
-            _raise(profile, "malformed_tool_section")
-        after_start = rest[len(_QWEN35_FUNCTION_START) :]
-        tag_end = after_start.find(">")
-        if tag_end < 0:
-            _raise(profile, "invalid_tool_call_shape")
-        name = after_start[:tag_end].strip()
-        after_name = after_start[tag_end + 1 :]
-        end_position = after_name.find(_QWEN35_FUNCTION_END)
+    while True:
+        # rest always begins with a <tool_call> envelope start here.
+        after_start = rest[len(_QWEN35_SECTION_START) :]
+        end_position = after_start.find(_QWEN35_SECTION_END)
         if end_position < 0:
             _raise(profile, "unterminated_tool_call")
-        body = after_name[:end_position]
-        if _QWEN35_FUNCTION_START in body:
-            _raise(profile, "nested_tool_call")
-        try:
-            arguments = _qwen35_parameters(body, profile=profile, limits=limits)
-        except _DuplicateJsonKey:
-            _raise(profile, "duplicate_json_key")
-        calls.append(
-            _literal_arguments(
-                arguments,
-                index=len(calls),
-                name=name,
-                profile=profile,
-                limits=limits,
-                repair_policy=repair_policy,
-                repair_budget=repair_budget,
+        section = after_start[:end_position]
+
+        inner_rest = section
+        while inner_rest.strip():
+            inner_rest = inner_rest.lstrip()
+            if not inner_rest.startswith(_QWEN35_FUNCTION_START):
+                _raise(profile, "malformed_tool_section")
+            after_function_start = inner_rest[len(_QWEN35_FUNCTION_START) :]
+            tag_end = after_function_start.find(">")
+            if tag_end < 0:
+                _raise(profile, "invalid_tool_call_shape")
+            name = after_function_start[:tag_end].strip()
+            after_name = after_function_start[tag_end + 1 :]
+            function_end_position = after_name.find(_QWEN35_FUNCTION_END)
+            if function_end_position < 0:
+                _raise(profile, "unterminated_tool_call")
+            body = after_name[:function_end_position]
+            if _QWEN35_FUNCTION_START in body:
+                _raise(profile, "nested_tool_call")
+            try:
+                arguments = _qwen35_parameters(body, profile=profile, limits=limits)
+            except _DuplicateJsonKey:
+                _raise(profile, "duplicate_json_key")
+            calls.append(
+                _literal_arguments(
+                    arguments,
+                    index=len(calls),
+                    name=name,
+                    profile=profile,
+                    limits=limits,
+                    repair_policy=repair_policy,
+                    repair_budget=repair_budget,
+                )
             )
-        )
-        if len(calls) > limits.max_calls:
-            _raise(profile, "call_limit_exceeded")
-        rest = after_name[end_position + len(_QWEN35_FUNCTION_END) :]
+            if len(calls) > limits.max_calls:
+                _raise(profile, "call_limit_exceeded")
+            inner_rest = after_name[
+                function_end_position + len(_QWEN35_FUNCTION_END) :
+            ]
+
+        rest = after_start[end_position + len(_QWEN35_SECTION_END) :]
+        if not rest.strip():
+            break
+        if not rest.lstrip().startswith(_QWEN35_SECTION_START):
+            _raise(profile, "text_after_tool_section")
+        rest = rest.lstrip()
     return NormalizedToolOutput(
         NormalizationProfile.QWEN35_TOOLCALL_V1,
         _check_calls(calls, profile=profile, limits=limits),

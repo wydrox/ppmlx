@@ -193,3 +193,67 @@ def test_qwen35_type_inference_invalid_json_object_text_stays_string() -> None:
 def test_qwen35_none_literal_is_not_null() -> None:
     call = _typed_call({"py_value": "None"})
     assert call.arguments_json == {"py_value": "None"}
+
+
+def _envelope(name: str, parameter: str, value: str) -> str:
+    return (
+        "<tool_call>\n"
+        f"<function={name}>\n"
+        f"<parameter={parameter}>\n"
+        f"{value}\n"
+        "</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+
+def test_qwen35_parses_two_consecutive_envelopes_in_order() -> None:
+    text = _envelope("read_document", "path", "README.md") + _envelope(
+        "read_document", "path", "SECURITY.md"
+    )
+    output = normalize_tool_output(text, profile=NormalizationProfile.QWEN35_TOOLCALL_V1)
+
+    assert output.remaining_text == ""
+    assert [(call.index, call.name) for call in output.tool_calls] == [
+        (0, "read_document"),
+        (1, "read_document"),
+    ]
+    assert output.tool_calls[0].arguments_json == {"path": "README.md"}
+    assert output.tool_calls[1].arguments_json == {"path": "SECURITY.md"}
+
+
+def test_qwen35_parses_three_consecutive_envelopes_in_order() -> None:
+    text = (
+        _envelope("get_weather", "city", "Paris")
+        + _envelope("get_weather", "city", "London")
+        + _envelope("get_time", "timezone", "Europe/Warsaw")
+    )
+    output = normalize_tool_output(text, profile=NormalizationProfile.QWEN35_TOOLCALL_V1)
+
+    assert [(call.index, call.name) for call in output.tool_calls] == [
+        (0, "get_weather"),
+        (1, "get_weather"),
+        (2, "get_time"),
+    ]
+    assert output.tool_calls[2].arguments_json == {"timezone": "Europe/Warsaw"}
+
+
+def test_qwen35_rejects_text_between_envelopes() -> None:
+    text = (
+        _envelope("get_weather", "city", "Paris")
+        + "\nSome prose in between.\n"
+        + _envelope("get_weather", "city", "London")
+    )
+    with pytest.raises(ToolNormalizationError) as excinfo:
+        normalize_tool_output(text, profile=NormalizationProfile.QWEN35_TOOLCALL_V1)
+    assert excinfo.value.code == "text_after_tool_section"
+
+
+def test_qwen35_single_envelope_still_works_after_multi_envelope_change() -> None:
+    text = "Sure.\n" + _envelope("get_weather", "city", "Paris")
+    output = normalize_tool_output(text, profile=NormalizationProfile.QWEN35_TOOLCALL_V1)
+
+    assert output.remaining_text == "Sure.\n"
+    assert [(call.index, call.name) for call in output.tool_calls] == [
+        (0, "get_weather")
+    ]
