@@ -17,10 +17,12 @@ from .base import (
     ProviderStreamingMode,
     ProviderToolSupportStatus,
 )
+from .anthropic import AnthropicProvider
 from .mlx import MLXProvider
 
 
 __all__ = [
+    "AnthropicProvider",
     "MLXProvider",
     "Provider",
     "ProviderCallReference",
