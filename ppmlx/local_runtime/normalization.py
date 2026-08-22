@@ -28,6 +28,8 @@ class NormalizationProfile(str, Enum):
     KIMI_K2_V1 = "kimi-k2-v1"
     DEEPSEEK_V3_V1 = "deepseek-v3-v1"
     QWEN_JSON_V1 = "qwen-json-v1"
+    GEMMA4_V1 = "gemma4-v1"
+    LFM25_V1 = "lfm25-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +112,14 @@ _DEEPSEEK_SECTION_END = "<｜tool▁calls▁end｜>"
 _DEEPSEEK_CALL_START = "<｜tool▁call▁begin｜>"
 _DEEPSEEK_CALL_END = "<｜tool▁call▁end｜>"
 _DEEPSEEK_SEPARATOR = "<｜tool▁sep｜>"
+
+_GEMMA_CALL_START = "<|tool_call>"
+_GEMMA_CALL_PREFIX = "call:"
+
+_LFM_SECTION_START = "<|tool_call_start|>"
+_LFM_SECTION_END = "<|tool_call_end|>"
+
+_LITERAL_MAX_DEPTH = 64
 
 
 def normalize_tool_output(
@@ -687,6 +697,316 @@ def _parse_deepseek(
     return NormalizedToolOutput(NormalizationProfile.DEEPSEEK_V3_V1, calls, remaining_text)
 
 
+def _parse_literal_value(
+    source: str,
+    position: int,
+    *,
+    profile: str,
+    depth: int,
+) -> tuple[object, int]:
+    """Parse one JSON-compatible literal at ``position``.
+
+    Accepts JSON strings, numbers, ``true``/``false``/``null``, and the
+    array/object containers used by the Gemma 4 and LFM2.5 argument
+    renderings. Object keys may be bare identifiers or JSON strings.
+    """
+
+    if depth > _LITERAL_MAX_DEPTH:
+        _raise(profile, "json_depth_limit_exceeded")
+    if position >= len(source):
+        _raise(profile, "malformed_arguments")
+    head = source[position]
+    if head in "[{":
+        return _parse_literal_container(source, position, profile=profile, depth=depth)
+    try:
+        value, end = _JSON_DECODER.raw_decode(source, position)
+    except (_DuplicateJsonKey, json.JSONDecodeError, TypeError, ValueError, RecursionError):
+        _raise(profile, "malformed_arguments")
+    return value, end
+
+
+def _parse_literal_container(
+    source: str,
+    position: int,
+    *,
+    profile: str,
+    depth: int,
+) -> tuple[object, int]:
+    opening = source[position]
+    closing = "]" if opening == "[" else "}"
+    position = _skip_space(source, position + 1)
+    items: list[object] = []
+    fields: dict[str, object] = {}
+    if position < len(source) and source[position] == closing:
+        return (items if opening == "[" else fields), position + 1
+    while True:
+        if position >= len(source):
+            _raise(profile, "malformed_arguments")
+        if opening == "{":
+            key: object
+            if source[position] == '"':
+                try:
+                    key, position = _JSON_DECODER.raw_decode(source, position)
+                except (
+                    _DuplicateJsonKey,
+                    json.JSONDecodeError,
+                    TypeError,
+                    ValueError,
+                    RecursionError,
+                ):
+                    _raise(profile, "malformed_arguments")
+            else:
+                key_end = position
+                while key_end < len(source) and source[key_end] not in ":{}[], \t\r\n":
+                    key_end += 1
+                if key_end == position:
+                    _raise(profile, "malformed_arguments")
+                key = source[position:key_end]
+                position = key_end
+            if type(key) is not str:
+                _raise(profile, "malformed_arguments")
+            position = _skip_space(source, position)
+            if position >= len(source) or source[position] != ":":
+                _raise(profile, "malformed_arguments")
+            value, position = _parse_literal_value(
+                source,
+                _skip_space(source, position + 1),
+                profile=profile,
+                depth=depth + 1,
+            )
+            if key in fields:
+                raise _DuplicateJsonKey
+            fields[key] = value
+        else:
+            value, position = _parse_literal_value(
+                source,
+                position,
+                profile=profile,
+                depth=depth + 1,
+            )
+            items.append(value)
+        position = _skip_space(source, position)
+        if position < len(source) and source[position] == ",":
+            position = _skip_space(source, position + 1)
+            continue
+        if position < len(source) and source[position] == closing:
+            return (items if opening == "[" else fields), position + 1
+        _raise(profile, "malformed_arguments")
+
+
+def _split_top_level(source: str, *, separator: str) -> list[str]:
+    """Split on commas that are outside quotes, parentheses, and brackets."""
+
+    parts: list[str] = []
+    depth = 0
+    in_string = False
+    escaped = False
+    start = 0
+    for index, character in enumerate(source):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+        elif character == separator and depth == 0:
+            parts.append(source[start:index])
+            start = index + 1
+    parts.append(source[start:])
+    return parts
+
+
+def _literal_arguments(
+    value: object,
+    *,
+    index: int,
+    name: str,
+    profile: str,
+    limits: ToolOutputLimits,
+    repair_policy: ToolArgumentRepairPolicy | None,
+    repair_budget: ToolArgumentRepairBudget,
+) -> NormalizedToolCall:
+    """Build a call from already-decoded literal arguments."""
+
+    if not isinstance(value, dict):
+        _raise(profile, "arguments_not_object")
+    return _call(
+        index=index,
+        name=name,
+        arguments_raw=json.dumps(value),
+        profile=profile,
+        limits=limits,
+        repair_policy=repair_policy,
+        repair_budget=repair_budget,
+    )
+
+
+def _parse_gemma4(
+    text: str,
+    limits: ToolOutputLimits,
+    repair_policy: ToolArgumentRepairPolicy | None,
+    repair_budget: ToolArgumentRepairBudget,
+) -> NormalizedToolOutput:
+    profile = NormalizationProfile.GEMMA4_V1.value
+    if _GEMMA_CALL_START not in text:
+        return NormalizedToolOutput(NormalizationProfile.GEMMA4_V1, (), text)
+
+    first = text.find(_GEMMA_CALL_START)
+    remaining_text = text[:first]
+    rest = text[first:]
+    calls: list[NormalizedToolCall] = []
+    while True:
+        rest = rest.lstrip()
+        if not rest:
+            break
+        if not rest.startswith(_GEMMA_CALL_START):
+            _raise(profile, "text_after_tool_section")
+        after_start = rest[len(_GEMMA_CALL_START) :].lstrip()
+        if not after_start.startswith(_GEMMA_CALL_PREFIX):
+            _raise(profile, "invalid_tool_call_shape")
+        after_prefix = after_start[len(_GEMMA_CALL_PREFIX) :]
+        brace = after_prefix.find("{")
+        if brace < 0:
+            _raise(profile, "invalid_tool_call_shape")
+        name = after_prefix[:brace].strip()
+        try:
+            arguments, end_position = _parse_literal_container(
+                after_prefix,
+                brace,
+                profile=profile,
+                depth=0,
+            )
+        except _DuplicateJsonKey:
+            _raise(profile, "duplicate_json_key")
+        except RecursionError:
+            _raise(profile, "json_depth_limit_exceeded")
+        _check_json_limits(arguments, profile=profile, limits=limits)
+        calls.append(
+            _literal_arguments(
+                arguments,
+                index=len(calls),
+                name=name.strip(),
+                profile=profile,
+                limits=limits,
+                repair_policy=repair_policy,
+                repair_budget=repair_budget,
+            )
+        )
+        if len(calls) > limits.max_calls:
+            _raise(profile, "call_limit_exceeded")
+        rest = after_prefix[end_position:]
+    return NormalizedToolOutput(
+        NormalizationProfile.GEMMA4_V1,
+        _check_calls(calls, profile=profile, limits=limits),
+        remaining_text,
+    )
+
+
+_LFM_NAME_END_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_$.]*$")
+
+
+def _lfm_call_element(element: str, *, index: int, profile: str) -> tuple[str, dict[str, object]]:
+    open_position = element.find("(")
+    if open_position < 0:
+        _raise(profile, "invalid_tool_call_shape")
+    name = element[:open_position].strip()
+    if _LFM_NAME_END_RE.fullmatch(name) is None:
+        _raise(profile, "invalid_tool_name")
+    payload = element[open_position + 1 :].rstrip()
+    if not payload.endswith(")"):
+        _raise(profile, "invalid_tool_call_shape")
+    payload = payload[:-1].strip()
+    if not payload:
+        return name, {}
+    arguments: dict[str, object] = {}
+    for assignment in _split_top_level(payload, separator=","):
+        stripped = assignment.strip()
+        if not stripped:
+            _raise(profile, "malformed_arguments")
+        equals = stripped.find("=")
+        if equals <= 0:
+            _raise(profile, "malformed_arguments")
+        key = stripped[:equals].strip()
+        if _LFM_NAME_END_RE.fullmatch(key) is None:
+            _raise(profile, "malformed_arguments")
+        if key in arguments:
+            raise _DuplicateJsonKey
+        value, end_position = _parse_literal_value(
+            stripped,
+            _skip_space(stripped, equals + 1),
+            profile=profile,
+            depth=0,
+        )
+        if stripped[end_position:].strip():
+            _raise(profile, "malformed_arguments")
+        arguments[key] = value
+    return name, arguments
+
+
+def _parse_lfm25(
+    text: str,
+    limits: ToolOutputLimits,
+    repair_policy: ToolArgumentRepairPolicy | None,
+    repair_budget: ToolArgumentRepairBudget,
+) -> NormalizedToolOutput:
+    profile = NormalizationProfile.LFM25_V1.value
+    has_section_marker = _LFM_SECTION_START in text or _LFM_SECTION_END in text
+    remaining_text, section = _single_section(
+        text,
+        profile=profile,
+        start=_LFM_SECTION_START,
+        end=_LFM_SECTION_END,
+    )
+    if not has_section_marker:
+        return NormalizedToolOutput(NormalizationProfile.LFM25_V1, (), remaining_text)
+
+    section = section.strip()
+    if not section.startswith("[") or not section.endswith("]"):
+        _raise(profile, "invalid_tool_call_shape")
+    inner = section[1:-1]
+    if not inner.strip():
+        _raise(profile, "empty_tool_section")
+
+    calls: list[NormalizedToolCall] = []
+    for element in _split_top_level(inner, separator=","):
+        stripped = element.strip()
+        if not stripped:
+            _raise(profile, "malformed_tool_section")
+        try:
+            name, arguments = _lfm_call_element(stripped, index=len(calls), profile=profile)
+        except _DuplicateJsonKey:
+            _raise(profile, "duplicate_json_key")
+        except RecursionError:
+            _raise(profile, "json_depth_limit_exceeded")
+        _check_json_limits(arguments, profile=profile, limits=limits)
+        calls.append(
+            _literal_arguments(
+                arguments,
+                index=len(calls),
+                name=name,
+                profile=profile,
+                limits=limits,
+                repair_policy=repair_policy,
+                repair_budget=repair_budget,
+            )
+        )
+        if len(calls) > limits.max_calls:
+            _raise(profile, "call_limit_exceeded")
+    return NormalizedToolOutput(
+        NormalizationProfile.LFM25_V1,
+        _check_calls(calls, profile=profile, limits=limits),
+        remaining_text,
+    )
+
+
 def _parse_grok(
     text: str,
     limits: ToolOutputLimits,
@@ -760,6 +1080,8 @@ _PARSERS: dict[NormalizationProfile, _Parser] = {
     NormalizationProfile.KIMI_K2_V1: _parse_kimi,
     NormalizationProfile.DEEPSEEK_V3_V1: _parse_deepseek,
     NormalizationProfile.QWEN_JSON_V1: _parse_qwen,
+    NormalizationProfile.GEMMA4_V1: _parse_gemma4,
+    NormalizationProfile.LFM25_V1: _parse_lfm25,
 }
 
 

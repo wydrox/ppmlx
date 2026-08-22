@@ -237,7 +237,7 @@ def test_matrix_is_generated_from_evidence_and_marks_other_profiles_not_evaluate
     assert "`grok-openai-chat-v1`" in rendered
     assert "`kimi-k2-v1`" in rendered
     assert "`deepseek-v3-v1`" in rendered
-    assert rendered.count("**not_evaluated**") == 3
+    assert rendered.count("**not_evaluated**") == 5
     assert "family-name matching" in rendered.lower()
 
 

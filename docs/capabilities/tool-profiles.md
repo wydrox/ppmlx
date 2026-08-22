@@ -8,6 +8,8 @@ This matrix contains exact reviewed model profiles. A parser profile without rev
 | — | — | `kimi-k2-v1` | `template_structured` | `none` | — | — | — | **not_evaluated** |
 | — | — | `deepseek-v3-v1` | `template_structured` | `none` | — | — | — | **not_evaluated** |
 | — | — | `qwen-json-v1` | `template_structured` | `none` | — | — | — | **not_evaluated** |
+| — | — | `gemma4-v1` | `template_structured` | `none` | — | — | — | **not_evaluated** |
+| — | — | `lfm25-v1` | `template_structured` | `none` | — | — | — | **not_evaluated** |
 
 ## Publication gates
 
