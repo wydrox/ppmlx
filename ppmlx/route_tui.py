@@ -681,7 +681,6 @@ def run_route_tui(*, path: Path | None = None) -> None:
         ScrollOffsets,
         VSplit,
         Window,
-        WindowAlign,
     )
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.widgets import TextArea
@@ -1024,12 +1023,6 @@ def run_route_tui(*, path: Path | None = None) -> None:
             ("model id", 1),
             ("base_url (optional)", 2),
         )
-        labels = {
-            "alias": "alias",
-            "model id": "model id",
-            "base_url (optional)": "base_url (optional)",
-            3: "fallbacks \u2014 one 'provider, model' per line",
-        }
         for label, idx in rows_def:
             focused = idx == focus_idx
             frag.append(("class:checked" if focused else "class:dim", " \u25b8 " if focused else "   "))
