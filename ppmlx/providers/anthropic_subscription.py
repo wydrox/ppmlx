@@ -420,11 +420,15 @@ class SubscriptionPassthroughProvider(AnthropicProvider):
         from ppmlx.auth import redact
 
         try:
-            from ppmlx.memory_store import (
-                _redact_persisted_value as _pattern_redact,
-            )
+            from ppmlx.memory_store import _redact_persisted_value
         except Exception:  # pragma: no cover - store always available in app
-            _pattern_redact = lambda value: value  # noqa: E731
+
+            from typing import Any as _Any
+
+            def _redact_persisted_value(
+                value: _Any, *, field: str | None = None
+            ) -> _Any:
+                return value
 
         payload = {
             "request_id": request_id,
@@ -432,10 +436,10 @@ class SubscriptionPassthroughProvider(AnthropicProvider):
             "model_alias": model_alias,
             "model_repo": PROVENANCE_SOURCE,
             "request_text": str(
-                _pattern_redact(redact(request_text))
+                _redact_persisted_value(redact(request_text))
             ),
             "response_text": str(
-                _pattern_redact(redact(response_text or ""))
+                _redact_persisted_value(redact(response_text or ""))
             ),
             "metadata": {"source": PROVENANCE_SOURCE},
         }

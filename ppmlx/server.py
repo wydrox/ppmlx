@@ -353,7 +353,7 @@ def _remote_providers_for_policy(policy):
     )
     from ppmlx.config import load_config
 
-    providers = {}
+    providers: dict[str, object] = {}
     subscription_enabled = load_config().dangerous.subscription_passthrough
     for entry in policy.entries.values():
         for candidate in entry.candidates:
