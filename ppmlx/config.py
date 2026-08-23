@@ -265,6 +265,8 @@ def _apply_toml(cfg: Config, data: dict) -> None:
             cfg.server.continuation_ttl_seconds = _normalize_continuation_ttl(
                 s["continuation_ttl_seconds"]
             )
+        if "route_policy" in s:
+            cfg.server.route_policy = str(s["route_policy"])
     if "defaults" in data:
         d = data["defaults"]
         if "model" in d: cfg.defaults.model = str(d["model"])

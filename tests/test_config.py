@@ -543,3 +543,14 @@ class TestFirstRunAnalyticsOnboarding:
 
         assert (tmp_home / ".ppmlx" / ".first_run_done").exists()
         assert load_config().analytics.enabled is True
+
+
+def test_apply_toml_reads_route_policy(tmp_home):
+    from ppmlx.config import Config, _apply_toml
+
+    cfg = Config()
+    _apply_toml(cfg, {"server": {"route_policy": "/tmp/routes.toml"}})
+    assert cfg.server.route_policy == "/tmp/routes.toml"
+    cfg2 = Config()
+    _apply_toml(cfg2, {"server": {}})
+    assert cfg2.server.route_policy == ""
