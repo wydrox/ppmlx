@@ -8,7 +8,6 @@ disk. API keys are never read or displayed here.
 """
 from __future__ import annotations
 
-import dataclasses
 import difflib
 import os
 import tomllib
@@ -111,7 +110,6 @@ def save_route_document(
     Returns the backup path when an existing file was replaced, else None.
     Raises ValueError when the document violates router policy rules.
     """
-    import tomli_w
 
     _validate(doc)
     payload = tomli_w.dumps(doc)
@@ -139,7 +137,6 @@ def _diff_text(before: str, after: str) -> str:
 
 
 def _toml_text(path: Path) -> str:
-    import tomli_w
 
     if not path.exists():
         return ""
@@ -364,7 +361,6 @@ def _ask_provider_kind() -> tuple[str, str]:
 
 
 def _print_diff(path: Path, doc: dict) -> str:
-    import tomli_w
 
     before = _toml_text(path)
     after = tomli_w.dumps(doc)
