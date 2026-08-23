@@ -469,6 +469,22 @@ def write_route_policy(
 # ---------------------------------------------------------------------------
 
 
+def _offer_route_tui(*, home: Path | None = None) -> None:
+    """After route-policy opt-in, offer to launch the interactive alias TUI."""
+    from rich.prompt import Confirm
+
+    from ppmlx.cli import console
+
+    if not Confirm.ask(
+        "Open the interactive route TUI to define starter aliases?", default=False
+    ):
+        console.print("[dim]You can run `ppmlx route` anytime.[/dim]")
+        return
+    from ppmlx.route_tui import run_route_tui, route_policy_path
+
+    run_route_tui(path=route_policy_path(home=home))
+
+
 def configure_harnesses(
     harnesses: list[str],
     *,
@@ -555,6 +571,8 @@ def run_onboard_wizard(
     result = configure_harnesses(harnesses or [], base_url=base_url, model=model, home=home, dry_run=dry_run)
     if setup_routes:
         write_route_policy(home=home, dry_run=dry_run, result=result)
+        if not dry_run and not yes:
+            _offer_route_tui(home=home)
 
     console.print()
     title = "Proposed changes (dry-run)" if dry_run else "Changes"

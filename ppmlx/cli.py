@@ -3760,6 +3760,74 @@ auth_app = typer.Typer(help="Manage provider API keys (stored in the macOS Keych
 app.add_typer(auth_app, name="auth")
 
 
+# ---------------------------------------------------------------------------
+# Route / alias management (ADR 0005)
+# ---------------------------------------------------------------------------
+
+route_app = typer.Typer(help="Manage route-policy aliases (interactive TUI + scripting)")
+app.add_typer(route_app, name="route")
+
+
+@route_app.callback(invoke_without_command=True)
+def route_default(ctx: typer.Context) -> None:
+    """Interactive alias-management TUI when no subcommand is given."""
+    if ctx.invoked_subcommand is None:
+        from ppmlx.route_tui import run_route_tui
+
+        run_route_tui()
+
+
+@route_app.command("list")
+def route_list_cmd(
+    path: Optional[str] = typer.Option(None, "--path", help="Route-policy TOML path override"),
+) -> None:
+    """Show the current aliases -> provider/model/base_url table."""
+    from pathlib import Path as _Path
+
+    from ppmlx.route_tui import (
+        render_alias_table,
+        route_list,
+        route_policy_path,
+    )
+
+    policy_path = _Path(path).expanduser() if path else route_policy_path()
+    rows = route_list(path=policy_path)
+    if not rows:
+        console.print(f"[yellow]No aliases defined in {policy_path}.[/yellow]")
+        console.print("[dim]Run `ppmlx route set` to add one.[/dim]")
+        raise typer.Exit(1)
+    console.print(render_alias_table(rows))
+
+
+@route_app.command("set")
+def route_set_cmd(
+    alias: str = typer.Argument(..., help="Alias name to define or replace"),
+    path: Optional[str] = typer.Option(None, "--path", help="Route-policy TOML path override"),
+) -> None:
+    """Wizard: define an alias (provider kind, model, base URL, fallbacks) with diff preview."""
+    from pathlib import Path as _Path
+
+    from ppmlx.route_tui import route_set
+
+    policy_path = _Path(path).expanduser() if path else route_policy_path()
+    try:
+        route_set(alias, path=policy_path)
+    except SystemExit as exc:  # aborted by user
+        if exc.code not in (0, None):
+            raise typer.Exit(1)
+
+
+@route_app.command("test")
+def route_test_cmd(
+    alias: str = typer.Argument(..., help="Alias to send a real test request through"),
+    prompt: str = typer.Option("Say 'pong' and nothing else.", "--prompt", help="Test prompt"),
+) -> None:
+    """Send a real request through the routing service and show who served it."""
+    from ppmlx.route_tui import route_test
+
+    raise typer.Exit(route_test(alias, prompt=prompt))
+
+
 def _print_auth_error(exc: Exception) -> None:
     """Print an auth failure without echoing any secret material.
 
