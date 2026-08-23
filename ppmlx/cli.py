@@ -3807,7 +3807,7 @@ def route_set_cmd(
     """Wizard: define an alias (provider kind, model, base URL, fallbacks) with diff preview."""
     from pathlib import Path as _Path
 
-    from ppmlx.route_tui import route_set
+    from ppmlx.route_tui import route_policy_path, route_set
 
     policy_path = _Path(path).expanduser() if path else route_policy_path()
     try:

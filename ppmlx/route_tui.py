@@ -477,7 +477,14 @@ def route_set(
     routes["entries"] = entries
 
     _print_diff(path, doc)
-    _validate(doc)  # raises ValueError against router.load_policy rules
+    try:
+        _validate(doc)  # raises ValueError against router.load_policy rules
+    except ValueError as exc:
+        console.print(f"[red]Route policy validation failed: {exc}[/red]")
+        console.print(
+            "[yellow]Fix the highlighted field in the policy file and retry.[/yellow]"
+        )
+        raise SystemExit(1) from None
     if not Confirm.ask("Write this route policy?", default=True):
         console.print("[yellow]Aborted — nothing written.[/yellow]")
         raise SystemExit(1)
