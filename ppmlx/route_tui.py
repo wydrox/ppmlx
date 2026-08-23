@@ -1076,7 +1076,7 @@ def run_route_tui(*, path: Path | None = None) -> None:
             try:
                 code, summary = await loop.run_in_executor(None, blocking)
             except Exception as exc:  # secret-free surface: type name only
-                code, summary = 1, f"\u2717 {type(exc).__name__}: {_one_line(exc)}"
+                summary = f"\u2717 {type(exc).__name__}: {_one_line(exc)}"
             state["testing"] = False
             state["detail"] = summary
             app.invalidate()
