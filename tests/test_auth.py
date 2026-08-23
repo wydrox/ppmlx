@@ -532,7 +532,7 @@ class TestCliMisc:
         assert res.exit_code != 0  # aborted
         assert get_secret("openai") == SECRET
 
-    def test_remove_unknown_provider_exits_cleanly(self):
+    def test_remove_unknown_provider_exits_cleanly(self, fake_keyring):
         from ppmlx.cli import app
 
         res = CliRunner().invoke(app, ["auth", "remove", "ghost"])
@@ -548,7 +548,7 @@ class TestCliMisc:
         assert (auth.KEYRING_SERVICE, "openai") not in fake_keyring.store
         assert "openai" not in load_auth_entries()[0]
 
-    def test_status_command_marks_missing_provider(self):
+    def test_status_command_marks_missing_provider(self, fake_keyring):
         from ppmlx.cli import app
 
         res = CliRunner().invoke(app, ["auth", "status", "ghost"])
