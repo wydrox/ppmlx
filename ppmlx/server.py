@@ -3253,11 +3253,11 @@ def _stream_anthropic(
                 yield _anthropic_sse({"type": "content_block_stop", "index": content_idx})
                 content_idx += 1
 
-        except Exception:
+        except Exception as exc:
             log.exception("Anthropic stream error")
             yield _anthropic_sse({
                 "type": "error",
-                "error": {"type": "server_error", "message": f"Model generation failed ({_cause})"},
+                "error": {"type": "server_error", "message": f"Model generation failed ({_sanitized_generation_error(exc)})"},
             })
             return
 

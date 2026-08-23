@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Callable
 

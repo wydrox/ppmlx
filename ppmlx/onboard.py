@@ -538,7 +538,7 @@ def run_onboard_wizard(
     if harnesses is None:
         choices = ", ".join(HARNESSES)
         raw = Prompt.ask(
-            f"Which harnesses should be configured? (comma-separated; empty = all detected)",
+            "Which harnesses should be configured? (comma-separated; empty = all detected)",
             default=", ".join(detected_names) if detected_names else "",
         )
         picked = [p.strip().lower() for p in raw.split(",") if p.strip()]
