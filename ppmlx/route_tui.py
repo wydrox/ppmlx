@@ -536,6 +536,20 @@ def route_test(
         )
         return 1
 
+    # Prime keychain-stored credentials into the environment (same as serve).
+    from ppmlx.routing_service import prime_provider_credentials
+
+    provider_ids = tuple(
+        {c.provider_id for entry in service.policy.entries.values() for c in entry.candidates}
+    )
+    primed = prime_provider_credentials(provider_ids)
+    missing = sorted(set(provider_ids) - set(primed))
+    if missing:
+        console.print(
+            f"[yellow]No stored credential for: {', '.join(missing)}. "
+            f"Run [bold]ppmlx auth add <provider>[/bold] first.[/yellow]"
+        )
+
     body = {
         "model": alias,
         "messages": [{"role": "user", "content": prompt}],
