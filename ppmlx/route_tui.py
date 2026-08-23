@@ -1058,7 +1058,6 @@ def run_route_tui(*, path: Path | None = None) -> None:
         loop = asyncio.get_event_loop()
 
         def blocking() -> tuple[int, str]:
-            import contextlib
             import io
 
             buf = io.StringIO()
