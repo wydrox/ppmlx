@@ -104,7 +104,9 @@ def test_disabled_flag_gets_explicit_403(monkeypatch) -> None:
 
     client = TestClient(app)
     resp = client.post("/anthropic/v1/messages", json={"model": "m"})
+    body = resp.json()
     assert resp.status_code == 403
-    assert (
-        resp.json()["error"]["code"] == "subscription_passthrough_disabled"
-    )
+    assert body["error"]["code"] == "subscription_passthrough_disabled"
+    # The message must name the exact config knob to flip (B1 regression).
+    assert "[dangerous] subscription_passthrough" in body["error"]["message"]
+    assert "config.toml" in body["error"]["message"]
