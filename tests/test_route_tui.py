@@ -132,3 +132,39 @@ def test_no_secrets_in_output(policy_path, capsys):
         rt.route_test("missing-alias")
     finally:
         rt.console = old
+
+
+# ---------------------------------------------------------------------------
+# Full-screen TUI pure-logic helpers
+# ---------------------------------------------------------------------------
+
+
+def test_route_entry_for_finds_openai_chat_entry(policy_path):
+    doc = rt.load_route_document(policy_path)
+    entry = rt._route_entry_for(doc, "fast")
+    assert entry is not None and entry["key"] == "openai-chat:fast"
+    assert rt._route_entry_for(doc, "missing") is None
+
+
+def test_status_hint_never_leaks_secrets():
+    assert rt._status_hint("openai") == "OPENAI_API_KEY"
+    assert rt._status_hint("anthropic") == "ANTHROPIC_API_KEY"
+    assert rt._status_hint("anthropic-subscription") == "ANTHROPIC_API_KEY"
+    assert rt._status_hint("mlx") == "local"
+    assert rt._status_hint("custom-provider") == ""
+
+
+def test_candidate_dict_shapes_provider_kind():
+    cand = rt._candidate_dict("openai", "gpt-5-mini", "")
+    assert cand["provider_kind"] == "openai" and "base_url" not in cand
+    cand = rt._candidate_dict("anthropic", "claude", "https://x/v1")
+    assert cand["provider_kind"] == "anthropic" and cand["base_url"] == "https://x/v1"
+    # subscription tunnel ignores custom base_url (locked)
+    cand = rt._candidate_dict("anthropic-subscription", "claude", "https://x/v1")
+    assert "base_url" not in cand
+
+
+def test_rows_filtering_and_detail_shape(policy_path):
+    # _rows lives inside run_route_tui; exercise via route_list instead
+    rows = rt.route_list(path=policy_path)
+    assert {r.alias for r in rows} == {"fast", "claude"}

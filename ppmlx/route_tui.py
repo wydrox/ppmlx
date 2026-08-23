@@ -5,9 +5,18 @@ All mutations go through ``~/.ppmlx/routes.toml`` (or ``PPMLX_ROUTE_POLICY`` /
 timestamped backup (reusing :mod:`ppmlx.onboard` helpers) and every document
 is validated through :func:`ppmlx.router.policy_from_dict` before it touches
 disk. API keys are never read or displayed here.
+
+The interactive surface (:func:`run_route_tui`) is a full-screen
+prompt_toolkit application following the conventions of
+:mod:`ppmlx.tui._multi_picker`: ``Layout``/``HSplit``/``Window`` with
+``FormattedTextControl`` renderers, a plain-dict cursor state, shared styling
+from :mod:`ppmlx.tui._style`, and inline modal forms instead of sequential
+prompts. All scriptable helpers (``route_list``, ``route_alias_add``, ...)
+remain importable for CLI use.
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
 import os
 import tomllib
@@ -328,7 +337,7 @@ def route_alias_rename(
 
 
 # ---------------------------------------------------------------------------
-# Interactive pieces
+# Interactive pieces (non-TUI wizard kept for `ppmlx route set`)
 # ---------------------------------------------------------------------------
 
 
@@ -625,71 +634,740 @@ def _one_line(error: BaseException) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Interactive loop
+# Full-screen prompt_toolkit TUI
 # ---------------------------------------------------------------------------
 
 
+def _route_entry_for(doc: dict, alias: str) -> dict | None:
+    """Return the ``openai-chat:<alias>`` route entry mapping, if present."""
+    for entry in doc.get("routes", {}).get("entries") or []:
+        if isinstance(entry, dict) and entry.get("key") == f"openai-chat:{alias}":
+            return entry
+    return None
+
+
+def _status_hint(provider_id: str) -> str:
+    """Short status column hint (credential expectation), never a secret."""
+    if provider_id in _LOCAL_PROVIDER_IDS:
+        return "local"
+    if provider_id == "openai":
+        return "OPENAI_API_KEY"
+    if provider_id.startswith("anthropic"):
+        return "ANTHROPIC_API_KEY"
+    return ""
+
+
+def _candidate_dict(kind: str, model: str, base_url: str) -> dict:
+    cand: dict = {"provider": kind, "model": model}
+    if base_url and kind != "anthropic-subscription":
+        cand["base_url"] = base_url
+    if kind.startswith("anthropic"):
+        cand["provider_kind"] = "anthropic"
+    else:
+        cand.setdefault("provider_kind", "openai")
+    return cand
+
+
 def run_route_tui(*, path: Path | None = None) -> None:
-    """Interactive loop: list / set / add / remove / rename / test / quit."""
+    """Full-screen alias manager: table + detail panel + inline add/edit form."""
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import (
+        ConditionalContainer,
+        DynamicContainer,
+        HSplit,
+        Layout,
+        ScrollOffsets,
+        VSplit,
+        Window,
+        WindowAlign,
+    )
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.widgets import TextArea
+
+    from prompt_toolkit.document import Document as _PTDocument
+
+    from ppmlx.tui._style import get_style
+
     path = path or route_policy_path()
-    console.print(Panel("[bold]ppmlx route[/bold] — alias manager"))
-    while True:
+
+    state: dict = {
+        "doc": load_route_document(path),
+        "cursor": 0,
+        "search": "",
+        "mode": "table",  # table | form
+        "confirm_delete": False,
+        "flash": "",       # "" or "!error:<msg>"
+        "detail": "",      # live-test summary lines for the detail panel
+        "testing": False,
+    }
+    form: dict = {
+        "kind_idx": 0,
+        "edit_alias": None,
+        "stop_buffers": [],   # ordered Buffers for tab cycling (incl. kind)
+        "kind_stop": None,    # index of the provider-kind stop
+    }
+
+    # -- document plumbing --------------------------------------------------
+
+    def _reload() -> None:
+        state["doc"] = load_route_document(path)
+
+    def _rows() -> list[dict]:
+        rows: list[dict] = []
+        doc = state["doc"]
+        routes = doc.get("routes", {}) or {}
+        raw_aliases = routes.get("aliases", {}) or {}
+        entries_index = {
+            e.get("key"): e
+            for e in routes.get("entries", []) or []
+            if isinstance(e, dict)
+        }
+        for alias, target in sorted(raw_aliases.items()):
+            if (
+                not isinstance(target, list)
+                or len(target) != 2
+                or any(not isinstance(p, str) or not p for p in target)
+            ):
+                continue
+            provider_id, target_model = target
+            entry = entries_index.get(f"openai-chat:{alias}")
+            base_url = None
+            model_id = target_model
+            cands = (entry or {}).get("candidates") or []
+            if cands and isinstance(cands[0], dict):
+                base_url = cands[0].get("base_url")
+                model_id = cands[0].get("model", model_id)
+            rows.append(
+                {
+                    "alias": alias,
+                    "provider": provider_id,
+                    "model": model_id,
+                    "base_url": base_url,
+                    "entry": entry,
+                    "hint": _status_hint(provider_id),
+                }
+            )
+        needle = state["search"].lower()
+        if needle:
+            rows = [
+                r
+                for r in rows
+                if needle in r["alias"].lower()
+                or needle in r["provider"].lower()
+                or needle in (r["model"] or "").lower()
+            ]
+        return rows
+
+    def _selected_row() -> dict | None:
+        rows = _rows()
+        if not rows:
+            return None
+        state["cursor"] = max(0, min(state["cursor"], len(rows) - 1))
+        return rows[state["cursor"]]
+
+    def _flash(msg: str, *, error: bool = False) -> None:
+        state["flash"] = ("!error:" if error else "") + msg
+
+    def _save_doc(doc: dict) -> bool:
         try:
-            action = _select_action()
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]bye[/dim]")
+            backup = save_route_document(doc, path)
+        except ValueError as exc:
+            _flash(f"Validation failed: {exc}", error=True)
+            return False
+        state["doc"] = doc
+        note = f"  [backup: {backup.name}]" if backup else ""
+        _flash(f"Saved {path}{note}")
+        return True
+
+    def _build_form_doc(alias: str, kind: str, model: str, base_url: str, fallback_lines: list[str]) -> dict:
+        doc = load_route_document(path) if path.exists() else _skeleton_doc()
+        routes = doc.setdefault("routes", {})
+        routes.setdefault("version", "1")
+        routes.setdefault("aliases", {})[alias] = [kind, model]
+        candidates = [_candidate_dict(kind, model, base_url)]
+        for line in fallback_lines:
+            parts = line.split(",", 1)
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                candidates.append(_candidate_dict(parts[0].strip(), parts[1].strip(), ""))
+        key = f"openai-chat:{alias}"
+        entries = [
+            e
+            for e in routes.setdefault("entries", [])
+            if not (isinstance(e, dict) and e.get("key") == key)
+        ]
+        entries.append({"key": key, "candidates": candidates, "fallback_errors": []})
+        routes["entries"] = entries
+        return doc
+
+    # -- rendering -----------------------------------------------------------
+
+    W_ALIAS, W_PROV, W_MODEL, W_URL = 18, 24, 30, 32
+
+    def _pad(text: object, w: int) -> str:
+        s = str(text or "")
+        return s[: w - 1] + "\u2026" if len(s) > w else s.ljust(w)
+
+    def _get_header() -> list[tuple[str, str]]:
+        return [
+            ("class:header", " ppmlx routes"),
+            ("class:dim", f"  \u2502 {path}"),
+            ("", "\n"),
+        ]
+
+    def _get_table() -> list[tuple[str, str]]:
+        rows = _rows()
+        if not rows:
+            return [("class:dim", "   No aliases yet — press a to add one.\n")]
+        header = (
+            f"     {_pad('alias', W_ALIAS)}{_pad('provider', W_PROV)}"
+            f"{_pad('model', W_MODEL)}{_pad('base_url', W_URL)}status\n"
+        )
+        frag: list[tuple[str, str]] = [
+            ("class:table.header", header),
+            ("class:table.border", "\u2500" * (len(header) - 1) + "\n"),
+        ]
+        for i, r in enumerate(rows):
+            cur = i == state["cursor"]
+            style = "class:cursor" if cur else ""
+            prefix = "  \u25b8 " if cur else "    "
+            cells = (
+                f"{_pad(r['alias'], W_ALIAS)}{_pad(r['provider'], W_PROV)}"
+                f"{_pad(r['model'], W_MODEL)}{_pad(r['base_url'] or '', W_URL)}"
+                f"{r['hint']}\n"
+            )
+            frag.append((style, prefix + cells))
+        return frag
+
+    def _get_detail() -> list[tuple[str, str]]:
+        frag: list[tuple[str, str]] = [("class:section", " Details"), ("", "\n")]
+        row = _selected_row()
+        if row is None:
+            frag.append(("class:dim", "  (no selection)\n"))
+            return frag
+        frag.append(("class:value", f"  alias      {row['alias']}\n"))
+        frag.append(("class:value", f"  provider   {row['provider']}\n"))
+        frag.append(("class:value", f"  model      {row['model']}\n"))
+        frag.append(("class:value", f"  base_url   {row['base_url'] or '(default)'}\n"))
+        entry = row["entry"]
+        cands = ((entry or {}).get("candidates")) or []
+        if len(cands) > 1:
+            frag.append(("class:section", "  fallback candidates"), )
+            frag.append(("", "\n"))
+            for j, cand in enumerate(cands[1:], start=2):
+                if isinstance(cand, dict):
+                    frag.append((
+                        "class:dim",
+                        f"   #{j} {cand.get('provider')} / {cand.get('model')}"
+                        f"  {cand.get('base_url') or ''}\n",
+                    ))
+        fb_errors = (entry or {}).get("fallback_errors") or []
+        if fb_errors:
+            frag.append(("fg:red bold", f"  fallback_errors: {fb_errors}\n"))
+        if state["testing"]:
+            frag.append(("class:unsaved", "  testing\u2026 (live request in flight)\n"))
+        elif state["detail"]:
+            for line in state["detail"].splitlines():
+                cls = "fg:red" if line.startswith("!") else "class:dim"
+                frag.append((cls, f"  {line}\n"))
+        return frag
+
+    def _get_footer() -> list[tuple[str, str]]:
+        parts: list[tuple[str, str]] = [
+            (
+                "class:footer",
+                " a add \u00b7 e edit \u00b7 d delete \u00b7 t test \u00b7 r refresh"
+                " \u00b7 / search \u00b7 q quit",
+            ),
+        ]
+        flash = state["flash"]
+        if flash.startswith("!error:"):
+            parts.append(("fg:red bold", f"   \u2717 {flash[len('!error:'):]}"))
+        elif flash:
+            parts.append(("class:checked", f"   \u2713 {flash}"))
+        if state["confirm_delete"]:
+            parts.append(("class:unsaved", "   delete selected alias? y/n"))
+        parts.append(("", "\n"))
+        return parts
+
+    # -- form mode -------------------------------------------------------------
+
+    def _form_field_values() -> dict:
+        return {
+            "alias": form["alias_field"].text.strip(),
+            "model": form["model_field"].text.strip(),
+            "url": form["url_field"].text.strip(),
+            "fallbacks": [
+                ln.strip()
+                for ln in form["fallback_field"].text.splitlines()
+                if ln.strip()
+            ],
+            "kind": PROVIDER_KINDS[form["kind_idx"]][0],
+        }
+
+    def _validate_form() -> str | None:
+        vals = _form_field_values()
+        if not vals["alias"] or ":" in vals["alias"] or "/" in vals["alias"]:
+            return "Alias must be non-empty and contain no ':' or '/'"
+        if not vals["model"]:
+            return "Model id is required"
+        known = set(state["doc"].get("routes", {}).get("aliases", {}) or {})
+        if vals["alias"] in known and vals["alias"] != form["edit_alias"]:
+            return f"Alias {vals['alias']!r} already exists"
+        return None
+
+    def _submit_form(app) -> None:
+        err = _validate_form()
+        if err:
+            _flash(err, error=True)
+            app.invalidate()
             return
-        if action == "quit":
-            console.print("[dim]bye[/dim]")
+        vals = _form_field_values()
+        try:
+            doc = _build_form_doc(
+                vals["alias"], vals["kind"], vals["model"], vals["url"], vals["fallbacks"]
+            )
+        except ValueError as exc:
+            _flash(str(exc), error=True)
+            app.invalidate()
+            return
+        if _save_doc(doc):
+            state["mode"] = "table"
+            state["cursor"] = 0
+            _flash(f"Saved alias {vals['alias']!r}")
+        app.invalidate()
+
+    def _cancel_form(app) -> None:
+        state["mode"] = "table"
+        _flash("")
+        app.invalidate()
+
+    def _enter_form(app, *, edit: bool) -> None:
+        row = _selected_row()
+        if edit and row is None:
+            _flash("No alias selected", error=True)
+            app.invalidate()
+            return
+        kind_idx = 0
+        fallbacks_text = ""
+        alias_text = model_text = url_text = ""
+        if edit and row is not None:
+            cands = ((row["entry"] or {}).get("candidates")) or []
+            fallbacks_text = "\n".join(
+                f"{c.get('provider', '')}, {c.get('model', '')}"
+                for c in cands[1:]
+                if isinstance(c, dict)
+            )
+            for i, (kind, _d) in enumerate(PROVIDER_KINDS):
+                if kind == row["provider"]:
+                    kind_idx = i
+            alias_text = row["alias"]
+            model_text = row["model"] or ""
+            url_text = row["base_url"] or ""
+        form["alias_field"] = TextArea(text=alias_text, multiline=False)
+        form["model_field"] = TextArea(text=model_text, multiline=False)
+        form["url_field"] = TextArea(text=url_text, multiline=False)
+        form["fallback_field"] = TextArea(text=fallbacks_text, multiline=True)
+        # Read-only stand-in for the provider-kind selector stop (left/right).
+        kind_label, _kind_desc = PROVIDER_KINDS[kind_idx]
+        form["kind_field"] = TextArea(text=kind_label, multiline=False, read_only=True)
+        form["kind_idx"] = kind_idx
+        form["edit_alias"] = row["alias"] if edit else None
+        form["stop_buffers"] = [
+            form["alias_field"].buffer,
+            form["model_field"].buffer,
+            form["url_field"].buffer,
+            form["fallback_field"].buffer,
+            form["kind_field"].buffer,
+        ]
+        form["kind_stop"] = len(form["stop_buffers"]) - 1
+        form["focus_idx"] = 0
+        state["mode"] = "form"
+        state["confirm_delete"] = False
+        _flash("")
+        app.layout.focus(form["alias_field"].window)
+        app.invalidate()
+
+    def _stop_widget(idx: int):
+        return {
+            0: form["alias_field"],
+            1: form["model_field"],
+            2: form["url_field"],
+            3: form["fallback_field"],
+            form["kind_stop"]: form["kind_field"],
+        }[idx]
+
+    def _cycle_focus(app, delta: int) -> None:
+        stops = form["stop_buffers"]
+        form["focus_idx"] = (form["focus_idx"] + delta) % len(stops)
+        # Sync the read-only kind selector text with the current selection.
+        if form["focus_idx"] == form["kind_stop"]:
+            form["kind_field"].buffer.set_document(
+                _PTDocument(PROVIDER_KINDS[form["kind_idx"]][0])
+            )
+        app.layout.focus(_stop_widget(form["focus_idx"]).window)
+
+    def _on_kind_stop() -> bool:
+        return form.get("focus_idx", 0) == form["kind_stop"]
+
+    def _get_form() -> list[tuple[str, str]]:
+        kind_label, kind_desc = PROVIDER_KINDS[form["kind_idx"]]
+        editing = form["edit_alias"] is not None
+        frag: list[tuple[str, str]] = [
+            ("class:header", f" {'Edit alias' if editing else 'New alias'}"),
+            ("", "\n\n"),
+        ]
+        focus_idx = form.get("focus_idx", 0)
+        rows_def = (
+            ("alias", 0),
+            ("model id", 1),
+            ("base_url (optional)", 2),
+        )
+        labels = {
+            "alias": "alias",
+            "model id": "model id",
+            "base_url (optional)": "base_url (optional)",
+            3: "fallbacks \u2014 one 'provider, model' per line",
+        }
+        for label, idx in rows_def:
+            focused = idx == focus_idx
+            frag.append(("class:checked" if focused else "class:dim", " \u25b8 " if focused else "   "))
+            frag.append(("class:table.header" if focused else "class:dim", label + "\n"))
+            frag.append(("", "\n"))
+        # fallback field rendered via its window below; keep spacing stable here.
+        focused_kind = _on_kind_stop()
+        frag.append((
+            "class:checked" if focused_kind else "class:dim",
+            " \u25b8 " if focused_kind else "   ",
+        ))
+        frag.append(("class:section", "provider kind (\u2190/\u2192 to change)" + "\n"))
+        frag.append(("class:value" if focused_kind else "class:dim", f" \u25c6 {kind_label}"))
+        frag.append(("class:dim", f"  {kind_desc}\n\n"))
+        return frag
+
+    def _get_form_footer() -> list[tuple[str, str]]:
+        frag: list[tuple[str, str]] = [(
+            "class:footer",
+            " tab/\u21f5 move \u00b7 enter save \u00b7 esc cancel ",
+        )]
+        flash = state["flash"]
+        if flash.startswith("!error:"):
+            frag.append(("fg:red bold", f"   \u2717 {flash[len('!error:'):]}"))
+        elif flash:
+            frag.append(("class:checked", f"   \u2713 {flash}"))
+        frag.append(("", "\n"))
+        return frag
+
+    # -- live test (async, never blocks the UI thread) --------------------------
+
+    def _run_live_test(alias: str, app) -> None:
+        loop = asyncio.get_event_loop()
+
+        def blocking() -> tuple[int, str]:
+            import contextlib
+            import io
+
+            buf = io.StringIO()
+            captured = Console(file=buf, width=100)
+            global_console = globals()["console"]
+            globals()["console"] = captured
+            try:
+                code = route_test(alias)
+            finally:
+                globals()["console"] = global_console
+            lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+            summary = " \u2502 ".join(lines[-3:])[:400]
+            return code, ("\u2717 " if code else "\u2713 ") + (summary or "(no output)")
+
+        async def runner() -> None:
+            try:
+                code, summary = await loop.run_in_executor(None, blocking)
+            except Exception as exc:  # secret-free surface: type name only
+                code, summary = 1, f"\u2717 {type(exc).__name__}: {_one_line(exc)}"
+            state["testing"] = False
+            state["detail"] = summary
+            app.invalidate()
+
+        state["testing"] = True
+        state["detail"] = ""
+        asyncio.ensure_future(runner())
+
+    # -- table-mode key bindings -------------------------------------------------
+
+    kb_table = KeyBindings()
+
+    @kb_table.add("up", eager=True)
+    @kb_table.add("k", eager=True)
+    def _up(event):
+        if state["cursor"] > 0:
+            state["cursor"] -= 1
+
+    @kb_table.add("down", eager=True)
+    @kb_table.add("j", eager=True)
+    def _down(event):
+        if state["cursor"] < len(_rows()) - 1:
+            state["cursor"] += 1
+
+    @kb_table.add("pageup", eager=True)
+    def _pageup(event):
+        state["cursor"] = max(0, state["cursor"] - 10)
+
+    @kb_table.add("pagedown", eager=True)
+    def _pagedown(event):
+        state["cursor"] = min(len(_rows()) - 1, state["cursor"] + 10)
+
+    @kb_table.add("/", eager=True)
+    def _start_search(event):
+        state["search"] = ""
+
+    @kb_table.add("backspace", eager=True)
+    def _search_backspace(event):
+        if state["search"]:
+            state["search"] = state["search"][:-1]
+
+    @kb_table.add("escape", eager=True)
+    def _esc(event):
+        if state["confirm_delete"]:
+            state["confirm_delete"] = False
+        elif state["search"]:
+            state["search"] = ""
+
+    @kb_table.add("a", eager=True)
+    def _add(event):
+        _enter_form(event.app, edit=False)
+
+    @kb_table.add("e", eager=True)
+    def _edit(event):
+        _enter_form(event.app, edit=True)
+
+    @kb_table.add("d", eager=True)
+    def _delete(event):
+        if _selected_row() is not None:
+            state["confirm_delete"] = True
+            event.app.invalidate()
+
+    @kb_table.add("y", eager=True)
+    def _confirm_yes(event):
+        if not state["confirm_delete"]:
+            return
+        state["confirm_delete"] = False
+        row = _selected_row()
+        if row is None:
             return
         try:
-            if action == "list":
-                rows = route_list(path=path)
-                if rows:
-                    console.print(render_alias_table(rows))
-                else:
-                    console.print(
-                        f"[yellow]No aliases yet at {path}.[/yellow] Choose 'set' to add one."
-                    )
-            elif action == "set":
-                route_set("", path=path)
-            elif action == "add":
-                from rich.prompt import Confirm, Prompt
+            backup = route_alias_remove(row["alias"], path=path)
+        except ValueError as exc:
+            _flash(str(exc), error=True)
+            event.app.invalidate()
+            return
+        _reload()
+        note = f"  [backup: {backup.name}]" if backup else ""
+        _flash(f"Removed {row['alias']!r}{note}")
+        event.app.invalidate()
 
-                alias = Prompt.ask("New alias name").strip()
-                provider, _ = _ask_provider_kind()
-                model = Prompt.ask("Model id").strip()
-                route_alias_add(alias, provider, model, path=path)
-                console.print(f"[green]Added {alias}.[/green]")
-            elif action == "remove":
-                from rich.prompt import Confirm, Prompt
+    @kb_table.add("n", eager=True)
+    def _confirm_no(event):
+        state["confirm_delete"] = False
+        event.app.invalidate()
 
-                rows = route_list(path=path)
-                console.print(render_alias_table(rows))
-                alias = Prompt.ask("Alias to remove").strip()
-                if Confirm.ask(f"Really remove {alias!r}?", default=False):
-                    route_alias_remove(alias, path=path)
-                    console.print(f"[green]Removed {alias}.[/green]")
-            elif action == "rename":
-                from rich.prompt import Prompt
+    @kb_table.add("t", eager=True)
+    def _test(event):
+        row = _selected_row()
+        if row is None:
+            return
+        state["detail"] = ""
+        _run_live_test(row["alias"], event.app)
+        event.app.invalidate()
 
-                old = Prompt.ask("Current alias").strip()
-                new = Prompt.ask("New name").strip()
-                route_alias_rename(old, new, path=path)
-                console.print(f"[green]Renamed {old} -> {new}.[/green]")
-            elif action == "test":
-                from rich.prompt import Prompt
+    @kb_table.add("r", eager=True)
+    def _refresh(event):
+        _reload()
+        state["cursor"] = 0
+        _flash(f"Reloaded {path}")
+        event.app.invalidate()
 
-                rows = route_list(path=path)
-                console.print(render_alias_table(rows))
-                alias = Prompt.ask("Alias to test").strip()
-                route_test(alias)
-        except ValueError as error:
-            console.print(f"[red]{error}[/red]")
-        except SystemExit:
-            pass
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Cancelled.[/yellow]")
+    @kb_table.add("q", eager=True)
+    @kb_table.add("c-c", eager=True)
+    def _quit(event):
+        event.app.exit(result=None)
+
+    @kb_table.add("<any>", eager=True)
+    def _any_char(event):
+        ch = event.data
+        if state["confirm_delete"]:
+            return  # only y/n/esc handled above
+        if ch.isprintable() and len(ch) == 1:
+            state["search"] += ch
+            state["cursor"] = 0
+
+    # -- form-mode key bindings ----------------------------------------------------
+
+    kb_form = KeyBindings()
+
+    @kb_form.add("tab")
+    def _f_next(event):
+        _cycle_focus(event.app, +1)
+        event.app.invalidate()
+
+    @kb_form.add("s-tab")
+    def _f_prev(event):
+        _cycle_focus(event.app, -1)
+        event.app.invalidate()
+
+    @kb_form.add("down")
+    def _f_down(event):
+        idx = form["focus_idx"]
+        if idx == 3:  # multiline fallback editor keeps native cursor motion
+            form["fallback_field"].buffer.cursor_down()
+        else:
+            _cycle_focus(event.app, +1)
+        event.app.invalidate()
+
+    @kb_form.add("up")
+    def _f_up(event):
+        idx = form["focus_idx"]
+        if idx == 3 and form["fallback_field"].buffer.document.cursor_position_row > 0:
+            form["fallback_field"].buffer.cursor_up()
+        else:
+            _cycle_focus(event.app, -1)
+        event.app.invalidate()
+
+    @kb_form.add("left")
+    @kb_form.add("right")
+    def _f_kind_change(event):
+        if _on_kind_stop():
+            step = 1 if event.key_sequence[0].key == "right" else -1
+            form["kind_idx"] = (form["kind_idx"] + step) % len(PROVIDER_KINDS)
+            form["kind_field"].buffer.set_document(
+                _PTDocument(PROVIDER_KINDS[form["kind_idx"]][0])
+            )
+            event.app.invalidate()
+
+    @kb_form.add("c-m", eager=True)
+    def _f_submit(event):
+        if _on_kind_stop():
+            _submit_form(event.app)
+        else:
+            _cycle_focus(event.app, +1)
+            event.app.invalidate()
+
+    @kb_form.add("escape", eager=True)
+    def _f_cancel(event):
+        _cancel_form(event.app)
+
+    @kb_form.add("c-c", eager=True)
+    def _f_quit(event):
+        event.app.exit(result=None)
+
+    # -- layout ----------------------------------------------------------------------
+
+    header_window = Window(
+        content=FormattedTextControl(_get_header), height=1, always_hide_cursor=True
+    )
+    table_control = FormattedTextControl(_get_table)
+    table_control.get_cursor_position = lambda: __import__(
+        "prompt_toolkit.data_structures", fromlist=["Point"]
+    ).Point(x=0, y=max(0, state["cursor"]))
+    table_window = Window(
+        content=table_control,
+        always_hide_cursor=True,
+        scroll_offsets=ScrollOffsets(top=1, bottom=1),
+    )
+    detail_window = Window(
+        content=FormattedTextControl(_get_detail),
+        height=12,
+        always_hide_cursor=True,
+    )
+    footer_window = Window(
+        content=FormattedTextControl(_get_footer), height=1, always_hide_cursor=True
+    )
+
+    table_view = HSplit(
+        [
+            header_window,
+            table_window,
+            detail_window,
+            footer_window,
+        ]
+    )
+
+    def _make_form_view():
+        """Build the form layout from the currently-installed widgets."""
+        if "alias_field" not in form:
+            return Window(content=FormattedTextControl(lambda: [("", "")]), height=1)
+        return HSplit(
+            [
+                VSplit(
+                    [
+                        Window(width=3, always_hide_cursor=True),
+                        HSplit(
+                            [
+                                form["alias_field"],
+                                form["model_field"],
+                                form["url_field"],
+                            ]
+                        ),
+                    ]
+                ),
+                Window(height=1, char=" ", style=""),
+                form["fallback_field"],
+                Window(height=1, char=" ", style=""),
+                Window(
+                    content=FormattedTextControl(_get_form),
+                    always_hide_cursor=True,
+                ),
+                Window(height=1, char=" ", style=""),
+                Window(
+                    content=FormattedTextControl(_get_form_footer),
+                    height=1,
+                    always_hide_cursor=True,
+                ),
+            ]
+        )
+
+    form_container = DynamicContainer(lambda: _make_form_view())
+
+    layout = Layout(
+        HSplit(
+            [
+                ConditionalContainer(table_view, filter=Condition(lambda: state["mode"] == "table")),
+                ConditionalContainer(form_container, filter=Condition(lambda: state["mode"] == "form")),
+            ]
+        )
+    )
+
+    from prompt_toolkit.key_binding import (
+        ConditionalKeyBindings,
+        KeyBindings,
+    )
+
+    merged_kb = KeyBindings()
+    merged_kb.bindings.extend(
+        ConditionalKeyBindings(
+            kb_table, Condition(lambda: state["mode"] == "table")
+        ).bindings
+    )
+    merged_kb.bindings.extend(
+        ConditionalKeyBindings(
+            kb_form, Condition(lambda: state["mode"] == "form")
+        ).bindings
+    )
+
+    app: Application = Application(
+        layout=layout,
+        key_bindings=merged_kb,
+        style=get_style(),
+        full_screen=True,
+        mouse_support=False,
+    )
+
+    app.run()
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive action picker (kept for graceful degradation paths)
+# ---------------------------------------------------------------------------
 
 
 def _select_action() -> str:
