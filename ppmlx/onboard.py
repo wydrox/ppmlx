@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_BASE_URL = "http://127.0.0.1:6767"
-HARNESSES = ("claude", "codex", "opencode", "pi")
+HARNESSES = ("claude", "codex", "opencode", "pi", "grok")
 
 # Binary names to look for, plus config dirs that indicate an install.
 _HARNESS_BINARIES = {
@@ -26,12 +26,14 @@ _HARNESS_BINARIES = {
     "codex": "codex",
     "opencode": "opencode",
     "pi": "pi",
+    "grok": "grok",
 }
 _HARNESS_CONFIG_DIRS = {
     "claude": (".claude",),
     "codex": (".codex",),
     "opencode": (".config/opencode", ".opencode"),
     "pi": (".pi",),
+    "grok": (".grok",),
 }
 
 
@@ -381,6 +383,48 @@ def write_pi_models(
     return result.changes[-1]
 
 
+def grok_config_path(home: Path | None = None) -> Path:
+    return (home or Path.home()) / ".grok" / "config.toml"
+
+
+def write_grok_config(
+    base_url: str = DEFAULT_BASE_URL,
+    model: str = "model-heavy",
+    *,
+    home: Path | None = None,
+    dry_run: bool = False,
+    result: OnboardResult | None = None,
+) -> ChangeRecord:
+    """Add a persistent ``[model.ppmlx]`` section to ~/.grok/config.toml.
+
+    Uses the same text-level TOML upsert as the codex writer, so comments and
+    sibling sections (e.g. the user's own ``[model.X]`` entries) survive.
+    """
+    result = result or OnboardResult()
+    path = grok_config_path(home)
+    text = path.read_text() if path.exists() else ""
+    updated = _upsert_toml_section(
+        text,
+        "model.ppmlx",
+        {
+            "model": model,
+            "base_url": f"{base_url}/v1",
+            "env_key": "PPMLX_LOCAL",
+            "name": "ppmlx gateway",
+            "context_window": 200000,
+        },
+    )
+    _write_changed(
+        path,
+        updated,
+        dry_run=dry_run,
+        harness="grok",
+        detail=f"model.ppmlx base_url={base_url}/v1 model={model}",
+        result=result,
+    )
+    return result.changes[-1]
+
+
 # ---------------------------------------------------------------------------
 # Route policy setup (opt-in)
 # ---------------------------------------------------------------------------
@@ -485,6 +529,38 @@ def _offer_route_tui(*, home: Path | None = None) -> None:
     run_route_tui(path=route_policy_path(home=home))
 
 
+def _available_aliases(*, home: Path | None = None) -> list[str]:
+    """Alias names defined in ~/.ppmlx/routes.toml, sorted (empty when absent)."""
+    path = routes_toml_path(home)
+    try:
+        with open(path, "rb") as handle:
+            doc = tomllib.load(handle)
+        aliases = doc.get("routes", {}).get("aliases", {}) or {}
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    return sorted(a for a in aliases if isinstance(a, str) and a)
+
+
+def _ask_grok_alias(
+    *,
+    model: str | None,
+    home: Path | None,
+) -> str | None:
+    """Interactive: which ppmlx alias should grok point at? Free-text fallback."""
+    from rich.prompt import Prompt
+
+    aliases = _available_aliases(home=home)
+    if aliases:
+        choices = ", ".join(aliases)
+        raw = Prompt.ask(
+            f"[grok] Which ppmlx alias should be the default? ({choices}, or type another)",
+            default=aliases[0],
+        ).strip()
+        return raw or None
+    raw = Prompt.ask("[grok] Default ppmlx model alias", default="model-heavy").strip()
+    return raw or None
+
+
 def configure_harnesses(
     harnesses: list[str],
     *,
@@ -505,6 +581,8 @@ def configure_harnesses(
             write_codex_config(base_url, home=home, dry_run=dry_run, result=result)
         elif name == "opencode":
             write_opencode_config(base_url, model, home=home, dry_run=dry_run, result=result)
+        elif name == "grok":
+            write_grok_config(base_url, model or "model-heavy", home=home, dry_run=dry_run, result=result)
         elif name == "pi":
             if model:
                 write_pi_models(base_url, model, home=home, dry_run=dry_run, result=result)
@@ -567,6 +645,9 @@ def run_onboard_wizard(
         setup_routes = bool(
             Confirm.ask("Set up example route policy (~/.ppmlx/routes.toml + [server] route_policy)?", default=False)
         )
+
+    if "grok" in (harnesses or []) and not model and not dry_run and not yes:
+        model = _ask_grok_alias(model=model, home=home)
 
     result = configure_harnesses(harnesses or [], base_url=base_url, model=model, home=home, dry_run=dry_run)
     if setup_routes:
