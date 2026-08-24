@@ -236,3 +236,24 @@ class TestEndToEndOpenRouter:
             service.execute(_route_input(), self._envelope())
         assert info.value.code == "provider_auth_failed"
         assert info.value.status_code == 502
+
+
+def test_known_provider_registry_covers_openrouter_grok_kimi():
+    from ppmlx.route_tui import KNOWN_PROVIDERS
+
+    for name, expected_url in [
+        ("openrouter", "https://openrouter.ai/api/v1"),
+        ("grok", "https://api.x.ai/v1"),
+        ("kimi", "https://api.kimi.com/coding/v1"),
+    ]:
+        assert KNOWN_PROVIDERS[name]["base_url"] == expected_url
+        assert KNOWN_PROVIDERS[name]["env_key"]
+
+
+def test_server_env_key_known_providers():
+    from ppmlx.server import _env_key_for
+
+    assert _env_key_for("openrouter") == "OPENROUTER_API_KEY"
+    assert _env_key_for("grok") == "XAI_API_KEY"
+    assert _env_key_for("xai") == "XAI_API_KEY"
+    assert _env_key_for("kimi") == "KIMI_API_KEY"

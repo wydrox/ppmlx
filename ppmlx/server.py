@@ -294,8 +294,25 @@ def _get_remote_routing_service():
 
 
 def _env_key_for(provider_id: str) -> str:
-    defaults = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+    defaults = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "grok": "XAI_API_KEY",
+        "xai": "XAI_API_KEY",
+        "kimi": "KIMI_API_KEY",
+        "moonshot": "MOONSHOT_API_KEY",
+    }
     return defaults.get(provider_id) or f"{provider_id.upper()}_API_KEY"
+
+
+_PROVIDER_DEFAULT_BASE_URLS = {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "grok": "https://api.x.ai/v1",
+    "xai": "https://api.x.ai/v1",
+    "kimi": "https://api.kimi.com/coding/v1",
+    "moonshot": "https://api.moonshot.cn/v1",
+}
 
 
 def _subscription_passthrough_enabled() -> bool:
@@ -392,7 +409,9 @@ def _remote_providers_for_policy(policy):
                 from ppmlx.providers.openai import OpenAIProvider
 
                 providers[candidate.provider_id] = OpenAIProvider(
-                    base_url=candidate.base_url or "https://api.openai.com/v1",
+                    base_url=candidate.base_url or _PROVIDER_DEFAULT_BASE_URLS.get(
+                        candidate.provider_id, "https://api.openai.com/v1"
+                    ),
                     env_key=env_key,
                     provider_id=candidate.provider_id,
                 )

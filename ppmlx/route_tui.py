@@ -58,6 +58,23 @@ PROVIDER_KINDS = (
     ),
 )
 
+# Well-known provider ids with default base URLs. A route candidate may use
+# any of these as its ``provider`` id and the correct endpoint + env key are
+# picked automatically (no base_url needed in routes.toml).
+KNOWN_PROVIDERS: dict[str, dict] = {
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "env_key": "OPENROUTER_API_KEY",
+    },
+    "grok": {"base_url": "https://api.x.ai/v1", "env_key": "XAI_API_KEY"},
+    "xai": {"base_url": "https://api.x.ai/v1", "env_key": "XAI_API_KEY"},
+    "kimi": {"base_url": "https://api.kimi.com/coding/v1", "env_key": "KIMI_API_KEY"},
+    "moonshot": {
+        "base_url": "https://api.moonshot.cn/v1",
+        "env_key": "MOONSHOT_API_KEY",
+    },
+}
+
 _LOCAL_PROVIDER_IDS = frozenset({"mlx", "local"})
 _DEFAULT_DOC: dict = {
     "routes": {
@@ -408,6 +425,14 @@ def route_set(
             console.print(
                 "[yellow]anthropic-subscription is locked: it always uses the "
                 "built-in subscription tunnel; base_url is ignored.[/yellow]"
+            )
+        elif provider_kind in KNOWN_PROVIDERS:
+            # Known provider: default base URL comes from the registry, so a
+            # bare alias like `model-ciężki = ["grok", "grok-4.6"]` just works.
+            base_url = KNOWN_PROVIDERS[provider_kind]["base_url"]
+            console.print(
+                f"[dim]{provider_kind}: using {base_url} "
+                f"(key: {KNOWN_PROVIDERS[provider_kind]['env_key']})[/dim]"
             )
         else:
             default_base = (
