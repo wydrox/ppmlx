@@ -120,3 +120,17 @@ class TestAliasQuestion:
 
     def test_available_aliases_missing_file(self, tmp_home):
         assert onboard._available_aliases(home=tmp_home) == []
+
+
+def test_cli_onboard_accepts_grok_harness():
+    from typer.testing import CliRunner
+
+    from ppmlx.cli import app
+
+    # Regression: --harness grok used to be rejected by a stale CLI whitelist.
+    dry = CliRunner().invoke(
+        app, ["onboard", "--dry-run", "--yes", "--harness", "grok", "--model", "test-heavy"]
+    )
+    assert dry.exit_code == 0, dry.output
+    assert "Unknown harness" not in (dry.output or "")
+    assert "model.ppmlx" in (dry.output or "")

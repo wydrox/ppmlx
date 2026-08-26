@@ -837,7 +837,7 @@ def main(
 def onboard(
     harness: str = typer.Option(
         None, "--harness",
-        help="Comma-separated harnesses to configure (claude,codex,opencode,pi). Omit to detect/ask interactively.",
+        help="Comma-separated harnesses to configure (claude,codex,opencode,pi,grok). Omit to detect/ask interactively.",
     ),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Default model to advertise in configs"),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="ppmlx server endpoint"),
@@ -852,8 +852,10 @@ def onboard(
 
     harnesses = None
     if harness:
+        from ppmlx.onboard import HARNESSES
+
         harnesses = [h.strip().lower() for h in harness.split(",") if h.strip()]
-        invalid = [h for h in harnesses if h not in ("claude", "codex", "opencode", "pi")]
+        invalid = [h for h in harnesses if h not in HARNESSES]
         if invalid:
             console.print(f"[red]Unknown harness(es): {', '.join(invalid)}[/red]")
             raise typer.Exit(1)
