@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from click import unstyle
 
 # Ensure ppmlx modules are stubbed (conftest handles MLX stubs)
 for mod_name in ["ppmlx.models", "ppmlx.engine", "ppmlx.db",
@@ -615,9 +616,10 @@ class TestProcessCLI:
         """process --help shows usage information."""
         result = runner.invoke(cli_app, ["process", "--help"])
         assert result.exit_code == 0
-        assert "summarize" in result.output
-        assert "--task" in result.output
-        assert "--model" in result.output
+        help_text = unstyle(result.output)
+        assert "summarize" in help_text
+        assert "--task" in help_text
+        assert "--model" in help_text
 
     def test_process_nonexistent_dir(self, runner, cli_app):
         """process exits with error for nonexistent directory."""
