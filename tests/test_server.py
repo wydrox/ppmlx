@@ -67,7 +67,10 @@ sys.modules["ppmlx.config"].load_config = MagicMock(return_value=mock_config)
 
 import pytest
 from fastapi.testclient import TestClient
-from ppmlx.server import app
+from ppmlx.server import app, _reset_config_cache
+
+# Reset config cache so it picks up our mock on first call
+_reset_config_cache()
 
 
 @pytest.fixture
@@ -371,11 +374,20 @@ def test_chat_completion_injects_tool_awareness_without_tools(client):
     assert "You do not have access to any external tools" in sent_messages[0]["content"]
 
 
-def test_chat_completion_skips_tool_awareness_for_tools_in_no_tools_only_mode(client):
+def test_chat_completion_skips_tool_awareness_for_tools_in_no_tools_only_mode(client, monkeypatch):
     mock_engine.generate.return_value = ("Hello!", None, 10, 5)
     mock_engine.generate.reset_mock()
     sys.modules["ppmlx.engine"].get_engine = MagicMock(return_value=mock_engine)
-    mock_config.tool_awareness.mode = "no_tools_only"
+
+    from ppmlx.server import _reset_config_cache
+    from ppmlx.config import Config
+    from ppmlx import config as config_module
+    def _mock_load():
+        cfg = Config()
+        cfg.tool_awareness.mode = "no_tools_only"
+        return cfg
+    monkeypatch.setattr(config_module, "load_config", _mock_load)
+    _reset_config_cache()
 
     response = client.post("/v1/chat/completions", json={
         "model": "test-model",
@@ -391,6 +403,7 @@ def test_chat_completion_skips_tool_awareness_for_tools_in_no_tools_only_mode(cl
         "stream": False,
     })
 
+    _reset_config_cache()
     assert response.status_code == 200
     sent_messages = mock_engine.generate.call_args.args[1]
     system_content = sent_messages[0]["content"] if sent_messages and sent_messages[0]["role"] == "system" else ""
@@ -398,15 +411,19 @@ def test_chat_completion_skips_tool_awareness_for_tools_in_no_tools_only_mode(cl
 
 
 def test_inject_tool_awareness_returns_messages_unchanged_when_disabled(monkeypatch):
-    from ppmlx.server import _inject_tool_awareness
+    from ppmlx.server import _inject_tool_awareness, _reset_config_cache
     from ppmlx import config as config_module
     monkeypatch.setattr(
         config_module,
         "load_config",
         lambda: SimpleNamespace(tool_awareness=SimpleNamespace(mode="off")),
     )
+    _reset_config_cache()
     messages = [{"role": "user", "content": "Hi"}]
-    assert _inject_tool_awareness(messages, None) == messages
+    result = _inject_tool_awareness(messages, None)
+    # Restore cache for subsequent tests
+    _reset_config_cache()
+    assert result == messages
 
 
 # ---------------------------------------------------------------------------

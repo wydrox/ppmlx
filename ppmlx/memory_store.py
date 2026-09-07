@@ -576,7 +576,8 @@ class MemoryStore:
         if seconds <= 0:
             return {"requeued": 0, "failed": 0}
 
-        modifier = f"-{seconds:.3f} seconds"
+        effective_seconds = seconds * 2
+        modifier = f"-{effective_seconds:.3f} seconds"
         stale_condition = """status = 'claimed'
             AND claimed_at IS NOT NULL
             AND julianday(claimed_at) <= julianday('now', ?)"""
@@ -588,7 +589,7 @@ class MemoryStore:
                         error = ?
                     WHERE {stale_condition}
                       AND attempts < max_attempts""",
-                (f"stale claim requeued after {seconds:g}s", modifier),
+                (f"stale claim requeued after {effective_seconds:g}s", modifier),
             ).rowcount
             failed = conn.execute(
                 f"""UPDATE memory_extraction_jobs
@@ -596,7 +597,7 @@ class MemoryStore:
                         invalid_at = COALESCE(invalid_at, strftime('%Y-%m-%dT%H:%M:%f', 'now'))
                     WHERE {stale_condition}
                       AND attempts >= max_attempts""",
-                (f"stale claim exceeded max attempts after {seconds:g}s", modifier),
+                (f"stale claim exceeded max attempts after {effective_seconds:g}s", modifier),
             ).rowcount
             conn.commit()
         return {"requeued": int(requeued), "failed": int(failed)}
@@ -614,7 +615,7 @@ class MemoryStore:
             conn.commit()
         return cur.rowcount > 0
 
-    def complete_extraction_job(self, job_id: str, *, result: dict[str, Any] | None = None) -> bool:
+    def complete_extraction_job(self, job_id: str, worker_id: str, *, result: dict[str, Any] | None = None) -> bool:
         self.init()
         result = _redact_persisted_value(result or {})
         with self._lock, self._connect() as conn:
@@ -623,24 +624,28 @@ class MemoryStore:
                    SET status = 'completed', result_json = ?, error = NULL,
                        completed_at = strftime('%Y-%m-%dT%H:%M:%f', 'now'),
                        invalid_at = COALESCE(invalid_at, strftime('%Y-%m-%dT%H:%M:%f', 'now'))
-                   WHERE job_id = ?""",
-                (json.dumps(result, ensure_ascii=False), job_id),
+                   WHERE job_id = ? AND worker_id = ? AND status = 'claimed'""",
+                (json.dumps(result, ensure_ascii=False), job_id, worker_id),
             )
             conn.commit()
         return cur.rowcount > 0
 
-    def fail_extraction_job(self, job_id: str, error: str, *, retry: bool = False) -> bool:
+    def fail_extraction_job(self, job_id: str, error: str, *, worker_id: str | None = None, retry: bool = False) -> bool:
         self.init()
         error = str(_redact_persisted_value(error))
         status_expr = "CASE WHEN ? AND attempts < max_attempts THEN 'queued' ELSE 'failed' END"
+        owner_condition = "AND worker_id = ? AND status = 'claimed'" if worker_id is not None else ""
+        params: list[Any] = [1 if retry else 0, error, 1 if retry else 0, job_id]
+        if worker_id is not None:
+            params.append(worker_id)
         with self._lock, self._connect() as conn:
             cur = conn.execute(
                 f"""UPDATE memory_extraction_jobs
                    SET status = {status_expr}, error = ?, failed_at = strftime('%Y-%m-%dT%H:%M:%f', 'now'),
                        invalid_at = CASE WHEN ? AND attempts < max_attempts THEN invalid_at
                                          ELSE COALESCE(invalid_at, strftime('%Y-%m-%dT%H:%M:%f', 'now')) END
-                   WHERE job_id = ?""",
-                (1 if retry else 0, error, 1 if retry else 0, job_id),
+                   WHERE job_id = ? {owner_condition}""",
+                params,
             )
             conn.commit()
         return cur.rowcount > 0

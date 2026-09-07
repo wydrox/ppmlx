@@ -1,0 +1,11 @@
+name: commit_message
+description: Generate a git commit message from a diff
+system: You are a senior developer who writes clear, conventional commit messages. Follow the Conventional Commits format (type: description). Be concise but descriptive.
+prompt: "Write a git commit message for the following diff:\n\n{{input}}"
+variables:
+  input:
+    required: true
+    description: Git diff or description of changes
+parameters:
+  temperature: 0.3
+  max_tokens: 256

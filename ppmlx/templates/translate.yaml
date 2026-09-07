@@ -1,0 +1,14 @@
+name: translate
+description: Translate text to another language
+system: You are an expert translator. Produce natural, fluent translations that preserve the original meaning and tone.
+prompt: "Translate the following text to {{lang}}:\n\n{{input}}"
+variables:
+  input:
+    required: true
+    description: Text to translate
+  lang:
+    default: English
+    description: Target language
+parameters:
+  temperature: 0.3
+  max_tokens: 2048

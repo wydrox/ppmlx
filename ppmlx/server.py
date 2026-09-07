@@ -28,6 +28,53 @@ from fastapi.responses import JSONResponse
 from ppmlx import __version__
 
 _start_time = time.time()
+_startup_overrides: dict[str, Any] = {}
+
+
+def set_startup_overrides(overrides: dict[str, Any]) -> None:
+    """Pass explicit CLI settings to the in-process ASGI server."""
+    global _startup_overrides
+    _startup_overrides = dict(overrides)
+    _reset_config_cache()
+
+
+# Batch mode flag — set via ``set_batch_mode(True)`` before the server starts.
+# When enabled, requests are routed through :class:`ppmlx.batch.BatchEngine`
+# which provides async request queuing and dispatch.
+_batch_mode: bool = False
+
+
+def set_batch_mode(enabled: bool) -> None:
+    """Enable or disable continuous batching mode.
+
+    Must be called before the server starts handling requests.
+    """
+    global _batch_mode
+    _batch_mode = enabled
+    log.info("Batch mode %s", "enabled" if enabled else "disabled")
+
+
+# Preload flags — set via ``set_preload_model()`` / ``set_preload_embed_model()``
+# before the server starts.  The lifespan handler reads these at startup.
+_preload_model: str | None = None
+_preload_embed_model: str | None = None
+
+
+def set_preload_model(model: str | None) -> None:
+    """Set a model to pre-load during server startup."""
+    global _preload_model
+    _preload_model = model
+
+
+def set_preload_embed_model(model: str | None) -> None:
+    """Set an embedding model to pre-load during server startup."""
+    global _preload_embed_model
+    _preload_embed_model = model
+
+
+def is_batch_mode() -> bool:
+    """Return whether batch mode is currently enabled."""
+    return _batch_mode
 
 
 _DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -42,6 +89,36 @@ _SAFE_AGENT_RUNTIME_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 _cached_server_config = None
 _server_config_loaded = False
+_cached_full_config = None
+_full_config_loaded = False
+
+
+def _get_config():
+    """Return the cached full Config, loading once on first call.
+
+    Used by hot-path helpers (_inject_tool_awareness, _get_max_tools_tokens,
+    chat_completions) to avoid re-reading config.toml on every request.
+    """
+    global _cached_full_config, _full_config_loaded
+    if _full_config_loaded:
+        return _cached_full_config
+    _full_config_loaded = True
+    try:
+        from ppmlx.config import load_config
+        _cached_full_config = load_config(cli_overrides=_startup_overrides) if _startup_overrides else load_config()
+    except Exception:
+        pass
+    return _cached_full_config
+
+
+def _reset_config_cache() -> None:
+    """Reset the config cache (for testing)."""
+    global _cached_full_config, _full_config_loaded
+    global _cached_server_config, _server_config_loaded
+    _cached_full_config = None
+    _full_config_loaded = False
+    _cached_server_config = None
+    _server_config_loaded = False
 
 
 def _load_server_config():
@@ -53,14 +130,11 @@ def _load_server_config():
     if _server_config_loaded:
         return _cached_server_config
     _server_config_loaded = True
-    try:
-        from ppmlx.config import load_config
-        cfg = load_config()
+    cfg = _get_config()
+    if cfg is not None:
         # Guard against mocked config objects in tests
         if hasattr(cfg.server, "host") and isinstance(cfg.server.host, str):
             _cached_server_config = cfg.server
-    except Exception:
-        pass
     return _cached_server_config
 
 
@@ -666,12 +740,48 @@ async def lifespan(app: FastAPI):
     except ImportError:
         app.state.db = None
 
+    cfg = None
     try:
         from ppmlx.config import load_config
-        cfg = load_config()
+        cfg = load_config(cli_overrides=_startup_overrides) if _startup_overrides else load_config()
         interval = cfg.logging.snapshot_interval_seconds
     except ImportError:
         interval = 60
+
+    # Pass KV-cache config to engine if compression is enabled
+    _kv_cache_cfg = cfg.kv_cache if cfg is not None and cfg.kv_cache.quantize != "off" else None
+
+    # Initialize the shared engine with the configured limits at startup.
+    # This does not load a model. The singleton is also used by request paths.
+    from ppmlx.engine import get_engine
+    engine = get_engine(
+        max_loaded=getattr(cfg.server, "max_loaded_models", 2) if cfg is not None else 2,
+        ttl_seconds=getattr(cfg.server, "ttl_seconds", 0) if cfg is not None else 0,
+        prompt_cache_limit=getattr(cfg.defaults, "prompt_cache_limit", 4) if cfg is not None else 4,
+        kv_cache=_kv_cache_cfg,
+    )
+
+    # Pre-load models if requested via CLI flags
+    if _preload_model:
+        try:
+            from ppmlx.models import resolve_alias
+            repo_id = resolve_alias(_preload_model)
+            log.info("Pre-loading model: %s (%s)", _preload_model, repo_id)
+            await asyncio.to_thread(engine.load, repo_id)
+            log.info("Model pre-loaded: %s", _preload_model)
+        except Exception as exc:
+            log.warning("Failed to pre-load model %s: %s", _preload_model, exc)
+
+    if _preload_embed_model:
+        try:
+            from ppmlx.models import resolve_alias
+            from ppmlx.engine_embed import get_embed_engine
+            repo_id = resolve_alias(_preload_embed_model)
+            log.info("Pre-loading embedding model: %s (%s)", _preload_embed_model, repo_id)
+            await asyncio.to_thread(get_embed_engine().load, repo_id)
+            log.info("Embedding model pre-loaded: %s", _preload_embed_model)
+        except Exception as exc:
+            log.warning("Failed to pre-load embedding model %s: %s", _preload_embed_model, exc)
 
     snapshot_task = asyncio.create_task(_snapshot_loop(interval))
 
@@ -686,6 +796,14 @@ async def lifespan(app: FastAPI):
         await snapshot_task
     except asyncio.CancelledError:
         pass
+
+    # Shut down BatchEngine if it was used
+    if _batch_mode:
+        try:
+            from ppmlx.batch import get_batch_engine
+            await get_batch_engine().shutdown()
+        except Exception:
+            pass
 
     try:
         if app.state.db:
@@ -747,6 +865,11 @@ def _clamp_max_tokens(requested: int | None) -> int | None:
     if requested is None:
         return None
     return min(requested, _MAX_TOKENS_CAP)
+
+# ── API Playground ────────────────────────────────────────────────────
+from ppmlx.api_docs import router as playground_router  # noqa: E402
+
+app.include_router(playground_router)
 
 
 async def _snapshot_loop(interval_seconds: int) -> None:
@@ -1088,12 +1211,8 @@ def _inject_tool_awareness(messages: list[dict], tools: list[dict] | None) -> li
     and burn thousands of tokens reasoning about tools that don't exist.
     With the hint they answer immediately: "I don't have that tool."
     """
-    try:
-        from ppmlx.config import load_config
-        cfg = load_config()
-        mode = getattr(getattr(cfg, "tool_awareness", None), "mode", "no_tools_only")
-    except Exception:
-        mode = "no_tools_only"
+    cfg = _get_config()
+    mode = getattr(getattr(cfg, "tool_awareness", None), "mode", "no_tools_only") if cfg else "no_tools_only"
 
     mode = str(mode).strip().lower()
     if mode in {"0", "false", "no", "off"}:
@@ -1253,12 +1372,10 @@ _MAX_TOOLS_TOKENS = 12000
 
 
 def _get_max_tools_tokens() -> int:
-    try:
-        from ppmlx.config import load_config
-        cfg = load_config()
+    cfg = _get_config()
+    if cfg is not None:
         return cfg.server.max_tools_tokens
-    except Exception:
-        return _MAX_TOOLS_TOKENS
+    return _MAX_TOOLS_TOKENS
 
 
 def _limit_tools(tools: list[dict] | None) -> list[dict] | None:
@@ -1348,6 +1465,33 @@ def _normalize_tool_messages(messages: list[dict]) -> list[dict]:
         else:
             out.append(msg)
     return out
+
+
+def _speculative_kwargs(
+    draft_model: str | None, speculative_tokens: int | None,
+) -> dict:
+    """Build keyword arguments for speculative decoding (empty if disabled)."""
+    if draft_model is None:
+        return {}
+    kw: dict = {"draft_model": draft_model}
+    if speculative_tokens is not None:
+        kw["num_draft_tokens"] = speculative_tokens
+    return kw
+
+
+def _resolve_thinking(
+    think: bool | None, tools: list | None, reasoning_budget: int | None,
+) -> bool:
+    """Determine whether to enable thinking mode.
+
+    Logic: explicit ``think`` param wins > tools without budget disable
+    thinking (prevents infinite tool-call reasoning) > default on.
+    """
+    if think is not None:
+        return think
+    if tools and not reasoning_budget:
+        return False
+    return True
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────
@@ -1538,9 +1682,12 @@ async def health(request: Request):
     """Health check endpoint."""
     try:
         from ppmlx.engine import get_engine
-        loaded = get_engine().list_loaded()
+        engine = get_engine()
+        loaded = engine.list_loaded()
+        loaded_info = engine.list_loaded_info()
     except Exception:
         loaded = []
+        loaded_info = []
 
     try:
         from ppmlx.memory import get_system_ram_gb
@@ -1559,6 +1706,7 @@ async def health(request: Request):
         "status": "ok",
         "version": __version__,
         "loaded_models": loaded,
+        "loaded_models_info": loaded_info,
         "uptime_seconds": int(time.time() - _start_time),
         "system": {
             "memory_total_gb": round(ram_gb, 1),
@@ -1678,12 +1826,7 @@ async def chat_completions(request: Request):
     think = body.get("think")
     reasoning_budget = body.get("reasoning_budget")
 
-    # Load config for thinking defaults
-    try:
-        from ppmlx.config import load_config
-        _cfg = load_config()
-    except Exception:
-        _cfg = None
+    _cfg = _get_config()
 
     # Map OpenAI reasoning_effort ("low"/"medium"/"high") to reasoning_budget
     reasoning_effort = body.get("reasoning_effort")
@@ -1708,11 +1851,51 @@ async def chat_completions(request: Request):
         },
     )
 
+    # ppmlx extension: speculative decoding via draft model
+    draft_model = body.get("draft_model")
+    speculative_tokens = body.get("speculative_tokens")
+
+    # Smart router: when model is "auto", analyze request and pick the best model
+    if model_name == "auto" and _cfg and _cfg.router.enabled:
+        try:
+            from ppmlx.auto_router import route as _route
+            decision = _route(messages, _cfg.router, tools=tools, max_tokens=max_tokens)
+            model_name = decision.model
+            log.info(
+                "Router: %s (score=%d, %s)",
+                decision.model, decision.complexity_score, decision.reason,
+            )
+        except Exception as exc:
+            log.warning("Router error, falling back to default: %s", exc)
+
     try:
         from ppmlx.models import resolve_alias
         repo_id = resolve_alias(model_name)
     except Exception:
         repo_id = model_name
+
+    # Auto-speculative: if no draft model specified, try config default then auto-pairing
+    if draft_model is None and _cfg:
+        if _cfg.defaults.draft_model:
+            draft_model = _cfg.defaults.draft_model
+        elif _cfg.defaults.auto_speculative:
+            try:
+                from ppmlx.models import get_draft_model
+                draft_model = get_draft_model(model_name)
+                if draft_model:
+                    log.info("Auto-speculative: paired %s → draft %s", model_name, draft_model)
+            except Exception:
+                pass
+        if speculative_tokens is None and _cfg.defaults.speculative_tokens:
+            speculative_tokens = _cfg.defaults.speculative_tokens
+
+    # Resolve draft model alias (reuses same resolve_alias)
+    draft_repo_id: str | None = None
+    if draft_model:
+        try:
+            draft_repo_id = resolve_alias(draft_model)
+        except Exception:
+            draft_repo_id = draft_model
 
     log.info(
         "POST /v1/chat/completions model=%s think=%s budget=%s effort=%s stream=%s tools=%d",
@@ -1744,6 +1927,8 @@ async def chat_completions(request: Request):
             repetition_penalty, request, start_ts, tools,
             think=think, reasoning_budget=reasoning_budget,
             memory_messages=raw_messages, memory_context=memory_context,
+            draft_model=draft_repo_id,
+            speculative_tokens=speculative_tokens,
         )
     else:
         return await _nonstream_chat(
@@ -1752,6 +1937,8 @@ async def chat_completions(request: Request):
             repetition_penalty, request, start_ts, tools,
             think=think, reasoning_budget=reasoning_budget,
             memory_messages=raw_messages, memory_context=memory_context,
+            draft_model=draft_repo_id,
+            speculative_tokens=speculative_tokens,
         )
 
 
@@ -1761,6 +1948,7 @@ def _stream_chat(
     repetition_penalty, request, start_ts, tools=None,
     think=None, reasoning_budget=None,
     memory_messages=None, memory_context=None,
+    draft_model=None, speculative_tokens=None,
 ):
     """Return streaming SSE response."""
     from fastapi.responses import StreamingResponse
@@ -1834,6 +2022,7 @@ def _stream_chat(
                     enable_thinking=enable_thinking,
                     tools=tools,
                     **extra_kwargs,
+                    **_speculative_kwargs(draft_model, speculative_tokens),
                 )
 
                 # When tools are provided, buffer output and filter tool call
@@ -1914,7 +2103,7 @@ def _stream_chat(
 
                     # Detect template-injected thinking (Qwen3, DeepSeek-R1)
                     try:
-                        lm = engine._get_or_load(repo_id)
+                        lm = engine.load(repo_id)
                         prompt = engine._apply_chat_template(lm, messages, enable_thinking=True)
                         if re.search(r"(<think>|<\|channel>thought)\s*$", prompt):
                             inside_think = True
@@ -2143,16 +2332,11 @@ async def _nonstream_chat(
     repetition_penalty, request, start_ts, tools=None,
     think=None, reasoning_budget=None,
     memory_messages=None, memory_context=None,
+    draft_model=None, speculative_tokens=None,
 ):
     """Return non-streaming JSON response."""
     # Determine thinking mode: explicit param > tool heuristic > default on
-    # When a reasoning_budget is set, allow thinking even with tools.
-    if think is not None:
-        enable_thinking = think
-    elif tools and not reasoning_budget:
-        enable_thinking = False
-    else:
-        enable_thinking = True
+    enable_thinking = _resolve_thinking(think, tools, reasoning_budget)
 
     tokenizer: object | None = None
 
@@ -2169,6 +2353,7 @@ async def _nonstream_chat(
                 repetition_penalty=repetition_penalty,
                 enable_thinking=enable_thinking,
                 tools=tools,
+                **_speculative_kwargs(draft_model, speculative_tokens),
             )
             if reasoning_budget is not None:
                 gen_kwargs["reasoning_budget"] = reasoning_budget
@@ -2578,6 +2763,9 @@ async def _parse_think_tags(raw_stream, *, assume_in_thinking: bool = False):
         return 0
 
     async for chunk in raw_stream:
+        if chunk == "":
+            yield ("keepalive", "")
+            continue
         buf += chunk
         while buf:
             if not in_thinking:
@@ -2739,6 +2927,9 @@ def _stream_responses(
 
                 raw_stream = _async_iter_sync_gen(gen)
                 async for kind, data in _parse_think_tags(raw_stream, assume_in_thinking=assume_in_thinking):
+                    if kind == "keepalive":
+                        yield ": keepalive\n\n"
+                        continue
                     if kind == "thinking":
                         yield _sse("response.reasoning_summary_text.delta", {
                             "output_index": reasoning_idx,
@@ -3025,12 +3216,7 @@ async def anthropic_messages(request: Request):
         if budget_tokens is None and "budget_tokens" in thinking_cfg:
             budget_tokens = thinking_cfg["budget_tokens"]
 
-    # Load config for thinking defaults
-    try:
-        from ppmlx.config import load_config
-        _cfg = load_config()
-    except Exception:
-        _cfg = None
+    _cfg = _get_config()
 
     # Also check reasoning_effort (OpenAI-style, some clients send it)
     reasoning_effort = body.get("reasoning_effort")
@@ -3225,6 +3411,9 @@ def _stream_anthropic(
 
             raw_stream = _async_iter_sync_gen(gen)
             async for kind, chunk in _parse_think_tags(raw_stream, assume_in_thinking=assume_in_thinking):
+                if kind == "keepalive":
+                    yield ": keepalive\n\n"
+                    continue
                 if kind == "thinking":
                     if not thinking_started:
                         thinking_started = True

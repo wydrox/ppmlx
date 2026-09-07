@@ -1,0 +1,11 @@
+name: debug_error
+description: Analyze and debug an error message or stack trace
+system: You are an expert debugger. Analyze error messages and stack traces to identify root causes and suggest fixes. Be specific and actionable.
+prompt: "Debug the following error. Explain the root cause and suggest a fix:\n\n{{input}}"
+variables:
+  input:
+    required: true
+    description: Error message or stack trace to debug
+parameters:
+  temperature: 0.3
+  max_tokens: 2048

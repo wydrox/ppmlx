@@ -24,6 +24,7 @@ class ServerConfig:
     agent_runtime: str = "legacy"  # legacy | agent_ir
     continuation_ttl_seconds: int = 86400
     route_policy: str = ""  # path to ADR 0005 route policy TOML
+    ttl_seconds: int = 0  # 0 = disabled; auto-unload idle models after N seconds
 
 
 @dataclass
@@ -33,6 +34,16 @@ class DefaultsConfig:
     temperature: float = 0.7
     top_p: float = 1.0
     max_tokens: int = 2048
+    draft_model: str | None = None
+    speculative_tokens: int = 5
+    auto_speculative: bool = False  # auto-detect draft models for speculative decoding
+    prompt_cache_limit: int = 4    # max prompt KV-cache entries (0 = disabled)
+
+
+@dataclass
+class UIConfig:
+    show_stats: bool = False     # show TTFT / tok/s after each response
+    markdown: bool = False       # render markdown in assistant output
 
 
 @dataclass
@@ -95,12 +106,55 @@ class DangerousConfig:
 
 
 @dataclass
+class RouterConfig:
+    enabled: bool = False
+    small_model: str = "qwen3.5:0.8b"
+    large_model: str = "qwen3.5:9b"
+    threshold: int = 3  # complexity score at or above which we use large_model
+
+
+@dataclass
+class AgentConfig:
+    max_read_lines: int = 200  # max lines returned by read_file when no range given
+    max_iterations: int = 10
+    temperature: float = 0.7
+    sandbox: bool = False
+    max_output_chars: int = 20_000  # global cap on tool output to protect context
+    permission_level: str = "full"  # "readonly", "write", "execute", "full"
+
+
+@dataclass
 class AnalyticsConfig:
     enabled: bool = False
     provider: str = "posthog"
     host: str = DEFAULT_ANALYTICS_HOST
     project_api_key: str = DEFAULT_ANALYTICS_PROJECT_API_KEY
     respect_do_not_track: bool = True
+
+
+@dataclass
+class VoiceSettings:
+    """Voice I/O settings — written to [voice] in config.toml."""
+    stt_model: str = "mlx-community/whisper-large-v3-turbo-q4"
+    tts_model: str = "mlx-community/Voxtral-4B-TTS-2603-mlx-4bit"
+    tts_voice: str | None = None
+    tts_speed: float = 1.0
+    tts_volume: float = 1.10
+    # Push-to-talk: hold ptt_key to record, release to send.
+    # Set ptt_mode = true to enable; ptt_key accepts 'space', 'f5', single chars, …
+    ptt_mode: bool = False
+    ptt_key: str = "space"
+    # Auto-silence params (used when ptt_mode = false)
+    silence_threshold: float = 0.01
+    silence_duration: float = 1.5
+
+
+@dataclass
+class KVCacheConfig:
+    quantize: str = "off"   # "off" | "turboquant"
+    bits: int = 3            # PolarQuant bits (2, 3, or 4)
+    qjl: bool = True         # enable QJL error correction
+    qjl_dim: int = 0         # 0 = auto (head_dim // 2)
 
 
 @dataclass
@@ -112,8 +166,13 @@ class Config:
     registry: RegistryConfig = field(default_factory=RegistryConfig)
     tool_awareness: ToolAwarenessConfig = field(default_factory=ToolAwarenessConfig)
     thinking: ThinkingConfig = field(default_factory=ThinkingConfig)
+    ui: UIConfig = field(default_factory=UIConfig)
+    router: RouterConfig = field(default_factory=RouterConfig)
     analytics: AnalyticsConfig = field(default_factory=AnalyticsConfig)
     dangerous: DangerousConfig = field(default_factory=DangerousConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    voice: VoiceSettings = field(default_factory=VoiceSettings)
+    kv_cache: KVCacheConfig = field(default_factory=KVCacheConfig)
 
 
 def get_ppmlx_dir() -> Path:
@@ -124,7 +183,7 @@ def get_ppmlx_dir() -> Path:
 
 
 def _parse_bool(v: str) -> bool:
-    return v.lower() not in ("0", "false", "no")
+    return v.lower() not in ("0", "false", "no", "off", "")
 
 
 def _normalize_memory_mode(value: Any) -> str:
@@ -238,8 +297,13 @@ def load_config(cli_overrides: dict[str, Any] | None = None) -> Config:
         with open(toml_path, "rb") as f:
             data = tomllib.load(f)
         _apply_toml(cfg, data)
-    except Exception:
-        pass
+    except FileNotFoundError:
+        pass  # No config file — use defaults
+    except Exception as exc:
+        import logging
+        logging.getLogger("ppmlx.config").warning(
+            "Failed to load %s: %s — using defaults", toml_path, exc,
+        )
     _apply_env(cfg)
     if cli_overrides:
         _apply_cli(cfg, cli_overrides)
@@ -267,6 +331,7 @@ def _apply_toml(cfg: Config, data: dict) -> None:
             )
         if "route_policy" in s:
             cfg.server.route_policy = str(s["route_policy"])
+        if "ttl_seconds" in s: cfg.server.ttl_seconds = int(s["ttl_seconds"])
     if "defaults" in data:
         d = data["defaults"]
         if "model" in d: cfg.defaults.model = str(d["model"])
@@ -274,6 +339,10 @@ def _apply_toml(cfg: Config, data: dict) -> None:
         if "temperature" in d: cfg.defaults.temperature = float(d["temperature"])
         if "top_p" in d: cfg.defaults.top_p = float(d["top_p"])
         if "max_tokens" in d: cfg.defaults.max_tokens = int(d["max_tokens"])
+        if "draft_model" in d: cfg.defaults.draft_model = str(d["draft_model"]) if d["draft_model"] else None
+        if "speculative_tokens" in d: cfg.defaults.speculative_tokens = int(d["speculative_tokens"])
+        if "auto_speculative" in d: cfg.defaults.auto_speculative = bool(d["auto_speculative"])
+        if "prompt_cache_limit" in d: cfg.defaults.prompt_cache_limit = int(d["prompt_cache_limit"])
     if "logging" in data:
         lg = data["logging"]
         if "enabled" in lg: cfg.logging.enabled = bool(lg["enabled"])
@@ -318,6 +387,16 @@ def _apply_toml(cfg: Config, data: dict) -> None:
             cfg.dangerous.subscription_passthrough = bool(
                 dg["subscription_passthrough"]
             )
+    if "ui" in data:
+        u = data["ui"]
+        if "show_stats" in u: cfg.ui.show_stats = bool(u["show_stats"])
+        if "markdown" in u: cfg.ui.markdown = bool(u["markdown"])
+    if "router" in data:
+        rt = data["router"]
+        if "enabled" in rt: cfg.router.enabled = bool(rt["enabled"])
+        if "small_model" in rt: cfg.router.small_model = str(rt["small_model"])
+        if "large_model" in rt: cfg.router.large_model = str(rt["large_model"])
+        if "threshold" in rt: cfg.router.threshold = int(rt["threshold"])
     if "analytics" in data:
         an = data["analytics"]
         if "enabled" in an: cfg.analytics.enabled = bool(an["enabled"])
@@ -329,6 +408,37 @@ def _apply_toml(cfg: Config, data: dict) -> None:
             cfg.analytics.project_api_key = str(an["website_id"]).strip()
         if "respect_do_not_track" in an:
             cfg.analytics.respect_do_not_track = bool(an["respect_do_not_track"])
+    if "agent" in data:
+        ag = data["agent"]
+        if "max_read_lines" in ag: cfg.agent.max_read_lines = int(ag["max_read_lines"])
+        if "max_output_chars" in ag: cfg.agent.max_output_chars = int(ag["max_output_chars"])
+        if "max_iterations" in ag: cfg.agent.max_iterations = int(ag["max_iterations"])
+        if "temperature" in ag: cfg.agent.temperature = float(ag["temperature"])
+        if "sandbox" in ag: cfg.agent.sandbox = bool(ag["sandbox"])
+        if "permission_level" in ag:
+            pl = str(ag["permission_level"]).strip().lower()
+            if pl in ("readonly", "write", "execute", "full"):
+                cfg.agent.permission_level = pl
+    if "voice" in data:
+        v = data["voice"]
+        if "stt_model" in v: cfg.voice.stt_model = str(v["stt_model"])
+        if "tts_model" in v: cfg.voice.tts_model = str(v["tts_model"])
+        if "tts_voice" in v: cfg.voice.tts_voice = str(v["tts_voice"]) if v["tts_voice"] else None
+        if "tts_speed" in v: cfg.voice.tts_speed = float(v["tts_speed"])
+        if "tts_volume" in v: cfg.voice.tts_volume = float(v["tts_volume"])
+        if "ptt_mode" in v: cfg.voice.ptt_mode = bool(v["ptt_mode"])
+        if "ptt_key" in v: cfg.voice.ptt_key = str(v["ptt_key"]).strip().lower()
+        if "silence_threshold" in v: cfg.voice.silence_threshold = float(v["silence_threshold"])
+        if "silence_duration" in v: cfg.voice.silence_duration = float(v["silence_duration"])
+    if "kv_cache" in data:
+        kc = data["kv_cache"]
+        if "quantize" in kc:
+            raw = str(kc["quantize"]).strip().lower()
+            if raw in ("off", "turboquant"):
+                cfg.kv_cache.quantize = raw
+        if "bits" in kc: cfg.kv_cache.bits = int(kc["bits"])
+        if "qjl" in kc: cfg.kv_cache.qjl = bool(kc["qjl"])
+        if "qjl_dim" in kc: cfg.kv_cache.qjl_dim = int(kc["qjl_dim"])
 
 
 def _apply_env(cfg: Config) -> None:
@@ -342,11 +452,16 @@ def _apply_env(cfg: Config) -> None:
         "PPMLX_CONTINUATION_TTL_SECONDS": (
             "server", "continuation_ttl_seconds", _normalize_continuation_ttl
         ),
+        "PPMLX_TTL_SECONDS": ("server", "ttl_seconds", int),
         "PPMLX_DEFAULT_MODEL": ("defaults", "model", str),
         "PPMLX_DEFAULT_EMBED_MODEL": ("defaults", "embed_model", str),
         "PPMLX_TEMP": ("defaults", "temperature", float),
         "PPMLX_TOP_P": ("defaults", "top_p", float),
         "PPMLX_MAX_TOKENS": ("defaults", "max_tokens", int),
+        "PPMLX_DRAFT_MODEL": ("defaults", "draft_model", str),
+        "PPMLX_SPECULATIVE_TOKENS": ("defaults", "speculative_tokens", int),
+        "PPMLX_AUTO_SPECULATIVE": ("defaults", "auto_speculative", _parse_bool),
+        "PPMLX_PROMPT_CACHE_LIMIT": ("defaults", "prompt_cache_limit", int),
         "PPMLX_LOG_ENABLED": ("logging", "enabled", _parse_bool),
         "PPMLX_LOG_SNAPSHOT_INTERVAL": ("logging", "snapshot_interval_seconds", int),
         "PPMLX_MEMORY_ENABLED": ("memory", "enabled", _parse_bool),
@@ -376,11 +491,21 @@ def _apply_env(cfg: Config) -> None:
         "PPMLX_DANGEROUS_SUBSCRIPTION_PASSTHROUGH": (
             "dangerous", "subscription_passthrough", _parse_bool
         ),
+        "PPMLX_SHOW_STATS": ("ui", "show_stats", _parse_bool),
+        "PPMLX_MARKDOWN": ("ui", "markdown", _parse_bool),
+        "PPMLX_ROUTER_ENABLED": ("router", "enabled", _parse_bool),
+        "PPMLX_ROUTER_SMALL_MODEL": ("router", "small_model", str),
+        "PPMLX_ROUTER_LARGE_MODEL": ("router", "large_model", str),
+        "PPMLX_ROUTER_THRESHOLD": ("router", "threshold", int),
         "PPMLX_ANALYTICS_ENABLED": ("analytics", "enabled", _parse_bool),
         "PPMLX_ANALYTICS_PROVIDER": ("analytics", "provider", _normalize_analytics_provider),
         "PPMLX_ANALYTICS_HOST": ("analytics", "host", _normalize_analytics_host),
         "PPMLX_ANALYTICS_PROJECT_API_KEY": ("analytics", "project_api_key", str),
         "PPMLX_ANALYTICS_RESPECT_DNT": ("analytics", "respect_do_not_track", _parse_bool),
+        "PPMLX_KV_CACHE_QUANTIZE": ("kv_cache", "quantize", str),
+        "PPMLX_KV_CACHE_BITS": ("kv_cache", "bits", int),
+        "PPMLX_KV_CACHE_QJL": ("kv_cache", "qjl", _parse_bool),
+        "PPMLX_KV_CACHE_QJL_DIM": ("kv_cache", "qjl_dim", int),
     }
     for env_key, (section, attr, coerce) in mapping.items():
         val = os.environ.get(env_key)
@@ -404,6 +529,14 @@ def _apply_cli(cfg: Config, overrides: dict) -> None:
         elif key == "model": cfg.defaults.model = str(val)
         elif key == "temperature": cfg.defaults.temperature = float(val)
         elif key == "max_tokens": cfg.defaults.max_tokens = int(val)
+        elif key == "draft_model": cfg.defaults.draft_model = str(val) if val else None
+        elif key == "speculative_tokens": cfg.defaults.speculative_tokens = int(val)
+        elif key == "auto_speculative": cfg.defaults.auto_speculative = bool(val)
+        elif key == "prompt_cache_limit": cfg.defaults.prompt_cache_limit = int(val)
+        elif key == "kv_quant":
+            raw = str(val).strip().lower()
+            if raw in ("off", "turboquant"):
+                cfg.kv_cache.quantize = raw
 
 
 def check_first_run() -> None:

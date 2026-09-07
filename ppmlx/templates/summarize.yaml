@@ -1,0 +1,14 @@
+name: summarize
+description: Summarize text concisely
+system: You are a concise summarizer. Produce clear, accurate summaries that capture the key points.
+prompt: "Summarize the following text in {{style}}:\n\n{{input}}"
+variables:
+  input:
+    required: true
+    description: Text to summarize
+  style:
+    default: bullet points
+    description: "Output style (e.g. bullet points, paragraph, one sentence)"
+parameters:
+  temperature: 0.3
+  max_tokens: 1024

@@ -1,0 +1,11 @@
+name: eli5
+description: Explain a concept in simple terms (Explain Like I'm 5)
+system: You explain complex topics in very simple terms, using analogies and everyday language. Avoid jargon.
+prompt: "Explain this like I'm 5:\n\n{{input}}"
+variables:
+  input:
+    required: true
+    description: Concept or topic to explain simply
+parameters:
+  temperature: 0.7
+  max_tokens: 1024

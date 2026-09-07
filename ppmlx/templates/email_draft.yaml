@@ -1,0 +1,14 @@
+name: email_draft
+description: Draft a professional email
+system: You are a professional email writer. Write clear, concise emails appropriate for the workplace.
+prompt: "Draft a {{tone}} email about the following:\n\n{{input}}"
+variables:
+  input:
+    required: true
+    description: What the email should be about
+  tone:
+    default: professional
+    description: "Email tone (e.g. professional, friendly, formal, urgent)"
+parameters:
+  temperature: 0.5
+  max_tokens: 1024

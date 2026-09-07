@@ -1,0 +1,14 @@
+name: brainstorm
+description: Generate creative ideas about a topic
+system: You are a creative brainstorming partner. Generate diverse, innovative ideas. Think broadly and don't self-censor.
+prompt: "Brainstorm {{count}} ideas about the following topic:\n\n{{input}}"
+variables:
+  input:
+    required: true
+    description: Topic or problem to brainstorm about
+  count:
+    default: "10"
+    description: Number of ideas to generate
+parameters:
+  temperature: 0.9
+  max_tokens: 2048

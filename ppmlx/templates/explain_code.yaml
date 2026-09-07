@@ -1,0 +1,11 @@
+name: explain_code
+description: Explain what a piece of code does
+system: You are a patient programming teacher. Explain code clearly, step by step, suitable for someone learning to program.
+prompt: "Explain what the following code does:\n\n```\n{{input}}\n```"
+variables:
+  input:
+    required: true
+    description: Code to explain
+parameters:
+  temperature: 0.5
+  max_tokens: 2048

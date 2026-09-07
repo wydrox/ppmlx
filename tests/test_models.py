@@ -7,9 +7,11 @@ import pytest
 
 from ppmlx.models import (
     DEFAULT_ALIASES,
+    DRAFT_PAIRS,
     ModelNotFoundError,
     all_aliases,
     download_model,
+    get_draft_model,
     get_model_path,
     is_embed_model,
     is_vision_model,
@@ -120,6 +122,51 @@ def test_remove_model_not_found(tmp_home):
 def test_repo_to_local_name():
     assert repo_to_local_name("org/repo") == "org--repo"
     assert repo_to_local_name("mlx-community/Qwen3.5-4B-MLX-4bit") == "mlx-community--Qwen3.5-4B-MLX-4bit"
+
+
+# ---------------------------------------------------------------------------
+# Draft model pairing (speculative decoding)
+# ---------------------------------------------------------------------------
+
+def test_draft_pairs_exist():
+    """DRAFT_PAIRS should have entries for Qwen 3.5 family."""
+    assert len(DRAFT_PAIRS) >= 6
+    assert "qwen3.5:9b" in DRAFT_PAIRS
+    assert DRAFT_PAIRS["qwen3.5:9b"] == "qwen3.5:0.8b"
+
+
+def test_get_draft_model_by_alias():
+    """get_draft_model should return the draft for known aliases."""
+    assert get_draft_model("qwen3.5:9b") == "qwen3.5:0.8b"
+    assert get_draft_model("qwen3.5:27b") == "qwen3.5:0.8b"
+    assert get_draft_model("gpt-oss:120b") == "gpt-oss:20b"
+
+
+def test_get_draft_model_by_repo_id():
+    """get_draft_model should resolve repo IDs back to aliases."""
+    repo_id = DEFAULT_ALIASES["qwen3.5:9b"]  # mlx-community/Qwen3.5-9B-MLX-4bit
+    result = get_draft_model(repo_id)
+    assert result == "qwen3.5:0.8b"
+
+
+def test_get_draft_model_no_match():
+    """get_draft_model should return None for unknown models."""
+    assert get_draft_model("unknown-model") is None
+
+
+def test_get_draft_model_smallest_has_no_draft():
+    """The smallest model in a family shouldn't pair with itself."""
+    assert get_draft_model("qwen3.5:0.8b") is None
+
+
+def test_get_draft_model_user_pairs(tmp_home):
+    """User-defined draft pairs from ~/.ppmlx/draft_pairs.json should work."""
+    import json
+    pairs_file = tmp_home / ".ppmlx" / "draft_pairs.json"
+    pairs_file.parent.mkdir(parents=True, exist_ok=True)
+    pairs_file.write_text(json.dumps({"custom:large": "custom:small"}))
+
+    assert get_draft_model("custom:large") == "custom:small"
 
 
 def test_download_model_already_exists(tmp_home, monkeypatch):

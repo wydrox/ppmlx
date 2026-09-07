@@ -1,0 +1,11 @@
+name: extract_entities
+description: Extract named entities (people, places, organizations, dates) from text
+system: You are an information extraction specialist. Extract named entities accurately and categorize them.
+prompt: "Extract all named entities from the following text. Categorize them as Person, Organization, Location, Date, or Other.\n\n{{input}}"
+variables:
+  input:
+    required: true
+    description: Text to extract entities from
+parameters:
+  temperature: 0.1
+  max_tokens: 1024

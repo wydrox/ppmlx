@@ -109,7 +109,8 @@ class ScenarioStats:
             return {"avg": 0.0, "stddev": 0.0, "min": 0.0, "max": 0.0}
         n = len(values)
         avg = sum(values) / n
-        variance = sum((v - avg) ** 2 for v in values) / n
+        # Bessel's correction (n-1) for sample stddev; fall back to n=1
+        variance = sum((v - avg) ** 2 for v in values) / max(1, n - 1)
         return {
             "avg": round(avg, 2),
             "stddev": round(math.sqrt(variance), 2),
@@ -135,6 +136,7 @@ class BenchmarkResult:
     runs: int
     system_info: dict[str, Any]
     scenarios: dict[str, ScenarioStats] = field(default_factory=dict)
+    draft_model: str | None = None  # set when speculative decoding was used
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -144,6 +146,8 @@ class BenchmarkResult:
             "system_info": self.system_info,
             "results": {},
         }
+        if self.draft_model:
+            out["draft_model"] = self.draft_model
         for name, ss in self.scenarios.items():
             out["results"][name] = {
                 "label": ss.label,
@@ -175,12 +179,16 @@ class BenchmarkRunner:
         runs: int = 3,
         scenarios: list[str] | None = None,
         timeout: float = 120.0,
+        draft_model: str | None = None,
+        speculative_tokens: int | None = None,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.runs = runs
         self.scenario_names = scenarios or list(SCENARIOS.keys())
         self.timeout = timeout
+        self.draft_model = draft_model
+        self.speculative_tokens = speculative_tokens
         self._console = Console()
 
         # Validate scenario names
@@ -195,13 +203,17 @@ class BenchmarkRunner:
         """Execute one iteration of a scenario via streaming API call."""
         scenario = SCENARIOS[scenario_name]
         url = f"{self.base_url}/v1/chat/completions"
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "user", "content": scenario["prompt"]}],
             "max_tokens": scenario["max_tokens"],
             "temperature": 0.0,
             "stream": True,
         }
+        if self.draft_model:
+            payload["draft_model"] = self.draft_model
+        if self.speculative_tokens is not None:
+            payload["speculative_tokens"] = self.speculative_tokens
 
         start = time.monotonic()
         ttft: float | None = None
@@ -277,6 +289,7 @@ class BenchmarkRunner:
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             runs=self.runs,
             system_info=self._get_system_info(),
+            draft_model=self.draft_model,
         )
 
         for name in self.scenario_names:
@@ -315,7 +328,10 @@ def print_results(result: BenchmarkResult, console: Console | None = None) -> No
     """Print benchmark results as a Rich table."""
     console = console or Console()
 
-    table = Table(title=f"Benchmark Results: {result.model}")
+    title = f"Benchmark Results: {result.model}"
+    if result.draft_model:
+        title += f" (draft: {result.draft_model})"
+    table = Table(title=title)
     table.add_column("Scenario", style="cyan", no_wrap=True)
     table.add_column("TTFT (ms)", justify="right")
     table.add_column("Tok/s", justify="right", style="green")
@@ -344,10 +360,82 @@ def print_results(result: BenchmarkResult, console: Console | None = None) -> No
         )
 
     console.print(table)
-    console.print(
-        f"\n[dim]Runs: {result.runs} | "
-        f"System: {result.system_info.get('platform', 'unknown')} | "
-        f"RAM: {result.system_info.get('ram_gb', '?')} GB[/dim]"
+    info_parts = [
+        f"Runs: {result.runs}",
+        f"System: {result.system_info.get('platform', 'unknown')}",
+        f"RAM: {result.system_info.get('ram_gb', '?')} GB",
+    ]
+    if result.draft_model:
+        info_parts.append(f"Speculative: {result.draft_model}")
+    console.print(f"\n[dim]{' | '.join(info_parts)}[/dim]")
+
+
+_COMPARISON_METRICS = [
+    ("ttft_ms", "ms", False),
+    ("tokens_per_sec", "tok/s", True),
+    ("total_latency_ms", "ms", False),
+]
+
+
+def _print_comparison_table(
+    a: BenchmarkResult,
+    b: BenchmarkResult,
+    *,
+    title: str,
+    col_a: str,
+    col_b: str,
+    col_delta: str,
+    show_multiplier: bool = False,
+    console: Console | None = None,
+) -> None:
+    """Shared helper for side-by-side benchmark comparison tables."""
+    console = console or Console()
+
+    table = Table(title=title)
+    table.add_column("Scenario", style="cyan", no_wrap=True)
+    table.add_column("Metric", style="dim")
+    table.add_column(col_a, justify="right")
+    table.add_column(col_b, justify="right")
+    table.add_column(col_delta, justify="right")
+
+    for name in a.scenarios:
+        if name not in b.scenarios:
+            continue
+        a_stats = a.scenarios[name].stats()
+        b_stats = b.scenarios[name].stats()
+        label = a.scenarios[name].label
+
+        for metric, unit, higher_is_better in _COMPARISON_METRICS:
+            a_val = a_stats[metric]["avg"]
+            b_val = b_stats[metric]["avg"]
+
+            pct = ((b_val - a_val) / a_val * 100) if a_val > 0 else 0.0
+            improved = (pct > 0 and higher_is_better) or (pct < 0 and not higher_is_better)
+            color = "green" if improved else "red" if pct != 0 else "dim"
+            sign = "+" if pct > 0 else ""
+
+            delta_text = f"[{color}]{sign}{pct:.1f}%[/{color}]"
+            if show_multiplier and metric == "tokens_per_sec" and a_val > 0:
+                delta_text += f" [{color}]({b_val / a_val:.2f}x)[/{color}]"
+
+            table.add_row(label, f"{metric} ({unit})", f"{a_val:.1f}", f"{b_val:.1f}", delta_text)
+            label = ""
+
+    console.print(table)
+
+
+def print_speculative_comparison(
+    baseline: BenchmarkResult,
+    speculative: BenchmarkResult,
+    console: Console | None = None,
+) -> None:
+    """Print side-by-side comparison: normal vs speculative decoding."""
+    draft_label = speculative.draft_model or "speculative"
+    _print_comparison_table(
+        baseline, speculative,
+        title=f"Speculative Decoding: {baseline.model}\nnormal vs draft={draft_label}",
+        col_a="Normal", col_b="Speculative", col_delta="Speedup",
+        show_multiplier=True, console=console,
     )
 
 
@@ -357,49 +445,12 @@ def print_comparison(
     console: Console | None = None,
 ) -> None:
     """Print side-by-side comparison between current and baseline results."""
-    console = console or Console()
-
-    table = Table(title=f"Comparison: {current.model} vs baseline")
-    table.add_column("Scenario", style="cyan", no_wrap=True)
-    table.add_column("Metric", style="dim")
-    table.add_column("Baseline", justify="right")
-    table.add_column("Current", justify="right")
-    table.add_column("Delta", justify="right")
-
-    for name in current.scenarios:
-        if name not in baseline.scenarios:
-            continue
-        cur_stats = current.scenarios[name].stats()
-        base_stats = baseline.scenarios[name].stats()
-        label = current.scenarios[name].label
-
-        for metric, unit, higher_is_better in [
-            ("ttft_ms", "ms", False),
-            ("tokens_per_sec", "tok/s", True),
-            ("total_latency_ms", "ms", False),
-        ]:
-            cur_val = cur_stats[metric]["avg"]
-            base_val = base_stats[metric]["avg"]
-
-            if base_val > 0:
-                pct = ((cur_val - base_val) / base_val) * 100
-            else:
-                pct = 0.0
-
-            improved = (pct > 0 and higher_is_better) or (pct < 0 and not higher_is_better)
-            color = "green" if improved else "red" if pct != 0 else "dim"
-            sign = "+" if pct > 0 else ""
-
-            table.add_row(
-                label,
-                f"{metric} ({unit})",
-                f"{base_val:.1f}",
-                f"{cur_val:.1f}",
-                f"[{color}]{sign}{pct:.1f}%[/{color}]",
-            )
-            label = ""  # Only show scenario name on first row
-
-    console.print(table)
+    _print_comparison_table(
+        baseline, current,
+        title=f"Comparison: {current.model} vs baseline",
+        col_a="Baseline", col_b="Current", col_delta="Delta",
+        console=console,
+    )
 
 
 def save_results(result: BenchmarkResult, path: Path) -> Path:
@@ -420,6 +471,7 @@ def load_results(path: Path) -> BenchmarkResult:
         timestamp=data["timestamp"],
         runs=data["runs"],
         system_info=data.get("system_info", {}),
+        draft_model=data.get("draft_model"),
     )
 
     for name, scenario_data in data.get("results", {}).items():

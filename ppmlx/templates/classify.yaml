@@ -1,0 +1,14 @@
+name: classify
+description: Classify text into categories
+system: You are a text classification expert. Classify the given text into one of the provided categories. Respond with just the category name and a brief justification.
+prompt: "Classify the following text into one of these categories: {{categories}}\n\nText:\n{{input}}"
+variables:
+  input:
+    required: true
+    description: Text to classify
+  categories:
+    default: "positive, negative, neutral"
+    description: "Comma-separated list of categories"
+parameters:
+  temperature: 0.1
+  max_tokens: 256

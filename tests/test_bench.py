@@ -56,8 +56,8 @@ class TestScenarioStats:
         # avg tps = (50+60+55)/3 = 55
         assert stats["tokens_per_sec"]["avg"] == 55.0
 
-        # stddev: sqrt(((50-55)^2 + (60-55)^2 + (55-55)^2) / 3) = sqrt(50/3) ~= 4.08
-        assert abs(stats["tokens_per_sec"]["stddev"] - 4.08) < 0.1
+        # Sample standard deviation uses n - 1: sqrt(50 / 2) = 5.
+        assert stats["tokens_per_sec"]["stddev"] == 5.0
 
     def test_stats_empty(self):
         ss = ScenarioStats(scenario="simple", label="Simple")

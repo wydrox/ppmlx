@@ -1,6 +1,6 @@
 [project]
 name = "ppmlx"
-version = "0.10.0"
+version = "0.11.0"
 description = "CLI for running LLMs on Apple Silicon via MLX"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -35,6 +35,7 @@ dependencies = [
     "regex>=2024.11",
     "setproctitle>=1.3.7",
     "tomli-w>=1.0",
+    "pyyaml>=6.0",
     "keyring>=25.0",
     "mlx-embeddings>=0.1.0",
     "mcp>=1.0,<2",
@@ -47,11 +48,20 @@ vision = ["mlx-vlm>=0.1.18 ; sys_platform == 'darwin'"]
 embeddings = ["mlx-embeddings>=0.0.5 ; sys_platform == 'darwin'"]
 # Anonymous product analytics uses core httpx; extra kept for compatibility.
 analytics = []
+# Voice I/O: push-to-talk + TTS
+voice = [
+    "mlx-whisper>=0.4 ; sys_platform == 'darwin'",
+    "mlx-audio>=0.4 ; sys_platform == 'darwin'",
+    "sounddevice>=0.4",
+    "soundfile>=0.12",
+    "pynput>=1.7",
+]
 # Everything bundled
 all = [
     "ppmlx[vision]",
     "ppmlx[embeddings]",
     "ppmlx[analytics]",
+    "ppmlx[voice]",
 ]
 
 [project.urls]

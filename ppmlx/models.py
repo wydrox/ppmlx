@@ -575,3 +575,63 @@ def remove_model(alias_or_repo: str) -> bool:
         return False
     shutil.rmtree(path)
     return True
+
+
+DRAFT_PAIRS: dict[str, str] = {
+    # Qwen 3.5: 0.8B is the draft for all larger variants
+    "qwen3.5:2b":         "qwen3.5:0.8b",
+    "qwen3.5:4b":         "qwen3.5:0.8b",
+    "qwen3.5:9b":         "qwen3.5:0.8b",
+    "qwen3.5:27b":        "qwen3.5:0.8b",
+    "qwen3.5:35b-a3b":    "qwen3.5:0.8b",
+    "qwen3.5:122b-a10b":  "qwen3.5:0.8b",
+    # GPT-OSS: 20B is the draft for 120B
+    "gpt-oss:120b":       "gpt-oss:20b",
+}
+
+
+def get_draft_model(alias_or_repo: str) -> str | None:
+    """Return the recommended draft model alias for speculative decoding.
+
+    Checks:
+    1. Exact alias match in ``DRAFT_PAIRS``
+    2. Reverse lookup: if *alias_or_repo* is a repo ID, find its alias first
+       (checks built-in defaults first, then all registered aliases)
+    3. User-defined draft pairs from ``~/.ppmlx/draft_pairs.json``
+
+    Returns ``None`` if no suitable draft model is known.
+    """
+    # 1. Direct alias match
+    if alias_or_repo in DRAFT_PAIRS:
+        return DRAFT_PAIRS[alias_or_repo]
+
+    # 2. Reverse lookup from repo_id → alias → pair
+    # Check DEFAULT_ALIASES first (always available, no IO needed),
+    # then all_aliases() which includes registry and user overrides.
+    for alias, repo_id in DEFAULT_ALIASES.items():
+        if repo_id == alias_or_repo and alias in DRAFT_PAIRS:
+            return DRAFT_PAIRS[alias]
+    try:
+        for alias, repo_id in all_aliases().items():
+            if repo_id == alias_or_repo and alias in DRAFT_PAIRS:
+                return DRAFT_PAIRS[alias]
+    except Exception:
+        pass
+
+    # 3. User-defined draft pairs
+    user_pairs = _load_user_draft_pairs()
+    if alias_or_repo in user_pairs:
+        return user_pairs[alias_or_repo]
+
+    return None
+
+
+def _load_user_draft_pairs() -> dict[str, str]:
+    """Load user-defined draft pairs from ``~/.ppmlx/draft_pairs.json``."""
+    p = _get_ppmlx_dir() / "draft_pairs.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return {}
+    return {}

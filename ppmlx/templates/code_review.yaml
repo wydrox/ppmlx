@@ -1,0 +1,14 @@
+name: code_review
+description: Review code for bugs, style issues, and improvements
+system: You are a senior software engineer performing a thorough code review. Focus on correctness, readability, performance, and security. Be specific and actionable.
+prompt: "Review the following {{language}} code:\n\n```\n{{input}}\n```\n\nProvide your review covering: bugs, style issues, performance concerns, and suggested improvements."
+variables:
+  input:
+    required: true
+    description: Code to review
+  language:
+    default: ""
+    description: Programming language (auto-detected if empty)
+parameters:
+  temperature: 0.3
+  max_tokens: 2048

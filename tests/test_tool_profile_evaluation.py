@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from ppmlx.local_runtime.deterministic_fixtures import FIXTURE_SCHEMA
 from ppmlx.local_runtime.normalization import NormalizationProfile
 from ppmlx.local_runtime.profile_evaluation import (
     AttemptEvaluation,
@@ -18,7 +19,14 @@ from ppmlx.local_runtime.profile_evaluation import (
     evaluate_generated_output,
     load_case_set,
 )
+from ppmlx.local_runtime.profile_runner import (
+    AppleEvaluationEnvironment,
+    GenerationSettings,
+    ProfileRunnerError,
+    run_profile_evaluation,
+)
 from ppmlx.local_runtime.tool_argument_repair import ToolArgumentRepairPolicy
+from ppmlx.local_runtime.tool_profiles import ToolCapabilityLevel
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -269,3 +277,71 @@ def test_case_set_rejects_duplicate_keys_and_unknown_expected_tools(tmp_path: Pa
     with pytest.raises(ProfileEvaluationError) as unknown_error:
         load_case_set(unknown)
     assert unknown_error.value.code == "unknown_expected_tool"
+
+
+def _fixtures_evidence(commit: str) -> dict[str, object]:
+    return {
+        "schema_version": FIXTURE_SCHEMA,
+        "ppmlx_commit": commit,
+        "fixture_count": 4,
+        "passed": True,
+        "suite_sha256": "b" * 64,
+    }
+
+
+def _run_evaluation(
+    tmp_path: Path,
+    *,
+    ppmlx_commit: str,
+    fixtures_evidence: dict[str, object],
+) -> dict[str, object]:
+    return run_profile_evaluation(
+        repository_root=tmp_path,
+        case_set_path=CASE_SET_PATH,
+        case_set=load_case_set(CASE_SET_PATH),
+        model_path="/models/example-4bit",
+        model_repository="mlx-community/Example-4bit",
+        model_revision="b" * 40,
+        tokenizer_revision="c" * 40,
+        quantization="4bit",
+        normalization_profile=NormalizationProfile.QWEN_JSON_V1,
+        capability_level=ToolCapabilityLevel.TEMPLATE_STRUCTURED,
+        repair_policy=None,
+        environment=AppleEvaluationEnvironment(
+            chip="Apple M4 Pro",
+            memory_gb=48,
+            macos_version="15.6",
+        ),
+        settings=GenerationSettings(),
+        generate=lambda **_: "ordinary text",
+        fixtures_evidence=fixtures_evidence,
+        ppmlx_commit=ppmlx_commit,
+    )
+
+
+def test_runner_accepts_fixture_evidence_bound_to_the_report_commit(
+    tmp_path: Path,
+) -> None:
+    report = _run_evaluation(
+        tmp_path,
+        ppmlx_commit="a" * 40,
+        fixtures_evidence=_fixtures_evidence("a" * 40),
+    )
+
+    assert report["deterministic_fixtures_passed"] is True
+    assert report["aggregate"]["support_status"] == "disabled"
+
+
+def test_runner_fails_closed_without_commit_bound_fixture_evidence(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ProfileRunnerError) as captured:
+        _run_evaluation(
+            tmp_path,
+            ppmlx_commit="a" * 40,
+            # An artifact for a different commit can never prove this
+            # evaluation's deterministic fixtures passed.
+            fixtures_evidence=_fixtures_evidence("e" * 40),
+        )
+
+    assert captured.value.code == "fixture_evidence_commit_mismatch"

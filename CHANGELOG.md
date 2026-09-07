@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-07
+
+### Added
+- First-class OpenRouter, Grok, and Kimi provider routes.
+- Interactive route and alias management with `ppmlx route`.
+- Grok CLI onboarding with a persistent `~/.grok/config.toml` writer.
+- Optional local agent, voice input and output, prompt cache, draft decoding, RAG, batch, gateway, and API documentation features.
+
+### Changed
+- The server creates the shared MLX engine with the configured model count, TTL, prompt cache, and KV-cache limits.
+- The policy router remains in `ppmlx/router.py`. Optional `model:auto` selection uses `ppmlx/auto_router.py`.
+- Experimental CLI features remain separate from the strict Agent IR proxy path.
+
+### Fixed
+- Preserve advanced quantization options after a model download.
+- Apply explicit CLI cache settings when the server starts.
+- Keep cached tokens intact when a cache trim requests zero tokens.
+- Require the current worker to complete or fail a claimed memory extraction job.
+- Check commit-bound fixture evidence before publication of tool-profile results.
+
+### Notes
+- `ppmlx agent` can execute tools when the user starts that explicit local agent command.
+- The strict proxy Agent IR runtime formats and validates tool calls. It does not execute harness tools.
+- This release is a source consolidation record. It is not a PyPI publication.
+
 ## [0.10.0] - 2026-08-22
 
 ### Added

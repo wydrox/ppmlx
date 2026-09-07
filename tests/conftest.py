@@ -29,15 +29,19 @@ import ppmlx.schema        # noqa: F401, E402
 import ppmlx.db            # noqa: F401, E402
 import ppmlx.models        # noqa: F401, E402
 import ppmlx.memory        # noqa: F401, E402
-try:
-    import ppmlx.modelfile     # noqa: F401, E402
-except ImportError:
-    pass  # module may have been removed
 import ppmlx.quantize      # noqa: F401, E402
+import ppmlx.templates     # noqa: F401, E402
+import ppmlx.bench         # noqa: F401, E402
 import ppmlx.engine        # noqa: F401, E402
 import ppmlx.engine_embed  # noqa: F401, E402
 import ppmlx.engine_vlm    # noqa: F401, E402
 import ppmlx.bench         # noqa: F401, E402
+import ppmlx.batch         # noqa: F401, E402
+import ppmlx.rag           # noqa: F401, E402
+import ppmlx.processor     # noqa: F401, E402
+import ppmlx.agent         # noqa: F401, E402
+import ppmlx.gateway       # noqa: F401, E402
+import ppmlx.turboquant    # noqa: F401, E402
 
 # Snapshot real module attributes HERE (module level) — before any test file
 # is collected.  test_server.py's module-level code runs at collection time and

@@ -997,7 +997,7 @@ def run_route_tui(*, path: Path | None = None) -> None:
         kind_label, _kind_desc = PROVIDER_KINDS[kind_idx]
         form["kind_field"] = TextArea(text=kind_label, multiline=False, read_only=True)
         form["kind_idx"] = kind_idx
-        form["edit_alias"] = row["alias"] if edit else None
+        form["edit_alias"] = row["alias"] if edit and row is not None else None
         form["stop_buffers"] = [
             form["alias_field"].buffer,
             form["model_field"].buffer,

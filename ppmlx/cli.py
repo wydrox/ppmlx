@@ -5,12 +5,13 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional, cast
 
 import typer
 from rich.console import Console
+from rich.table import Table
 from rich.panel import Panel
 try:
     import setproctitle as _setproctitle_mod
@@ -563,7 +564,10 @@ def _start_server_bg(model: str, host: str, port: int) -> subprocess.Popen:
     cmd = [sys.executable, "-m", "ppmlx.cli", "serve", "--host", host, "--port", str(port)]
     if model:
         cmd += ["--model", model]
-    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    log_path = Path.home() / ".ppmlx" / "server.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "w") as log_file:
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=log_file)
 
 
 def _wait_server_ready(host: str, port: int, proc: subprocess.Popen, timeout: int = 30) -> bool:
@@ -676,9 +680,10 @@ def _launch_coding_tool(action: str, model: str, host: str, port: int) -> None:
         raise typer.Exit(1)
 
     if not ready:
+        log_path = Path.home() / ".ppmlx" / "server.log"
         stderr_output = ""
-        if proc.stderr:
-            stderr_output = proc.stderr.read().decode(errors="replace").strip()
+        if log_path.exists():
+            stderr_output = log_path.read_text().strip()
         proc.terminate()
         console.print("[red]Server failed to start within 30 seconds.[/red]")
         if stderr_output:
@@ -874,6 +879,50 @@ def onboard(
 
 
 @app.command()
+def addons(
+    component: Optional[str] = typer.Argument(None, help="Component key: vision, embeddings, voice, analytics"),
+    remove: bool = typer.Option(False, "--remove", "-r", help="Uninstall instead of install"),
+):
+    """Manage optional components (vision, voice, embeddings, analytics).
+
+    Without arguments opens an interactive menu.
+    Press ↑↓ to navigate, i to install, u to uninstall, q to quit.
+
+    \b
+    Examples:
+      ppmlx addons                  # interactive menu
+      ppmlx addons voice            # install voice directly
+      ppmlx addons --remove voice   # remove voice directly
+    """
+    from ppmlx.installer import install_component, uninstall_component, addons_tui
+
+    if component:
+        ok = (uninstall_component if remove else install_component)(component)
+        raise typer.Exit(0 if ok else 1)
+
+    addons_tui()
+
+
+@app.command(name="install", hidden=True)
+def install_deprecated(
+    component: Optional[str] = typer.Argument(None),
+    remove: bool = typer.Option(False, "--remove", "-r"),
+    status: bool = typer.Option(False, "--status", "-s"),
+):
+    """Deprecated: use 'ppmlx addons' instead."""
+    _deprecated("install", "addons")
+    from ppmlx.installer import install_component, uninstall_component, addons_tui
+    if status:
+        from ppmlx.installer import _print_status_plain, COMPONENTS, _is_installed
+        _print_status_plain(COMPONENTS, [_is_installed(c) for c in COMPONENTS])
+        return
+    if component:
+        ok = (uninstall_component if remove else install_component)(component)
+        raise typer.Exit(0 if ok else 1)
+    addons_tui()
+
+
+@app.command()
 def launch(
     action: Optional[str] = typer.Argument(None, help="Action: run, serve, claude, codex, opencode, openwebui, pi"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Model name or alias"),
@@ -933,21 +982,35 @@ def launch(
 @app.command()
 def serve(
     host: Optional[str] = typer.Option(None, help="Bind host"),
-    port: Optional[int] = typer.Option(None, help="Bind port (default: 6767)"),
+    port: Optional[int] = typer.Option(None, help="Bind port (default: 6767, or 6768 with --gateway)"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Pre-load a model on startup"),
     embed_model: Optional[str] = typer.Option(None, "--embed-model", help="Pre-load an embedding model"),
     no_cors: bool = typer.Option(False, "--no-cors", help="Disable CORS"),
     interactive: bool = typer.Option(False, "--interactive", "-i", help="Interactively select a model to serve"),
+    batch_mode: bool = typer.Option(False, "--batch", help="Enable continuous batching for concurrent requests"),
+    gateway_mode: bool = typer.Option(False, "--gateway", help="Run as smart routing gateway (local + cloud)"),
+    local_server: Optional[str] = typer.Option(None, "--local-server", help="Local ppmlx server URL (only with --gateway)"),
+    kv_quant: Optional[str] = typer.Option(None, "--kv-quant", help="KV-cache quantization: off, turboquant"),
 ):
-    """Start the OpenAI-compatible API server."""
+    """Start the OpenAI-compatible API server.
+
+    With --gateway, runs as a smart routing proxy that routes requests
+    to local ppmlx models or cloud providers (OpenAI, Anthropic) based
+    on model name patterns configured in ~/.ppmlx/config.toml.
+    """
     import uvicorn
     from ppmlx.config import load_config
     from ppmlx import __version__
+
+    if gateway_mode:
+        _serve_gateway(host=host, port=port, local_server=local_server)
+        return
 
     overrides: dict[str, object] = {}
     if host: overrides["host"] = host
     if port: overrides["port"] = port
     if no_cors: overrides["cors"] = False
+    if kv_quant: overrides["kv_quant"] = kv_quant
     cfg = load_config(cli_overrides=overrides)
     _track_usage(
         "serve_started",
@@ -1006,8 +1069,23 @@ def serve(
         border_style="blue",
     ))
 
+    from ppmlx.server import set_startup_overrides
+    set_startup_overrides(overrides)
+
     title_model = f" {model}" if model else ""
     _set_process_title(f"ppmlx serve{title_model} ({effective_host}:{effective_port})")
+    if model:
+        from ppmlx.server import set_preload_model
+        set_preload_model(model)
+    if embed_model:
+        from ppmlx.server import set_preload_embed_model
+        set_preload_embed_model(embed_model)
+
+    if batch_mode:
+        from ppmlx.server import set_batch_mode
+        set_batch_mode(True)
+        console.print("[dim]Continuous batching: enabled[/dim]")
+
 
     uvicorn.run(
         "ppmlx.server:app",
@@ -1017,6 +1095,339 @@ def serve(
         reload=False,
         ws_max_size=max(1, cfg.server.max_request_body_mb) * 1024 * 1024,
     )
+
+
+def _deprecated(old: str, new: str):
+    console.print(f"[yellow]'ppmlx {old}' is deprecated. Use 'ppmlx {new}' instead.[/yellow]")
+
+
+def _serve_gateway(
+    host: str | None = None,
+    port: int | None = None,
+    local_server: str | None = None,
+):
+    """Internal: start the gateway server."""
+    import uvicorn
+    from ppmlx.gateway import load_gateway_config, build_routing_table, create_gateway_app, RouteConfig
+    from ppmlx import __version__
+
+    cfg = load_gateway_config()
+    if host:
+        cfg.host = host
+    if port:
+        cfg.port = port
+    if local_server:
+        cfg.local_server = local_server
+
+    if not cfg.routes:
+        cfg.routes = [
+            RouteConfig(pattern="gpt-*", backend="openai", api_key_env="OPENAI_API_KEY"),
+            RouteConfig(pattern="claude-*", backend="anthropic", api_key_env="ANTHROPIC_API_KEY"),
+            RouteConfig(pattern="*", backend="local"),
+        ]
+
+    routing_table = build_routing_table(cfg)
+    route_lines = []
+    for r in routing_table:
+        route_lines.append(f"     {r['pattern']:20s} -> {r['backend']:12s} (fallback: {r['fallback']})")
+
+    console.print(Panel(
+        f"[bold green]ppmlx gateway v{__version__}[/bold green]\n"
+        f"   Listening on [link]http://{cfg.host}:{cfg.port}[/link]\n"
+        f"   Local server: {cfg.local_server}\n"
+        f"   Routes:\n" + "\n".join(route_lines) + "\n"
+        "\n   Endpoints:\n"
+        "     POST /v1/chat/completions  (routed)\n"
+        "     POST /v1/completions       (routed)\n"
+        "     POST /v1/embeddings        (local)\n"
+        "     GET  /v1/models            (aggregated)\n"
+        "     GET  /gateway/routes       (routing table)\n"
+        "     GET  /health",
+        title="ppmlx gateway",
+        border_style="cyan",
+    ))
+
+    gateway_app = create_gateway_app(cfg)
+
+    if _setproctitle_mod:
+        _setproctitle_mod.setproctitle(f"ppmlx: gateway ({cfg.host}:{cfg.port})")
+
+    uvicorn.run(
+        gateway_app,
+        host=cfg.host,
+        port=cfg.port,
+        log_level="info",
+        reload=False,
+    )
+
+
+@app.command(hidden=True)
+def gateway(
+    host: Optional[str] = typer.Option(None, help="Bind host"),
+    port: Optional[int] = typer.Option(None, help="Bind port"),
+    local_server: Optional[str] = typer.Option(None, "--local-server", help="Local ppmlx server URL"),
+):
+    """Deprecated: use 'ppmlx serve --gateway' instead."""
+    _deprecated("gateway", "serve --gateway")
+    _serve_gateway(host=host, port=port, local_server=local_server)
+
+
+@app.command()
+def agent(
+    model: Optional[str] = typer.Argument(None, help="Model name or alias"),
+    system: Optional[str] = typer.Option(None, "--system", "-s", help="System prompt"),
+    sandbox: bool = typer.Option(False, "--sandbox", help="Sandbox mode (read-only tools)"),
+    voice: bool = typer.Option(False, "--voice", "-v", help="Enable voice input/output"),
+    stt_model: Optional[str] = typer.Option(None, "--stt-model", help="STT model (default: whisper-large-v3-turbo)"),
+    tts_model: Optional[str] = typer.Option(None, "--tts-model", help="TTS model (default: Voxtral-4B-TTS)"),
+    tts_voice: Optional[str] = typer.Option(None, "--tts-voice", help="TTS voice name"),
+    max_iterations: int = typer.Option(10, "--max-iterations", help="Max agent iterations per turn"),
+    temperature: Optional[float] = typer.Option(None, "--temperature", "-t"),
+    max_tokens: Optional[int] = typer.Option(None, "--max-tokens"),
+):
+    """Interactive agent with tool execution (bash, file read/write).
+
+    The agent can read files, write files, list directories, and run
+    shell commands on your machine. Use --sandbox for read-only mode.
+
+    With --voice, enables push-to-talk voice input (Whisper STT) and
+    spoken responses (Voxtral TTS). All processing runs locally on
+    Apple Silicon via MLX.
+    """
+    _track_usage("agent_started", {"voice": voice, "sandbox": sandbox})
+
+    if not model:
+        model = cast(str, _pick_model())
+    from ppmlx.models import resolve_alias, get_model_path, download_model, ModelNotFoundError
+    from ppmlx.memory import check_memory_warning
+
+    try:
+        repo_id = resolve_alias(model)
+    except ModelNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    local_path = get_model_path(repo_id)
+    if not local_path:
+        console.print(f"[yellow]Downloading {model}...[/yellow]")
+        try:
+            download_model(model)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Download cancelled.[/yellow]")
+            raise typer.Exit(1)
+        except Exception as e:
+            console.print(f"[red]Download failed: {e}[/red]")
+            raise typer.Exit(1)
+
+    downloaded_path = get_model_path(repo_id)
+    warning = check_memory_warning(downloaded_path) if downloaded_path is not None else None
+    if warning:
+        console.print(f"[yellow]{warning}[/yellow]")
+
+    # Set up agent
+    from ppmlx.agent import AgentConfig, AgentRuntime, AgentStep
+
+    from ppmlx.config import load_config as _load_agent_cfg
+    _acfg = _load_agent_cfg().agent
+    agent_cfg = AgentConfig(
+        model=repo_id,
+        max_iterations=max_iterations or _acfg.max_iterations,
+        sandbox=sandbox or _acfg.sandbox,
+        temperature=temperature or _acfg.temperature,
+        max_tokens=max_tokens,
+        max_read_lines=_acfg.max_read_lines,
+        max_output_chars=_acfg.max_output_chars,
+        permission_level=_acfg.permission_level,
+    )
+
+    # Set up voice if requested
+    voice_in = None
+    voice_out = None
+    vcfg = None
+    if voice:
+        from ppmlx.installer import prompt_install_if_missing
+        if not prompt_install_if_missing("voice", "Voice mode"):
+            raise typer.Exit(1)
+        from ppmlx.voice import VoiceConfig, VoiceInput, VoiceOutput
+        from ppmlx.config import load_config as _load_cfg
+        _vc = _load_cfg().voice
+        vcfg = VoiceConfig(
+            stt_model=_vc.stt_model,
+            tts_model=_vc.tts_model,
+            tts_voice=_vc.tts_voice,
+            tts_speed=_vc.tts_speed,
+            tts_volume=_vc.tts_volume,
+            ptt_mode=_vc.ptt_mode,
+            ptt_key=_vc.ptt_key,
+            silence_threshold=_vc.silence_threshold,
+            silence_duration=_vc.silence_duration,
+        )
+        # CLI args override config-file values
+        if stt_model:
+            vcfg.stt_model = stt_model
+        if tts_model:
+            vcfg.tts_model = tts_model
+        if tts_voice:
+            vcfg.tts_voice = tts_voice
+        voice_in = VoiceInput(vcfg)
+        voice_out = VoiceOutput(vcfg)
+        console.print("[green]Voice mode enabled[/green]")
+        if vcfg.ptt_mode:
+            console.print(f"  Input: push-to-talk ([bold]{vcfg.ptt_key.upper()}[/bold])")
+        else:
+            console.print("  Input: auto-silence")
+        console.print(f"  STT: {vcfg.stt_model}")
+        console.print(f"  TTS: {vcfg.tts_model}")
+
+    # Voice mode: inject conversational system prompt if user didn't provide one
+    if voice and not system:
+        from ppmlx.agent import VOICE_SYSTEM_PROMPT
+        system = VOICE_SYSTEM_PROMPT
+
+    # Display agent info
+    from ppmlx.agent import BUILTIN_TOOL_DEFINITIONS
+    mode_str = "[red]SANDBOX[/red] " if sandbox else ""
+    tool_names = [t["function"]["name"] for t in BUILTIN_TOOL_DEFINITIONS]
+    if sandbox:
+        tool_names = [n for n in tool_names if n not in ("write_file", "patch_file")]
+    tools_str = ", ".join(tool_names)
+    console.print(Panel(
+        f"[bold green]ppmlx agent[/bold green] {mode_str}\n"
+        f"  Model: {model}\n"
+        f"  Tools: {tools_str}\n"
+        f"  Max iterations: {max_iterations}\n"
+        f"  Working dir: {agent_cfg.working_dir}\n\n"
+        f"[dim]Type your instructions. The agent will plan and execute.\n"
+        f"{'Hold [' + vcfg.ptt_key.upper() + '] to record, release to send. ' if (voice and vcfg and vcfg.ptt_mode) else ('Enter = voice input, or type text. ' if voice else '')}"
+        f"Type /exit or double Ctrl+C to quit.[/dim]",
+        title="Agent",
+        border_style="green" if not sandbox else "red",
+    ))
+
+    def _on_step(step: AgentStep) -> None:
+        """Display agent step progress."""
+        if step.tool_calls:
+            for tc in step.tool_calls:
+                name = tc.get("name", "?")
+                args = tc.get("arguments", "")
+                if isinstance(args, str) and len(args) > 100:
+                    args = args[:100] + "..."
+                console.print(f"  [yellow]⚡ {name}[/yellow] [dim]{args}[/dim]")
+            for tr in step.tool_results:
+                from rich.markup import escape
+                color = "red" if tr.is_error else "green"
+                output = tr.output
+                if len(output) > 200:
+                    output = output[:200] + f"... ({len(tr.output)} chars)"
+                console.print(f"  [{color}]→ {escape(output)}[/{color}]")
+
+    # Confirmation callback for dangerous tools (when permission_level allows them)
+    _confirm_cb = None
+    if agent_cfg.permission_level not in ("readonly",):
+        def _confirm_tool(description: str) -> bool:
+            return console.input(f"[yellow]\u26a0 {description}[/yellow] [dim](y/n)[/dim] ").strip().lower() in ("y", "yes", "")
+        _confirm_cb = _confirm_tool
+
+    runtime = AgentRuntime(config=agent_cfg, on_step=_on_step, confirm_callback=_confirm_cb)
+
+    # Load UI config for agent REPL
+    try:
+        from ppmlx.config import load_config as _lc2
+        _ui2 = _lc2().ui
+        _agent_show_stats = _ui2.show_stats
+        _agent_markdown = _ui2.markdown
+    except Exception:
+        _agent_show_stats = False
+        _agent_markdown = False
+
+    from ppmlx.render import print_response
+
+    # Pre-load voice models with spinners (hides noisy hf_hub output)
+    if voice and voice_in:
+        with console.status("[bold cyan]Loading STT model…[/bold cyan]", spinner="dots"):
+            try:
+                voice_in.preload_stt()
+            except Exception:
+                pass  # will retry on first use
+    if voice and voice_out:
+        with console.status("[bold cyan]Loading TTS model…[/bold cyan]", spinner="dots"):
+            try:
+                voice_out._load_tts()
+            except Exception:
+                pass  # will retry on first use
+
+    # REPL loop
+    _last_interrupt: float = 0.0
+    while True:
+        try:
+            if voice and voice_in and vcfg:
+                if vcfg.ptt_mode:
+                    # PTT mode: go straight to recording
+                    console.print(
+                        f"\n[bold cyan]🎤 Hold [{vcfg.ptt_key.upper()}] to record…[/bold cyan]"
+                    )
+                    user_input = voice_in.record_and_transcribe()
+                    if not user_input:
+                        console.print("[dim]No speech detected.[/dim]")
+                        continue
+                    console.print(f"[cyan]You:[/cyan] {user_input}")
+                else:
+                    # Auto-silence mode: Enter → voice, typed text → use directly
+                    user_input = console.input(
+                        "\n[bold cyan]You:[/bold cyan] [dim](Enter = 🎤 voice)[/dim] "
+                    ).strip()
+                    if user_input.lower() in ("/exit", "/quit", "exit", "quit"):
+                        break
+                    if not user_input:
+                        console.print("[bold cyan]🎤 Listening…[/bold cyan] (speak, then pause)")
+                        user_input = voice_in.record_and_transcribe()
+                        if not user_input:
+                            console.print("[dim]No speech detected.[/dim]")
+                            continue
+                        console.print(f"[cyan]You:[/cyan] {user_input}")
+            else:
+                user_input = console.input("\n[bold cyan]You:[/bold cyan] ").strip()
+
+            if not user_input:
+                continue
+            if user_input.lower() in ("/exit", "/quit", "exit", "quit"):
+                break
+
+            # Run agent
+            console.print()
+            answer, steps = runtime.run(user_input, system_prompt=system)
+
+            # Display answer
+            import time as _agtime
+            print_response(
+                answer,
+                console=console,
+                markdown=_agent_markdown,
+                prefix="\n[bold green]Agent:[/bold green] ",
+            )
+
+            # Speak the answer (clean text only, no tool output)
+            if voice and voice_out and answer:
+                try:
+                    voice_out.speak(answer)
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    pass
+
+        except KeyboardInterrupt:
+            import time as _itime
+            now = _itime.time()
+            if now - _last_interrupt < 2.0:
+                console.print("\n[dim]Agent session ended.[/dim]")
+                raise typer.Exit(0)
+            _last_interrupt = now
+            console.print("\n[dim]Ctrl+C again to quit, or type /exit[/dim]")
+            continue
+        except EOFError:
+            break
+
+    console.print("[dim]Agent session ended.[/dim]")
 
 
 @app.command()
@@ -1063,12 +1474,23 @@ def run(
     if system:
         messages.append({"role": "system", "content": system})
 
+    # Load UI config
+    try:
+        from ppmlx.config import load_config as _lc
+        _ui = _lc().ui
+        _show_stats_default = _ui.show_stats
+        _markdown_default = _ui.markdown
+    except Exception:
+        _show_stats_default = False
+        _markdown_default = False
+
     # Session state
     history_enabled = True
     wordwrap = True
-    verbose = False
+    verbose = _show_stats_default
     format_json = False
     think = False
+    use_markdown = _markdown_default
 
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import InMemoryHistory
@@ -1077,6 +1499,27 @@ def run(
     from prompt_toolkit.filters import emacs_insert_mode
 
     _kb = KeyBindings()
+
+    # ── macOS Option+letter → diacritical characters ─────────────────────
+    # On macOS, Option+letter produces a Unicode character directly via the
+    # system input method (e.g. Option+a → ą, Option+n → ń in Polish layout).
+    # prompt_toolkit receives these as regular printable characters, so no
+    # explicit mapping is needed — they work out of the box when the terminal
+    # and shell are configured for UTF-8.
+    # The bindings below cover Polish characters for terminals that send
+    # escape sequences instead (e.g. Option+a → ESC a on some configs).
+    _POLISH_OPTION: dict[str, str] = {
+        "a": "ą", "c": "ć", "e": "ę", "l": "ł", "n": "ń",
+        "o": "ó", "s": "ś", "x": "ź", "z": "ż",
+        "A": "Ą", "C": "Ć", "E": "Ę", "L": "Ł", "N": "Ń",
+        "O": "Ó", "S": "Ś", "X": "Ź", "Z": "Ż",
+    }
+    for _latin, _diacritic in _POLISH_OPTION.items():
+        def _make_insert(ch: str):
+            def _insert(event):
+                event.current_buffer.insert_text(ch)
+            return _insert
+        _kb.add("escape", _latin)(_make_insert(_diacritic))
 
     @_kb.add("c-left")   # Ctrl+Left  — jump word left
     @_kb.add("escape", "b")  # Alt/Option+B
@@ -1236,12 +1679,18 @@ def run(
             elif sub == "noformat":
                 format_json = False
                 console.print("[dim]Formatting disabled.[/dim]")
-            elif sub == "verbose":
+            elif sub in ("verbose", "stats"):
                 verbose = True
-                console.print("[dim]Verbose mode enabled.[/dim]")
-            elif sub == "quiet":
+                console.print("[dim]Stats enabled.[/dim]")
+            elif sub in ("quiet", "nostats"):
                 verbose = False
-                console.print("[dim]Quiet mode enabled.[/dim]")
+                console.print("[dim]Stats disabled.[/dim]")
+            elif sub == "markdown":
+                use_markdown = True
+                console.print("[dim]Markdown rendering enabled.[/dim]")
+            elif sub == "nomarkdown":
+                use_markdown = False
+                console.print("[dim]Markdown rendering disabled.[/dim]")
             elif sub == "think":
                 think = True
                 console.print("[dim]Thinking enabled.[/dim]")
@@ -1418,7 +1867,7 @@ def run(
                 else:
                     send_msgs.insert(0, {"role": "system", "content": "Respond only with valid JSON."})
 
-            console.print("[bold green]Assistant:[/bold green] ", end="")
+            from ppmlx.render import stream_and_collect, print_response
             full_response = ""
             try:
                 if image_paths:
@@ -1432,14 +1881,15 @@ def run(
                         max_tokens=max_tokens or 2048,
                     )
                     elapsed = _time.monotonic() - t0
-                    console.print(text, no_wrap=not wordwrap)
+                    print_response(text, console=console,
+                                   markdown=use_markdown,
+                                   prefix="\n[bold green]Assistant:[/bold green] ")
                     full_response = text
                     if verbose:
                         tps = completion_toks / elapsed if elapsed > 0 else 0
                         console.print(
-                            f"[dim]prompt {prompt_toks} tokens  "
-                            f"completion {completion_toks} tokens  "
-                            f"{tps:.1f} tok/s  {elapsed:.2f}s[/dim]"
+                            f"[dim]  ·  {tps:.1f} tok/s · {completion_toks} tokens "
+                            f"· {elapsed:.1f}s[/dim]"
                         )
                 elif verbose:
                     import time as _time
@@ -1465,35 +1915,20 @@ def run(
                         f"{tps:.1f} tok/s  {elapsed:.2f}s[/dim]"
                     )
                 else:
-                    # Streaming with think-tag handling
-                    in_think = False
-                    for chunk in engine.stream_generate(
+                    # Streaming — unified stats + markdown path
+                    gen = engine.stream_generate(
                         repo_id, send_msgs,
                         temperature=temperature or 0.7,
                         max_tokens=max_tokens or 2048,
                         enable_thinking=think,
-                    ):
-                        if "<think>" in chunk and not in_think:
-                            before, _, after = chunk.partition("<think>")
-                            if before:
-                                console.print(before, end="")
-                                full_response += before
-                            in_think = True
-                            chunk = after
-                        if "</think>" in chunk and in_think:
-                            inside, _, after = chunk.partition("</think>")
-                            if think and inside:
-                                console.print(f"[dim italic]{inside}[/dim italic]", end="")
-                            in_think = False
-                            chunk = after
-                        if chunk:
-                            if in_think:
-                                if think:
-                                    console.print(chunk, end="", style="dim italic")
-                            else:
-                                console.print(chunk, end="")
-                                full_response += chunk
-                    console.print()
+                    )
+                    full_response, _ = stream_and_collect(
+                        gen,
+                        console=console,
+                        markdown=use_markdown,
+                        show_stats=verbose,
+                        prefix="\n[bold green]Assistant:[/bold green] ",
+                    )
             except KeyboardInterrupt:
                 console.print("\n[dim]Generation interrupted.[/dim]")
                 if history_enabled:
@@ -1519,6 +1954,9 @@ def _do_pull(
     do_quantize: bool = False,
     bits: int = 4,
     keep_original: bool = False,
+    group_size: int = 64,
+    output: str | None = None,
+    upload_repo: str | None = None,
 ) -> bool:
     """Download a single model and print result. Returns True on success."""
     from ppmlx.models import download_model, resolve_alias, ModelNotFoundError
@@ -1558,6 +1996,9 @@ def _do_pull(
         cfg = QuantizeConfig(
             bits=cast(Literal[2, 3, 4, 6, 8], bits),
             hf_token=token,
+            group_size=group_size,
+            output_path=Path(output) if output else None,
+            upload_repo=upload_repo,
         )
         try:
             quantized_path = run_quantize(
@@ -1593,8 +2034,15 @@ def pull(
     bits: int = typer.Option(4, "--bits", help="Quantization bit depth (2, 3, 4, 6, or 8)"),
     keep_original: bool = typer.Option(False, "--keep-original", help="Keep the full-precision download after quantization"),
     refresh: bool = typer.Option(False, "--refresh", help="Force-refresh the registry before showing the interactive selector"),
+    group_size: int = typer.Option(64, "--group-size", help="Quantization group size (only with --quantize)"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output directory for quantized model"),
+    upload_repo: Optional[str] = typer.Option(None, "--upload-repo", help="HF repo to upload quantized model to"),
 ):
-    """Download a model from HuggingFace Hub (interactive multiselect when no model given)."""
+    """Download a model from HuggingFace Hub (interactive multiselect when no model given).
+
+    With --quantize, also converts the model to MLX quantized format.
+    Use --group-size, --output, --upload-repo for advanced quantization options.
+    """
     if do_quantize and bits not in _VALID_QUANTIZE_BITS:
         console.print(f"[red]Invalid --bits value: {bits}. Must be one of {sorted(_VALID_QUANTIZE_BITS)}.[/red]")
         raise typer.Exit(1)
@@ -1614,18 +2062,25 @@ def pull(
             return
 
         for m in selected:
-            _do_pull(m, token, do_quantize=do_quantize, bits=bits, keep_original=keep_original)
+            _do_pull(m, token, do_quantize=do_quantize, bits=bits, keep_original=keep_original, group_size=group_size, output=output, upload_repo=upload_repo)
         return
 
-    if not _do_pull(model, token, do_quantize=do_quantize, bits=bits, keep_original=keep_original):
+    if not _do_pull(model, token, do_quantize=do_quantize, bits=bits, keep_original=keep_original, group_size=group_size, output=output, upload_repo=upload_repo):
         raise typer.Exit(1)
 
 
-@app.command(name="list")
+list_app = typer.Typer(name="list", help="List models and manage aliases/favorites", invoke_without_command=True)
+app.add_typer(list_app, name="list")
+
+
+@list_app.callback(invoke_without_command=True)
 def list_models(
+    ctx: typer.Context,
     all_models: bool = typer.Option(False, "--all", "-a", help="Show all models (local + registry)"),
 ):
-    """List models. Shows downloaded models by default, --all includes registry."""
+    """List models with ★ for favorites. Subcommands: alias, fav."""
+    if ctx.invoked_subcommand is not None:
+        return
     _track_usage("list_models", {"all_models": all_models})
 
     rows = _build_picker_rows(local_only=not all_models)
@@ -1640,6 +2095,121 @@ def list_models(
 
     from ppmlx.tui import browse_models
     browse_models(rows, title=title, command_str="ppmlx list")
+
+
+@list_app.command(name="alias")
+def list_alias():
+    """Interactively add or remove model aliases."""
+    import questionary
+    from ppmlx.models import load_user_aliases, save_user_alias, remove_user_alias, list_local_models
+
+    user_aliases = load_user_aliases()
+
+    action = questionary.select(
+        "Manage aliases:",
+        choices=[
+            questionary.Choice("Add a new alias", value="add"),
+            questionary.Choice("Remove an alias", value="remove"),
+            questionary.Choice("Show all aliases", value="show"),
+        ],
+    ).ask()
+    if not action:
+        raise typer.Exit()
+
+    if action == "show":
+        records = _build_model_records(exclude_embed=False)
+        if not records:
+            console.print("[dim]No aliases configured.[/dim]")
+            return
+        table = Table(title="Model Aliases")
+        table.add_column("Alias")
+        table.add_column("Repository")
+        table.add_column("Source")
+        for record in records:
+            table.add_row(record.alias, record.repo_id, record.source)
+        console.print(table)
+        return
+
+    if action == "add":
+        local_models = list_local_models()
+        if not local_models:
+            console.print("[yellow]No local models found. Run: ppmlx pull <model>[/yellow]")
+            raise typer.Exit(1)
+        choices = [
+            questionary.Choice(f"{m['alias']:<24} {m['repo_id']}", value=m["repo_id"])
+            for m in sorted(local_models, key=lambda x: x["alias"])
+        ]
+        repo = questionary.select("Select a model to alias:", choices=choices).ask()
+        if not repo:
+            raise typer.Exit()
+        name = questionary.text(
+            "Alias name:",
+            validate=lambda v: True if v.strip() else "Alias cannot be empty",
+        ).ask()
+        if not name:
+            raise typer.Exit()
+        save_user_alias(name.strip(), repo)
+        console.print(f"[green]Alias created: [bold]{name.strip()}[/bold] -> {repo}[/green]")
+        return
+
+    if action == "remove":
+        if not user_aliases:
+            console.print("[dim]No user aliases to remove.[/dim]")
+            raise typer.Exit()
+        choices = [questionary.Choice(f"{k} -> {v}", value=k) for k, v in user_aliases.items()]
+        selected = questionary.select("Remove alias:", choices=choices).ask()
+        if not selected:
+            raise typer.Exit()
+        remove_user_alias(selected)
+        console.print(f"[green]Removed alias: [bold]{selected}[/bold][/green]")
+
+
+@list_app.command(name="fav")
+def list_fav():
+    """Interactively toggle favorite models (yes/no per model)."""
+    import questionary
+    from ppmlx.models import list_local_models, load_favorites, add_favorite, remove_favorite
+
+    local_models = list_local_models()
+    if not local_models:
+        console.print("[yellow]No local models found. Run: ppmlx pull <model>[/yellow]")
+        raise typer.Exit(1)
+
+    current_favs = set(load_favorites())
+    sorted_models = sorted(local_models, key=lambda x: x["alias"])
+
+    choices = [
+        questionary.Choice(
+            f"{'★ ' if m['alias'] in current_favs else '  '}{m['alias']}",
+            value=m["alias"],
+            checked=m["alias"] in current_favs,
+        )
+        for m in sorted_models
+    ]
+
+    selected = questionary.checkbox(
+        "Select favorites (space to toggle):",
+        choices=choices,
+    ).ask()
+
+    if selected is None:
+        raise typer.Exit()
+
+    new_favs = set(selected)
+    added = new_favs - current_favs
+    removed = current_favs - new_favs
+
+    for m in added:
+        add_favorite(m)
+    for m in removed:
+        remove_favorite(m)
+
+    if added:
+        console.print(f"[green]★ Added: {', '.join(sorted(added))}[/green]")
+    if removed:
+        console.print(f"[yellow]Removed: {', '.join(sorted(removed))}[/yellow]")
+    if not added and not removed:
+        console.print("[dim]No changes.[/dim]")
 
 
 @app.command()
@@ -1680,6 +2250,57 @@ def rm(
             console.print(f"[red]Failed to remove {m}[/red]")
 
 
+@app.command(name="alias", hidden=True)
+def add_alias_deprecated(
+    name: Optional[str] = typer.Argument(None),
+    repo: Optional[str] = typer.Argument(None),
+):
+    """Deprecated: use 'ppmlx list alias' instead."""
+    _deprecated("alias", "list alias")
+    list_alias()
+
+
+@app.command(hidden=True)
+def aliases():
+    """Deprecated: use 'ppmlx list alias' instead."""
+    _deprecated("aliases", "list alias")
+    list_alias()
+
+
+@app.command(hidden=True)
+def fav(model: Optional[str] = typer.Argument(None)):
+    """Deprecated: use 'ppmlx list fav' instead."""
+    _deprecated("fav", "list fav")
+    list_fav()
+
+
+@app.command(hidden=True)
+def unfav(model: Optional[str] = typer.Argument(None)):
+    """Deprecated: use 'ppmlx list fav' instead."""
+    _deprecated("unfav", "list fav")
+    list_fav()
+
+
+@app.command(hidden=True)
+def favs():
+    """Deprecated: use 'ppmlx list fav' instead."""
+    _deprecated("favs", "list fav")
+    list_fav()
+
+
+def _format_duration(seconds: float) -> str:
+    """Format seconds as a human-readable duration (e.g. '2m 30s')."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m {secs}s"
+
+
+
 @app.command()
 def ps():
     """Show currently loaded models and memory usage."""
@@ -1694,6 +2315,7 @@ def ps():
         response = httpx.get(url, timeout=3.0)
         data = response.json()
         loaded = data.get("loaded_models", [])
+        loaded_info = data.get("loaded_models_info", [])
         uptime = data.get("uptime_seconds", 0)
 
         if not loaded:
@@ -1702,6 +2324,8 @@ def ps():
 
         loaded_set = set(loaded)
         records = _build_model_records()
+        # Build a lookup from loaded_info if available
+        info_by_id = {info["repo_id"]: info for info in loaded_info} if loaded_info else {}
         # Build picker rows for loaded models only
         rows: list[_PickerRow] = []
         for r in records:
@@ -1721,19 +2345,36 @@ def ps():
                 section_header=None, is_loaded=True,
             ))
 
+        # Build TTL summary for footer
+        ttl_parts: list[str] = []
+        for m in loaded:
+            info = info_by_id.get(m, {})
+            idle = _format_duration(info["idle_seconds"]) if "idle_seconds" in info else None
+            ttl = (
+                _format_duration(info["ttl_remaining_seconds"])
+                if "ttl_remaining_seconds" in info
+                else None
+            )
+            if idle or ttl:
+                ttl_parts.append(f"{m}: idle={idle or '-'} ttl={ttl or 'off'}")
+        ttl_footer = " | ".join(ttl_parts) if ttl_parts else ""
+        footer = f"Server uptime: {_format_duration(uptime)}"
+        if ttl_footer:
+            footer += f"  {ttl_footer}"
+
         from ppmlx.tui import browse_models
         browse_models(
             rows, title="Loaded Models", command_str="ppmlx ps",
-            footer_extra=f"Server uptime: {uptime}s",
+            footer_extra=footer,
         )
     except Exception:
         console.print("[yellow]Server not running. Start it with: ppmlx serve[/yellow]")
 
 
-@app.command()
+@app.command(hidden=True)
 def quantize(
     model: Optional[str] = typer.Argument(None, help="HuggingFace repo ID or alias"),
-    bits: int = typer.Option(4, "--bits", "-b", help="Quantization bits (2,3,4,6,8)"),
+    bits: int = typer.Option(4, "--bits", "-b", help="Quantization bits"),
     group_size: int = typer.Option(64, "--group-size", help="Quantization group size"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output directory"),
     upload: Optional[str] = typer.Option(None, "--upload-repo", help="HF repo to upload to"),
@@ -1768,8 +2409,13 @@ def quantize(
         raise typer.Exit(1)
 
 
-@app.command(name="config")
+config_app = typer.Typer(name="config", help="Configuration, logs, and benchmarks", invoke_without_command=True)
+app.add_typer(config_app, name="config")
+
+
+@config_app.callback(invoke_without_command=True)
 def config_cmd(
+    ctx: typer.Context,
     hf_token: Optional[str] = typer.Option(None, "--hf-token", help="Set HuggingFace token"),
     thinking: Optional[bool] = typer.Option(
         None,
@@ -1797,21 +2443,22 @@ def config_cmd(
         help="Enable or disable anonymous usage analytics.",
     ),
 ):
-    """View or interactively set ppmlx configuration (HF token, defaults, etc.)."""
+    """View or set ppmlx configuration. Subcommands: logs, bench."""
+    if ctx.invoked_subcommand is not None:
+        return
+
     import tomllib
     import tomli_w  # type: ignore[import]
     from ppmlx.config import get_ppmlx_dir
 
     cfg_path = get_ppmlx_dir() / "config.toml"
 
-    # Load existing config
     try:
         with open(cfg_path, "rb") as f:
             data: dict = tomllib.load(f)
     except Exception:
         data = {}
 
-    # Non-interactive: apply any flags passed via CLI
     has_flag = any(v is not None for v in [hf_token, thinking, reasoning_budget, effort_base, max_tools_tokens, analytics])
     if has_flag:
         if hf_token is not None:
@@ -1879,8 +2526,8 @@ def _open_log_db():
     return get_db(db_path)
 
 
-@app.command()
-def logs(
+@config_app.command(name="logs")
+def config_logs(
     limit: int = typer.Option(20, "--limit", "-n", help="Number of requests to show"),
     model: str = typer.Option(None, "--model", "-m", help="Filter by model alias"),
     since: float = typer.Option(None, "--since", "-s", help="Hours to look back"),
@@ -1888,8 +2535,13 @@ def logs(
     slow: float = typer.Option(None, "--slow", help="Min duration in ms"),
     thinking: bool = typer.Option(False, "--thinking", "-t", help="Show only thinking-enabled requests"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    show_stats: bool = typer.Option(False, "--stats", "-S", help="Show aggregated statistics instead of request list"),
 ):
-    """Query and display request history from the log database."""
+    """Query request history or show aggregated stats (--stats)."""
+    if show_stats:
+        _show_stats(since=since or 24, json_output=json_output)
+        return
+
     from rich.table import Table
 
     db = _open_log_db()
@@ -1966,12 +2618,8 @@ def logs(
     console.print(f"\nShowing {len(rows)} requests | Avg duration: {avg_dur} | Avg tok/s: {avg_tps}")
 
 
-@app.command()
-def stats(
-    since: float = typer.Option(24, "--since", "-s", help="Hours to look back"),
-    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
-):
-    """Display aggregated statistics from the log database."""
+def _show_stats(since: float = 24, json_output: bool = False):
+    """Display aggregated statistics."""
     from rich.table import Table
 
     db = _open_log_db()
@@ -3659,6 +4307,437 @@ def memory_eval_cmd(
             raise typer.Exit(1)
 
 
+# Deprecated top-level shims for logs/stats
+@app.command(hidden=True)
+def logs(
+    limit: int = typer.Option(20, "--limit", "-n"),
+    model: str = typer.Option(None, "--model", "-m"),
+    since: float = typer.Option(None, "--since", "-s"),
+    errors: bool = typer.Option(False, "--errors", "-e"),
+    slow: float = typer.Option(None, "--slow"),
+    thinking: bool = typer.Option(False, "--thinking", "-t"),
+    json_output: bool = typer.Option(False, "--json", "-j"),
+):
+    """Deprecated: use 'ppmlx config logs' instead."""
+    _deprecated("logs", "config logs")
+    config_logs(limit=limit, model=model, since=since, errors=errors, slow=slow, thinking=thinking, json_output=json_output, show_stats=False)
+
+
+@app.command(hidden=True)
+def stats(
+    since: float = typer.Option(24, "--since", "-s"),
+    json_output: bool = typer.Option(False, "--json", "-j"),
+):
+    """Deprecated: use 'ppmlx config logs --stats' instead."""
+    _deprecated("stats", "config logs --stats")
+    _show_stats(since=since, json_output=json_output)
+
+
+# ── RAG commands ───────────────────────────────────────────────────────
+
+rag_app = typer.Typer(
+    name="rag",
+    help="Chat with your documents (privacy-first RAG)",
+    no_args_is_help=True,
+)
+app.add_typer(rag_app, name="rag")
+
+
+@rag_app.command()
+def ingest(
+    path: str = typer.Argument(..., help="File or directory to ingest"),
+    collection: str = typer.Option("default", "--collection", "-c", help="Collection name"),
+    embed_model: str = typer.Option("embed:all-minilm", "--embed-model", "-e", help="Embedding model alias"),
+    chunk_size: int = typer.Option(500, "--chunk-size", help="Chunk size in characters"),
+    chunk_overlap: int = typer.Option(50, "--chunk-overlap", help="Overlap between chunks in characters"),
+):
+    """Ingest documents into a RAG collection for local Q&A."""
+    from ppmlx.rag import ingest as rag_ingest
+
+    target = Path(path).expanduser().resolve()
+    if not target.exists():
+        console.print(f"[red]Path not found: {target}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[cyan]Ingesting from [bold]{target}[/bold] into collection '{collection}'...[/cyan]")
+    try:
+        stats = rag_ingest(
+            path=target,
+            collection_name=collection,
+            embed_model=embed_model,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+    except ImportError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Ingestion failed: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]Done![/green] {stats['files_processed']} files processed, "
+                  f"{stats['chunks_created']} chunks created, "
+                  f"{stats['files_skipped']} files skipped.")
+    if stats["errors"]:
+        console.print(f"[yellow]{len(stats['errors'])} errors:[/yellow]")
+        for err in stats["errors"]:
+            console.print(f"  [dim]{err['file']}[/dim]: {err['error']}")
+
+
+@rag_app.command()
+def chat(
+    collection: str = typer.Option("default", "--collection", "-c", help="Collection to query"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Chat model alias"),
+    top_k: int = typer.Option(5, "--top-k", "-k", help="Number of context chunks to retrieve"),
+    temperature: Optional[float] = typer.Option(None, "--temperature", "-t"),
+    max_tokens: Optional[int] = typer.Option(None, "--max-tokens"),
+):
+    """Chat with your documents using retrieval-augmented generation."""
+    from ppmlx.rag import VectorStore, retrieve, build_rag_prompt
+
+    store = VectorStore()
+    coll = store.get_collection(collection)
+    if coll is None:
+        console.print(f"[red]Collection '{collection}' not found. Run [bold]ppmlx rag ingest[/bold] first.[/red]")
+        raise typer.Exit(1)
+
+    doc_count = len(store.get_documents(coll["id"]))
+    console.print(f"[green]RAG chat with collection '[bold]{collection}[/bold]' "
+                  f"({doc_count} docs). Type /bye to exit.[/green]")
+
+    # Resolve chat model
+    if not model:
+        from ppmlx.config import load_config
+        model = load_config().defaults.model
+
+    from ppmlx.models import resolve_alias, get_model_path, download_model, ModelNotFoundError
+    from ppmlx.engine import get_engine
+
+    try:
+        repo_id = resolve_alias(model)
+    except ModelNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    local_path = get_model_path(repo_id)
+    if not local_path:
+        console.print(f"[yellow]Downloading model {model}...[/yellow]")
+        try:
+            download_model(model)
+        except Exception as e:
+            console.print(f"[red]Download failed: {e}[/red]")
+            raise typer.Exit(1)
+
+    engine = get_engine()
+    messages: list[dict[str, str]] = []
+
+    while True:
+        try:
+            query = console.input("[bold blue]You[/bold blue]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]Goodbye![/dim]")
+            break
+
+        if not query:
+            continue
+        if query.lower() in ("/bye", "/exit", "/quit"):
+            console.print("[dim]Goodbye![/dim]")
+            break
+
+        # Retrieve relevant context
+        try:
+            contexts = retrieve(query, collection_name=collection, top_k=top_k, store=store)
+        except Exception as e:
+            console.print(f"[red]Retrieval error: {e}[/red]")
+            continue
+
+        augmented_query = build_rag_prompt(query, contexts)
+
+        # Build messages for the LLM
+        turn_messages = [
+            {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context."},
+            *messages,
+            {"role": "user", "content": augmented_query},
+        ]
+
+        console.print("[bold green]Assistant[/bold green]: ", end="")
+        response_text = ""
+        try:
+            result = engine.generate(
+                repo_id,
+                turn_messages,
+                temperature=temperature if temperature is not None else 0.7,
+                max_tokens=max_tokens,
+            )
+            response_text = result.text
+            console.print(response_text, end="")
+        except Exception as e:
+            console.print(f"\n[red]Generation error: {e}[/red]")
+            continue
+
+        console.print()  # newline after response
+
+        # Show sources
+        if contexts:
+            sources = sorted(set(Path(c["source"]).name for c in contexts))
+            console.print(f"[dim]Sources: {', '.join(sources)}[/dim]")
+
+        # Keep conversation history (use the original query, not the augmented one)
+        messages.append({"role": "user", "content": query})
+        messages.append({"role": "assistant", "content": response_text})
+
+
+@rag_app.command(name="list")
+def rag_list():
+    """List all RAG collections and their stats."""
+    from ppmlx.rag import VectorStore
+
+    store = VectorStore()
+    collections = store.list_collections()
+
+    if not collections:
+        console.print("[dim]No RAG collections. Run [bold]ppmlx rag ingest <dir>[/bold] to create one.[/dim]")
+        return
+
+    table = Table(title="RAG Collections", show_header=True)
+    table.add_column("Collection", style="cyan")
+    table.add_column("Embed Model", style="green")
+    table.add_column("Documents", justify="right")
+    table.add_column("Chunks", justify="right")
+    table.add_column("Created", style="dim")
+
+    for c in collections:
+        table.add_row(
+            c["name"],
+            c["embed_model"],
+            str(c["doc_count"]),
+            str(c["chunk_count"]),
+            c["created_at"][:19],
+        )
+
+    console.print(table)
+
+
+@rag_app.command("rm")
+def rm_collection(
+    collection: str = typer.Argument(..., help="Collection name to delete"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+):
+    """Remove a RAG collection and all its data."""
+    from ppmlx.rag import VectorStore
+
+    store = VectorStore()
+    coll = store.get_collection(collection)
+    if coll is None:
+        console.print(f"[red]Collection '{collection}' not found.[/red]")
+        raise typer.Exit(1)
+
+    if not force:
+        confirm = typer.confirm(f"Delete collection '{collection}' and all its data?")
+        if not confirm:
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit()
+
+    store.delete_collection(collection)
+    console.print(f"[green]Deleted collection '{collection}'.[/green]")
+
+
+@app.command()
+def process(
+    directory: str = typer.Argument(..., help="Directory of files to process"),
+    task: str = typer.Option("summarize", "--task", "-t", help="Task: summarize, translate, extract_entities, classify, or 'custom:Your prompt here'"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Model name or alias"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output directory (default: alongside originals)"),
+    parallel: int = typer.Option(1, "--parallel", "-p", help="Number of concurrent workers"),
+    resume: bool = typer.Option(False, "--resume", "-r", help="Resume from checkpoint"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be processed without running"),
+    temperature: float = typer.Option(0.7, "--temperature", help="Sampling temperature"),
+    max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="Max tokens per response"),
+    base_url: str = typer.Option("http://localhost:6767", "--base-url", help="ppmlx server URL"),
+    timeout: float = typer.Option(120.0, "--timeout", help="Per-file timeout in seconds"),
+    pipe: bool = typer.Option(False, "--pipe", help="Output results to stdout for piping"),
+    no_recursive: bool = typer.Option(False, "--no-recursive", help="Do not recurse into subdirectories"),
+):
+    """Process a directory of documents with an LLM task.
+
+    Supports summarize, translate, extract_entities, classify, or custom prompts.
+    Requires a ppmlx server running (start with: ppmlx serve).
+
+    Examples:
+
+        ppmlx process ./docs --task summarize --model qwen3.5
+
+        ppmlx process ./src --task "custom:Explain this code" --model llama3
+
+        ppmlx process ./docs --task translate --output ./translated/ --parallel 3
+
+        ppmlx process ./docs --task summarize --dry-run
+    """
+    from ppmlx.processor import (
+        BUILTIN_TASKS, CheckpointState, ProcessResult,
+        discover_files, make_custom_task, process_batch,
+    )
+
+    dir_path = Path(directory).resolve()
+    if not dir_path.is_dir():
+        console.print(f"[red]Not a directory: {directory}[/red]")
+        raise typer.Exit(1)
+
+    # Resolve task
+    if task.startswith("custom:"):
+        custom_prompt = task[len("custom:"):]
+        if not custom_prompt.strip():
+            console.print("[red]Custom task requires a prompt after 'custom:'[/red]")
+            raise typer.Exit(1)
+        task_def = make_custom_task(custom_prompt)
+    elif task in BUILTIN_TASKS:
+        task_def = BUILTIN_TASKS[task]
+    else:
+        valid = ", ".join(sorted(BUILTIN_TASKS.keys()))
+        console.print(f"[red]Unknown task '{task}'. Valid tasks: {valid}, or 'custom:Your prompt'[/red]")
+        raise typer.Exit(1)
+
+    # Model selection
+    if model is None:
+        console.print("[yellow]No model specified. Use --model <name> or set a default.[/yellow]")
+        raise typer.Exit(1)
+
+    # Discover files
+    files = discover_files(
+        dir_path,
+        recursive=not no_recursive,
+    )
+
+    if not files:
+        console.print(f"[yellow]No processable files found in {directory}[/yellow]")
+        raise typer.Exit(0)
+
+    # Dry run
+    if dry_run:
+        from rich.table import Table as RichTable
+        from ppmlx.memory import format_size
+
+        table = RichTable(title=f"Dry Run: {task_def.name} ({len(files)} files)")
+        table.add_column("File", style="cyan")
+        table.add_column("Size", justify="right")
+        table.add_column("Output", style="green")
+
+        output_dir = Path(output) if output else None
+        for f in files:
+            size_str = format_size(f.stat().st_size)
+
+            if output_dir:
+                out = str(output_dir / (f.stem + task_def.output_suffix))
+            else:
+                out = str(f.parent / (f.stem + task_def.output_suffix))
+
+            rel_path = str(f.relative_to(dir_path))
+            table.add_row(rel_path, size_str, out)
+
+        console.print(table)
+        console.print("\n[dim]Run without --dry-run to process these files.[/dim]")
+        return
+
+    # Resume support
+    checkpoint: CheckpointState | None = None
+    if resume:
+        checkpoint = CheckpointState.load(dir_path)
+        if checkpoint is not None:
+            skipped = sum(1 for f in files if checkpoint.is_completed(str(f)))
+            console.print(f"[green]Resuming: {skipped} files already completed, {len(files) - skipped} remaining.[/green]")
+        else:
+            console.print("[dim]No checkpoint found, starting fresh.[/dim]")
+
+    if checkpoint is None:
+        checkpoint = CheckpointState(
+            task=task_def.name,
+            model=model,
+            directory=str(dir_path),
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        )
+
+    output_dir = Path(output) if output else None
+
+    # Progress tracking with Rich
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        disable=pipe,
+    ) as progress:
+        pending_count = sum(1 for f in files if not checkpoint.is_completed(str(f)))
+        progress_task = progress.add_task(
+            f"Processing ({task_def.name})",
+            total=pending_count,
+        )
+
+        def on_progress(file_path: Path, result: ProcessResult) -> None:
+            status = "[green]ok[/green]" if result.success else f"[red]FAIL: {result.error}[/red]"
+            if not pipe:
+                progress.console.print(
+                    f"  {file_path.name} {status} ({result.duration_secs:.1f}s)",
+                    highlight=False,
+                )
+            progress.advance(progress_task)
+
+        results, stats = process_batch(
+            files,
+            task_def,
+            model,
+            base_url,
+            output_dir=output_dir,
+            parallel=parallel,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            checkpoint=checkpoint,
+            checkpoint_dir=dir_path,
+            progress_callback=on_progress,
+            stdout_mode=pipe,
+        )
+
+    # Pipe mode: print outputs to stdout
+    if pipe:
+        for r in results:
+            if r.success and r.output_text:
+                print(f"--- {r.file_path} ---")
+                print(r.output_text)
+                print()
+        return
+
+    # Summary
+    console.print()
+    if stats.completed > 0 or stats.failed > 0:
+        console.print(Panel(
+            f"[bold]Task:[/bold] {task_def.name}\n"
+            f"[bold]Files:[/bold] {stats.total_files} total, "
+            f"[green]{stats.completed} completed[/green], "
+            f"[red]{stats.failed} failed[/red]"
+            + (f", {stats.skipped} skipped (resumed)" if stats.skipped else "") + "\n"
+            f"[bold]Tokens:[/bold] {stats.total_tokens:,}\n"
+            f"[bold]Duration:[/bold] {stats.total_duration:.1f}s",
+            title="Processing Complete",
+            border_style="green" if stats.failed == 0 else "yellow",
+        ))
+
+    # Clean up checkpoint if everything succeeded
+    if stats.failed == 0:
+        checkpoint.cleanup(dir_path)
+    else:
+        console.print("[yellow]Checkpoint saved. Re-run with --resume to retry failed files.[/yellow]")
+
+    if stats.failed > 0:
+        raise typer.Exit(1)
+
+
+
+
+@config_app.command(name="bench")
 @app.command()
 def bench(
     model: str = typer.Argument(..., help="Model name or alias to benchmark"),
@@ -3666,22 +4745,45 @@ def bench(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Save JSON results to this path"),
     scenarios: Optional[str] = typer.Option(None, "--scenarios", "-s", help="Comma-separated scenario names (simple,complex,long_context)"),
     compare: Optional[str] = typer.Option(None, "--compare", "-c", help="Compare against a baseline JSON file"),
+    speculative: bool = typer.Option(False, "--speculative", help="Run twice (normal + speculative) and compare"),
+    draft_model: Optional[str] = typer.Option(None, "--draft-model", "-d", help="Draft model for speculative decoding"),
+    speculative_tokens: Optional[int] = typer.Option(None, "--speculative-tokens", help="Draft tokens per step (default: 5)"),
     host: str = typer.Option("127.0.0.1", "--host", help="Server host"),
     port: int = typer.Option(6767, "--port", "-p", help="Server port"),
     no_auto_server: bool = typer.Option(False, "--no-auto-server", help="Do not auto-start the server"),
 ):
-    """Run standardized benchmarks against a model."""
+    """Run standardized benchmarks against a model.
+
+    Use --speculative to automatically run normal vs speculative decoding
+    comparison. If no --draft-model is specified, ppmlx will auto-detect
+    one from the same model family.
+    """
     from ppmlx.bench import (
         BenchmarkRunner,
         SCENARIOS,
         print_results,
         print_comparison,
+        print_speculative_comparison,
         save_results,
         load_results,
     )
 
     base_url = f"http://{host}:{port}"
     scenario_list = [s.strip() for s in scenarios.split(",")] if scenarios else None
+
+    # Auto-detect draft model for speculative mode
+    if speculative and not draft_model:
+        try:
+            from ppmlx.models import get_draft_model
+            draft_model = get_draft_model(model)
+            if draft_model:
+                console.print(f"[blue]Auto-detected draft model: {draft_model}[/blue]")
+            else:
+                console.print(f"[red]No draft model known for '{model}'. Use --draft-model to specify one.[/red]")
+                raise typer.Exit(1)
+        except ImportError:
+            console.print("[red]Could not import model pairing module.[/red]")
+            raise typer.Exit(1)
 
     # Check if server is already running
     server_proc = None
@@ -3719,11 +4821,16 @@ def bench(
 
     try:
         try:
+            # Run normal benchmark (or speculative-only if draft_model but not --speculative)
+            normal_draft = None if speculative else draft_model
+            normal_spec_tokens = None if speculative else speculative_tokens
             runner = BenchmarkRunner(
                 model=model,
                 base_url=base_url,
                 runs=runs,
                 scenarios=scenario_list,
+                draft_model=normal_draft,
+                speculative_tokens=normal_spec_tokens,
             )
         except ValueError as exc:
             console.print(f"[red]{exc}[/red]")
@@ -3732,12 +4839,42 @@ def bench(
         print_results(result, console)
 
         # Save results
-        if output:
+        if output and not speculative:
             out_path = save_results(result, Path(output))
             console.print(f"\n[green]Results saved to {out_path}[/green]")
 
-        # Compare against baseline
-        if compare:
+        # Speculative comparison mode: run again with draft model
+        if speculative and draft_model:
+            console.print(f"\n[bold blue]Running speculative decoding with draft={draft_model}...[/bold blue]")
+            try:
+                spec_runner = BenchmarkRunner(
+                    model=model,
+                    base_url=base_url,
+                    runs=runs,
+                    scenarios=scenario_list,
+                    draft_model=draft_model,
+                    speculative_tokens=speculative_tokens,
+                )
+            except ValueError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(1)
+            spec_result = spec_runner.run()
+            print_results(spec_result, console)
+
+            # Show comparison
+            console.print()
+            print_speculative_comparison(result, spec_result, console)
+
+            # Save both results
+            if output:
+                base_path = Path(output)
+                normal_path = save_results(result, base_path.with_stem(base_path.stem + "_normal"))
+                spec_path = save_results(spec_result, base_path.with_stem(base_path.stem + "_speculative"))
+                console.print(f"\n[green]Normal results: {normal_path}[/green]")
+                console.print(f"[green]Speculative results: {spec_path}[/green]")
+
+        # Compare against baseline (non-speculative mode)
+        elif compare:
             compare_path = Path(compare)
             if not compare_path.exists():
                 console.print(f"[red]Baseline file not found: {compare}[/red]")

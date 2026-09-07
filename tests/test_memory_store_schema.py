@@ -101,7 +101,7 @@ def test_enqueue_list_claim_complete_and_fail_extraction_jobs(tmp_path):
     assert claimed["claimed_at"] is not None
     assert store.claim_extraction_job("worker-b") is None
 
-    assert store.complete_extraction_job("job-test-1", result={"atoms": 2}) is True
+    assert store.complete_extraction_job("job-test-1", "worker-a", result={"atoms": 2}) is True
     completed = store.get_extraction_job("job-test-1")
     assert completed is not None
     assert completed["status"] == "completed"
@@ -120,6 +120,26 @@ def test_enqueue_list_claim_complete_and_fail_extraction_jobs(tmp_path):
     assert failed["error"] == "boom"
     assert failed["failed_at"] is not None
     assert failed["invalid_at"] is not None
+
+
+def test_worker_ownership_guards_completion_and_failure(tmp_path):
+    store = MemoryStore(tmp_path / "ownership.db")
+    store.enqueue_extraction_job({"messages": ["owned"]}, job_id="owned-job")
+    assert store.claim_extraction_job("worker-a") is not None
+
+    assert store.complete_extraction_job("owned-job", "worker-b", result={"wrong": True}) is False
+    assert store.fail_extraction_job("owned-job", "wrong", worker_id="worker-b") is False
+    claimed = store.get_extraction_job("owned-job")
+    assert claimed is not None
+    assert claimed["status"] == "claimed"
+    assert claimed["result"] == {}
+
+    assert store.complete_extraction_job("owned-job", "worker-a", result={"ok": True}) is True
+    assert store.fail_extraction_job("owned-job", "boom", worker_id="worker-a") is False
+    completed = store.get_extraction_job("owned-job")
+    assert completed is not None
+    assert completed["status"] == "completed"
+    assert completed["result"] == {"ok": True}
 
 
 def test_renew_extraction_job_claim_refreshes_claimed_at(tmp_path):
@@ -388,8 +408,9 @@ def test_secret_redaction_covers_events_jobs_candidates_and_fts(tmp_path):
         job_id="secret-job",
         metadata={"secret": secret},
     )
+    assert store.claim_extraction_job("secret-worker") is not None
     assert store.complete_extraction_job(
-        "secret-job", result={"api_key": secret, "atoms": [{"token": secret}]},
+        "secret-job", "secret-worker", result={"api_key": secret, "atoms": [{"token": secret}]},
     ) is True
     store.enqueue_extraction_job({"messages": ["safe"]}, job_id="secret-failure-job")
     assert store.fail_extraction_job("secret-failure-job", f"token={secret}") is True

@@ -128,6 +128,8 @@ print(response.choices[0].message.content)
 | `ppmlx config` | View/set configuration | `--hf-token` |
 | `ppmlx auth add/list/status/remove` | Manage provider API keys in the macOS Keychain | `--dry-run`, `--env` |
 
+The local agent, voice, prompt cache, draft decoding, RAG, batch, gateway, API documentation, and automatic model routing commands are experimental. Their interfaces can change before a stable release.
+
 ## Connect Your Tools
 
 Point any OpenAI-compatible client at `http://localhost:6767/v1` with any API key:
@@ -157,7 +159,9 @@ respect_do_not_track = true
 
 ### Strict local tool runtime
 
-The strict Agent IR runtime is opt-in. It supports buffered, streamed tool turns for Claude Code, Codex over Responses HTTP, OpenCode, and Pi. The harness runs each tool. ppmlx does not run a harness tool.
+The strict Agent IR runtime is opt-in. It supports buffered, streamed tool turns for Claude Code, Codex over Responses HTTP, OpenCode, and Pi. It formats and validates tool calls. The client harness runs each tool. The proxy runtime does not execute harness tools.
+
+The explicit `ppmlx agent` command is the optional local agent path. It can execute tools that you provide to it.
 
 ```toml
 [server]

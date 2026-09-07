@@ -53,6 +53,8 @@ class ChatCompletionRequest(BaseModel):
     repetition_penalty: float | None = Field(default=None, ge=0.0, le=2.0)  # ppmlx extension
     think: bool | None = None  # ppmlx extension: force enable/disable thinking
     reasoning_budget: int | None = Field(default=None, ge=1, le=131072)  # ppmlx extension: max reasoning tokens
+    draft_model: str | None = None  # ppmlx extension: speculative decoding
+    speculative_tokens: int | None = None  # ppmlx extension: draft tokens per step
 
     @field_validator("messages")
     @classmethod
@@ -206,3 +208,39 @@ class ErrorDetail(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorDetail
+
+
+# ── Tool calling (agent) ─────────────────────────────────────────────────
+
+class FunctionParameters(BaseModel):
+    """JSON Schema for function parameters."""
+    type: Literal["object"] = "object"
+    properties: dict = Field(default_factory=dict)
+    required: list[str] = Field(default_factory=list)
+
+
+class FunctionDefinition(BaseModel):
+    """OpenAI-compatible function definition."""
+    name: str
+    description: str = ""
+    parameters: FunctionParameters = Field(default_factory=FunctionParameters)
+
+
+class ToolDefinition(BaseModel):
+    """OpenAI-compatible tool definition."""
+    type: Literal["function"] = "function"
+    function: FunctionDefinition
+
+
+class ToolCall(BaseModel):
+    """A tool call parsed from model output."""
+    name: str
+    arguments: str  # JSON string
+
+
+class ToolMessage(BaseModel):
+    """Result of a tool execution, fed back to the model."""
+    role: Literal["tool"] = "tool"
+    name: str
+    tool_call_id: str
+    content: str

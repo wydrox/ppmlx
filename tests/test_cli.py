@@ -360,77 +360,6 @@ def test_serve_help():
     assert "--port" in result.output or "port" in result.output
 
 
-def _make_real_db(tmp_path):
-    """Create a real ppmlx Database for testing logs/stats commands."""
-    import importlib
-    # The db module may have been replaced with a MagicMock; reload the real one.
-    import ppmlx.db
-    importlib.reload(ppmlx.db)
-    db = ppmlx.db.Database(tmp_path / "ppmlx.db")
-    db.init()
-    return db
-
-
-def test_logs_command_empty_db(tmp_path):
-    """logs command with empty DB prints a friendly message and doesn't crash."""
-    from unittest.mock import patch
-
-    db = _make_real_db(tmp_path)
-    db.flush()
-
-    with patch("ppmlx.config.get_ppmlx_dir", return_value=tmp_path), \
-         patch("ppmlx.db.get_db", return_value=db):
-        result = runner.invoke(app, ["logs"])
-    assert result.exit_code == 0
-    assert "No requests" in result.output or "no" in result.output.lower()
-    db.close()
-
-
-def test_stats_command_empty_db(tmp_path):
-    """stats command with empty DB prints a friendly message and doesn't crash."""
-    from unittest.mock import patch
-
-    db = _make_real_db(tmp_path)
-    db.flush()
-
-    with patch("ppmlx.config.get_ppmlx_dir", return_value=tmp_path), \
-         patch("ppmlx.db.get_db", return_value=db):
-        result = runner.invoke(app, ["stats"])
-    assert result.exit_code == 0
-    assert "No requests" in result.output or "no" in result.output.lower()
-    db.close()
-
-
-def test_logs_json_output(tmp_path):
-    """logs --json produces valid JSON output when there are requests."""
-    import json as json_mod
-    from unittest.mock import patch
-
-    db = _make_real_db(tmp_path)
-    db.log_request(
-        request_id="test-1",
-        endpoint="/v1/chat/completions",
-        model_alias="llama3",
-        model_repo="mlx-community/Meta-Llama-3-8B-Instruct-4bit",
-        status="ok",
-        prompt_tokens=10,
-        completion_tokens=20,
-        total_tokens=30,
-        total_duration_ms=500.0,
-        tokens_per_second=40.0,
-        time_to_first_token_ms=50.0,
-    )
-    db.flush()
-
-    with patch("ppmlx.config.get_ppmlx_dir", return_value=tmp_path), \
-         patch("ppmlx.db.get_db", return_value=db):
-        result = runner.invoke(app, ["logs", "--json"])
-    assert result.exit_code == 0
-    parsed = json_mod.loads(result.output)
-    assert isinstance(parsed, list)
-    assert len(parsed) >= 1
-    assert parsed[0]["model_alias"] == "llama3"
-    db.close()
 # ── pull --quantize tests ────────────────────────────────────────────────
 
 
@@ -501,17 +430,6 @@ def test_pull_quantize_invalid_bits():
     assert "Invalid --bits" in result.output
 
 
-def test_quantize_command_rejects_invalid_bits():
-    """quantize --bits 5 fails before the quantization function runs."""
-    _setup_pull_quantize_mocks()
-
-    result = runner.invoke(app, ["quantize", "mistral", "--bits", "5"])
-
-    assert result.exit_code == 1
-    assert "Invalid --bits" in result.output
-    sys.modules["ppmlx.quantize"].quantize.assert_not_called()
-
-
 def test_pull_quantize_keep_original():
     """pull --quantize --keep-original does not remove the original download."""
     _setup_pull_quantize_mocks()
@@ -558,3 +476,220 @@ def test_pull_without_quantize_unchanged():
     assert result.exit_code == 0
     # Quantize should NOT be called
     sys.modules["ppmlx.quantize"].quantize.assert_not_called()
+
+
+# ── logs / stats tests ──────────────────────────────────────────────────
+
+
+def _make_real_db(tmp_path):
+    """Create a real ppmlx Database for testing logs/stats commands."""
+    import importlib
+    # The db module may have been replaced with a MagicMock; reload the real one.
+    import ppmlx.db
+    importlib.reload(ppmlx.db)
+    db = ppmlx.db.Database(tmp_path / "ppmlx.db")
+    db.init()
+    return db
+
+
+def test_logs_command_empty_db(tmp_path):
+    """logs command with empty DB prints a friendly message and doesn't crash."""
+    from unittest.mock import patch
+
+    db = _make_real_db(tmp_path)
+    db.flush()
+
+    with patch("ppmlx.config.get_ppmlx_dir", return_value=tmp_path), \
+         patch("ppmlx.db.get_db", return_value=db):
+        result = runner.invoke(app, ["logs"])
+    assert result.exit_code == 0
+    assert "No requests" in result.output or "no" in result.output.lower()
+    db.close()
+
+
+def test_stats_command_empty_db(tmp_path):
+    """stats command with empty DB prints a friendly message and doesn't crash."""
+    from unittest.mock import patch
+
+    db = _make_real_db(tmp_path)
+    db.flush()
+
+    with patch("ppmlx.config.get_ppmlx_dir", return_value=tmp_path), \
+         patch("ppmlx.db.get_db", return_value=db):
+        result = runner.invoke(app, ["stats"])
+    assert result.exit_code == 0
+    assert "No requests" in result.output or "no" in result.output.lower()
+    db.close()
+
+
+def test_logs_json_output(tmp_path):
+    """logs --json produces valid JSON output when there are requests."""
+    import json as json_mod
+    from unittest.mock import patch
+
+    db = _make_real_db(tmp_path)
+    db.log_request(
+        request_id="test-1",
+        endpoint="/v1/chat/completions",
+        model_alias="llama3",
+        model_repo="mlx-community/Meta-Llama-3-8B-Instruct-4bit",
+        status="ok",
+        prompt_tokens=10,
+        completion_tokens=20,
+        total_tokens=30,
+        total_duration_ms=500.0,
+        tokens_per_second=40.0,
+        time_to_first_token_ms=50.0,
+    )
+    db.flush()
+
+    with patch("ppmlx.config.get_ppmlx_dir", return_value=tmp_path), \
+         patch("ppmlx.db.get_db", return_value=db):
+        result = runner.invoke(app, ["config", "logs", "--json"])
+    assert result.exit_code == 0
+    parsed = json_mod.loads(result.output)
+    assert isinstance(parsed, list)
+    assert len(parsed) >= 1
+    assert parsed[0]["model_alias"] == "llama3"
+    db.close()
+# ── pull --quantize tests ────────────────────────────────────────────────
+
+
+def _setup_pull_quantize_mocks_experimental():
+    """Set up mocks for pull --quantize tests."""
+    from pathlib import Path
+
+    ModelNotFoundError = type("ModelNotFoundError", (Exception,), {})
+    sys.modules["ppmlx.models"].ModelNotFoundError = ModelNotFoundError
+    sys.modules["ppmlx.models"].resolve_alias = MagicMock(
+        return_value="mlx-community/Mistral-7B-Instruct-v0.3"
+    )
+    sys.modules["ppmlx.models"].download_model = MagicMock(
+        return_value=Path("/tmp/mistral-fp")
+    )
+    sys.modules["ppmlx.memory"].check_memory_warning = MagicMock(return_value=None)
+    sys.modules["ppmlx.memory"].get_system_ram_gb = MagicMock(return_value=16.0)
+
+    QuantizationError = type("QuantizationError", (Exception,), {})
+    QuantizeConfig = MagicMock()
+    sys.modules["ppmlx.quantize"].QuantizationError = QuantizationError
+    sys.modules["ppmlx.quantize"].QuantizeConfig = QuantizeConfig
+    sys.modules["ppmlx.quantize"].quantize = MagicMock(
+        return_value=Path("/tmp/mistral-4bit")
+    )
+    return QuantizeConfig, QuantizationError
+
+
+def test_pull_quantize_downloads_and_quantizes_experimental():
+    """pull --quantize downloads the model then runs quantization."""
+    QuantizeConfig, _ = _setup_pull_quantize_mocks()
+
+    with patch("shutil.rmtree") as mock_rmtree:
+        result = runner.invoke(app, ["pull", "mistral", "--quantize"])
+
+    assert result.exit_code == 0
+    # Download should be called
+    sys.modules["ppmlx.models"].download_model.assert_called_once()
+    # Quantize should be called
+    sys.modules["ppmlx.quantize"].quantize.assert_called_once()
+    call_kwargs = sys.modules["ppmlx.quantize"].quantize.call_args
+    # Should pass local_path keyword
+    assert "local_path" in call_kwargs.kwargs or (
+        len(call_kwargs) > 1 and call_kwargs[1].get("local_path") is not None
+    )
+
+
+def test_pull_quantize_with_bits_experimental():
+    """pull --quantize --bits 8 passes the correct bit depth."""
+    QuantizeConfig, _ = _setup_pull_quantize_mocks()
+
+    with patch("shutil.rmtree"):
+        result = runner.invoke(app, ["pull", "mistral", "--quantize", "--bits", "8"])
+
+    assert result.exit_code == 0
+    # QuantizeConfig should have been called with bits=8
+    cfg_call = QuantizeConfig.call_args
+    assert cfg_call is not None
+    assert cfg_call.kwargs.get("bits") == 8 or (cfg_call.args and 8 in cfg_call.args)
+
+
+def test_pull_quantize_invalid_bits_experimental():
+    """pull --quantize --bits 5 fails with a validation error."""
+    _setup_pull_quantize_mocks()
+
+    result = runner.invoke(app, ["pull", "mistral", "--quantize", "--bits", "5"])
+    assert result.exit_code == 1
+    assert "Invalid --bits" in result.output
+
+
+def test_quantize_command_rejects_invalid_bits():
+    """quantize --bits 5 fails before the quantization function runs."""
+    _setup_pull_quantize_mocks()
+
+    result = runner.invoke(app, ["quantize", "mistral", "--bits", "5"])
+
+    assert result.exit_code == 1
+    assert "Invalid --bits" in result.output
+    sys.modules["ppmlx.quantize"].quantize.assert_not_called()
+
+
+def test_pull_quantize_keep_original_experimental():
+    """pull --quantize --keep-original does not remove the original download."""
+    _setup_pull_quantize_mocks()
+
+    with patch("shutil.rmtree") as mock_rmtree:
+        result = runner.invoke(
+            app, ["pull", "mistral", "--quantize", "--keep-original"]
+        )
+
+    assert result.exit_code == 0
+    # rmtree should NOT have been called since we asked to keep original
+    mock_rmtree.assert_not_called()
+
+
+def test_pull_quantize_removes_original_by_default_experimental():
+    """pull --quantize without --keep-original removes the original download."""
+    _setup_pull_quantize_mocks()
+
+    with patch("shutil.rmtree") as mock_rmtree:
+        result = runner.invoke(app, ["pull", "mistral", "--quantize"])
+
+    assert result.exit_code == 0
+    # rmtree should have been called to remove the original
+    mock_rmtree.assert_called_once()
+
+
+def test_pull_quantize_failure_experimental():
+    """pull --quantize exits with 1 when quantization fails."""
+    _, QuantizationError = _setup_pull_quantize_mocks()
+    sys.modules["ppmlx.quantize"].quantize = MagicMock(
+        side_effect=QuantizationError("conversion failed")
+    )
+
+    result = runner.invoke(app, ["pull", "mistral", "--quantize"])
+    assert result.exit_code == 1
+    assert "Quantization failed" in result.output
+
+
+def test_pull_without_quantize_unchanged_experimental():
+    """pull without --quantize still works as before (no quantization)."""
+    _setup_pull_quantize_mocks()
+
+    result = runner.invoke(app, ["pull", "mistral"])
+    assert result.exit_code == 0
+    # Quantize should NOT be called
+    sys.modules["ppmlx.quantize"].quantize.assert_not_called()
+
+
+def test_pull_quantize_keeps_advanced_options_after_download(tmp_path):
+    config_cls, _ = _setup_pull_quantize_mocks()
+    result = runner.invoke(app, [
+        "pull", "mistral", "--quantize", "--keep-original",
+        "--group-size", "32", "--output", str(tmp_path / "quantized"),
+        "--upload-repo", "example/quantized",
+    ])
+    assert result.exit_code == 0, result.output
+    options = config_cls.call_args.kwargs
+    assert options["group_size"] == 32
+    assert options["output_path"] == tmp_path / "quantized"
+    assert options["upload_repo"] == "example/quantized"
