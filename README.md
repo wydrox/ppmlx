@@ -1,3 +1,5 @@
+
+
 # ppmlx
 
 **Run LLMs on your Mac.** OpenAI-compatible API powered by Apple Silicon.
@@ -147,7 +149,7 @@ Optional. `~/.ppmlx/config.toml`:
 host = "127.0.0.1"
 port = 6767
 
-[defaults]
+[generation]
 temperature = 0.7
 max_tokens = 2048
 
